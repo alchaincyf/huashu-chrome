@@ -270,21 +270,37 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
 }
 
 // 审计日志里不留敏感明文：输入的文本可能是密码、验证码
-function redact(params) {
-  if (!params || typeof params !== 'object') return params;
-  const out = { ...params };
-  if (typeof out.text === 'string') out.text = `<${out.text.length}字>`;
-  // fill 把一整张表的内容放在 fields 里——密码、验证码、身份证号全在这儿。
-  // 只脱敏 out.text 的话，最敏感的那条路恰好是敞开的。
-  if (Array.isArray(out.fields)) {
-    out.fields = out.fields.map((f) => ({
-      ...f,
-      text: typeof f.text === 'string' ? `<${f.text.length}字>` : f.text,
-      value: typeof f.value === 'string' ? `<${f.value.length}字>` : f.value,
-    }));
+// 用户敲进页面的东西一律不进日志。
+//
+// 这里必须**递归**，而且是踩出来的：上一版按顶层字段逐个点名
+//（params.text、params.fields[].text），而 act 把动作放在 params.steps[] 里，
+// 于是整条穿过去了——实测审计里躺着 5 条疑似密码、27 个手机号的明文。
+// 更糟的是 MCP 的说明文字正在教 agent「登录、多步表单、向导——全都一次说完」，
+// 也就是说产品亲手把最敏感的输入引到了唯一没脱敏的那条路上。
+//
+// 按键名脱敏而不是按路径点名：新增一个带 text 的命令是迟早的事，
+// 而下一个人不会记得回来改这里。宁可把「深圳」这种无害的 value 也脱成 <2字>，
+// 也不能再漏一条密码——审计要的是「谁在什么时候做了什么」，不是内容本身。
+const SECRET_KEYS = new Set(['text', 'value', 'password', 'token', 'secret', 'code']);
+
+function scrub(v, depth = 0) {
+  if (v == null || depth > 8) return v;
+  if (Array.isArray(v)) return v.map((x) => scrub(x, depth + 1));
+  if (typeof v !== 'object') return v;
+  const out = {};
+  for (const [k, val] of Object.entries(v)) {
+    if (typeof val === 'string' && SECRET_KEYS.has(k)) out[k] = `<${val.length}字>`;
+    // upload 的 base64 是整个文件，进日志等于把文件抄一遍
+    else if (k === 'base64' && typeof val === 'string') out[k] = `<${Math.round(val.length * 0.75 / 1024)}KB>`;
+    else if (k === 'expr' && typeof val === 'string' && val.length > 200) out[k] = val.slice(0, 200) + '…';
+    else out[k] = scrub(val, depth + 1);
   }
-  // upload 的 base64 是整个文件，进日志等于把文件抄一遍
-  if (typeof out.base64 === 'string') out.base64 = `<${Math.round(out.base64.length * 0.75 / 1024)}KB>`;
-  if (typeof out.expr === 'string' && out.expr.length > 200) out.expr = out.expr.slice(0, 200) + '…';
   return out;
+}
+
+// 导出只为让 `npm test` 直接跑到它。这段的失效是静默的——日志照写、
+// 命令照跑，只有事后翻日志才会发现密码在里面躺了一个月。
+export function redact(params) {
+  if (!params || typeof params !== 'object') return params;
+  return scrub(params);
 }

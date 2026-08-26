@@ -1,6 +1,6 @@
 {
   "name": "huashu-chrome",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "让任何 AI agent 操控你自己的 Chrome——带着全部登录态。MCP + Chrome 扩展，Claude Code / Codex / Cursor / Gemini CLI 通用。",
   "type": "module",
   "bin": {
@@ -19,7 +19,7 @@
     "mcp": "node src/cli.js mcp",
     "bridge": "node src/cli.js bridge --foreground",
     "doctor": "node src/cli.js doctor",
-    "test": "node --test test/protocol.test.js test/mcp.test.js test/redact.test.js",
+    "test": "node --test test/protocol.test.js test/mcp.test.js test/redact.test.js test/audit-redact.test.js",
     "test:live": "node --test test/scenarios.test.js"
   },
   "dependencies": {
