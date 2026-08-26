@@ -166,7 +166,12 @@
       const t = el.tagName === 'INPUT' ? (el.type || 'text').toLowerCase() : '';
       if (t && t !== 'text') bits.push(`type: ${t}`);
       if (el.required || el.getAttribute('aria-required') === 'true') bits.push('required');
-      bits.push(v ? `value: "${v.length > 40 ? v.slice(0, 40) + '…' : v}"` : 'empty');
+      // 密码框只报位数。协议文档一直写着「type: password 的输入框不回显值」，
+      // 但代码里回显了——快照是 agent 每一步都会读的东西，泄露面比效果证据还大。
+      // 位数仍然有用：agent 能据此判断「填进去了没有」。
+      if (!v) bits.push('empty');
+      else if (isSecretField(el)) bits.push(`value: <${v.length} 位>`);
+      else bits.push(`value: "${v.length > 40 ? v.slice(0, 40) + '…' : v}"`);
     }
     if (role === 'combobox' && el.tagName === 'SELECT') {
       bits.push(`selected: "${el.options[el.selectedIndex]?.text || ''}"`);
@@ -231,20 +236,55 @@
   }
 
   function buildSnapshot() {
+    // 编号跨快照保持不变 —— 老元素拿回它上一轮的号。
+    //
+    // 原先每次都从 e1 重新数。后果是 agent 上一轮建立的全部认知
+    //（「提交按钮是 e12」）在下一次 snapshot 之后立刻作废，只能把整份快照
+    // 重读一遍；页面上插进来一个元素，后面所有编号还会整体偏移，
+    // 于是「变了什么」这个问题它根本没法回答，只能全量重新理解。
+    //
+    // 而实测同一页面连续两次快照，DOM 节点有 **100%** 是同一个对象
+    //（GitHub 仓库页 164 个元素，一个都没换）——编号会变纯粹是我们
+    // 自己重新数了一遍造成的，跟页面没关系。
+    const prevRef = new Map();
+    for (const [r, rec] of refMap) {
+      if (rec.el?.isConnected) prevRef.set(rec.el, r);
+    }
+
     refMap = new Map();
     snapshotId = 's' + ++snapshotSeq;
     const keep = collectCandidates();
 
-    const lines = [];
-    let n = 0;
+    // 先定编号：老元素认领旧号，剩下的空号留给新元素，避免新元素抢了
+    // 某个老元素的号——那会让 agent 手里的 ref 悄悄指向别的东西。
+    const rows = [];
+    const taken = new Set();
     for (const { el } of keep) {
       const role = roleOf(el);
       const name = accessibleName(el);
       if (!name && role === 'button') continue; // 无名按钮多半是装饰性图标，滤掉省 token
-      const ref = 'e' + ++n;
-      refMap.set(ref, el);
+      const ref = prevRef.get(el) || null;
+      if (ref) taken.add(ref);
+      rows.push({ el, role, name, ref });
+      if (rows.length >= 300) break;
+    }
+    let next = 0;
+    for (const row of rows) {
+      if (row.ref) continue;
+      do { next += 1; } while (taken.has('e' + next));
+      row.ref = 'e' + next;
+      taken.add(row.ref);
+    }
+
+    const lines = [];
+    let n = 0;
+    for (const { el, role, name, ref } of rows) {
+      n += 1;
+      // 存下当时的 role 和名字：ref 现在能跨快照使用，就必须防住
+      // 「元素还在、语义换了」——列表刷新后复用同一个 DOM 节点，
+      // [e5] 的「删除」很可能已经是另一条记录的删除按钮了。resolve 会比对。
+      refMap.set(ref, { el, role, name });
       lines.push(`[${ref}]  ${role.padEnd(9)} "${name}"${stateOf(el, role)}`);
-      if (n >= 300) break;
     }
 
     const excerpt = mainText().slice(0, 1500);
@@ -441,9 +481,20 @@
     if (p.snapshotId && p.snapshotId !== snapshotId) {
       throw fail('STALE_SNAPSHOT', `快照 ${p.snapshotId} 已作废（当前 ${snapshotId}）。重新 snapshot 再操作。`);
     }
-    const el = refMap.get(p.ref);
-    if (!el) throw fail('REF_NOT_FOUND', `快照里没有 ${p.ref}`);
+    const rec = refMap.get(p.ref);
+    if (!rec) throw fail('REF_NOT_FOUND', `快照里没有 ${p.ref}`);
+    const el = rec.el;
     if (!el.isConnected) throw fail('REF_NOT_FOUND', `${p.ref} 已从页面移除，重新 snapshot`);
+    // 编号现在跨快照保持不变，于是多了一种以前不可能出现的危险：元素还在原地，
+    // 但它承载的东西换了。列表刷新时框架常常复用同一批 DOM 节点，
+    // [e5] 的「删除」按钮转眼就是另一条记录的删除按钮了——而 agent 手里
+    // 那个 e5 是它上一轮记住的。所以比对当时的名字，对不上就拦住。
+    const now = accessibleName(el);
+    if (rec.name && now !== rec.name) {
+      throw fail('STALE_SNAPSHOT',
+        `${p.ref} 现在是「${now}」，不再是你看到的那个「${rec.name}」——`
+        + '这一片内容被换掉了。重新 snapshot 再操作。');
+    }
     if (!isVisible(el)) throw fail('NOT_INTERACTABLE', `${p.ref} 当前不可见`);
     if (el.disabled) throw fail('NOT_INTERACTABLE', `${p.ref} 处于 disabled 状态`);
     return el;
@@ -463,6 +514,21 @@
   //
   // 最后仍然调 el.click()：链接跳转、复选框勾选这些「激活行为」由它触发最稳，
   // 合成的 MouseEvent('click') 虽然规范上也会触发，但走原生方法少一层不确定。
+  // 回执里印**实际命中的那个元素**，而不是只印 agent 传来的编号。
+  //
+  // 「已点击 [e26]」这句话是拿参数回显的，它永远为真、也永远不提供信息——
+  // 定位错了（编号复用、selector 匹配到了另一个、find 命中了同名的另一个）
+  // 从返回里一个字都看不出来，而下游看到的是「成功」。
+  // 印上 role 和名字之后，点错在下一轮就自己暴露出来，代价是十来个 token。
+  const describeHit = (el) => {
+    try {
+      const name = accessibleName(el);
+      return `${roleOf(el)}${name ? ` "${name.slice(0, 40)}"` : ''}`;
+    } catch {
+      return '';
+    }
+  };
+
   function realClick(el) {
     const r = el.getBoundingClientRect();
     const x = r.left + r.width / 2;
@@ -586,6 +652,51 @@
     return '';
   }
 
+  // ---------- eval 期间的支付防线 ----------
+  //
+  // 支付确认的闸门装在命令层（performCore 里），而 eval 不走那条路——
+  // 它用 executeScript 直接在页面世界求值。实测一句
+  // `document.getElementById('pay').click()` 就把确认整个绕过去了，
+  // 而 eval 是使用频次第三高的命令。一个能被一句话绕过的确认等于没有确认。
+  //
+  // 所以在 eval 执行期间，于 document 的捕获阶段架一道拦截：合成的点击
+  // （isTrusted=false）如果打在支付按钮上，就地拦下。捕获阶段在事件到达
+  // 目标之前，stopImmediatePropagation 之后页面自己的 onclick 不会跑。
+  //
+  // **只在 eval 执行期间架**，这一点很要紧：常驻的话，页面框架自己转发的
+  // 合成点击也会被拦——用户正在自己的浏览器里买东西，支付按钮突然点不动，
+  // 那是比漏拦更糟的故障。
+  //
+  // 拦得住的是同步的 click 那条路。form.submit()、直接 fetch 下单接口、
+  // location 跳转仍然绕得过去——eval 本质上是把整个页面的执行权交出去，
+  // 不可能全堵。这道防线是提高门槛，不是保证。协议文档里写明了这一点。
+  let payGuard = null;
+  let payBlocked = null;
+
+  function armPayGuard() {
+    if (payGuard) return;
+    payBlocked = null;
+    payGuard = (e) => {
+      if (e.isTrusted) return;                     // 真人点的，放行
+      const el = e.target?.closest?.('button,a,[role="button"],input,[onclick]');
+      if (!el) return;
+      const pay = payInfo(el);
+      if (!pay) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      payBlocked = pay;
+    };
+    document.addEventListener('click', payGuard, true);
+  }
+
+  function disarmPayGuard() {
+    if (payGuard) document.removeEventListener('click', payGuard, true);
+    payGuard = null;
+    const was = payBlocked;
+    payBlocked = null;
+    return was;
+  }
+
   // 返回 null 或 { label, amount }。amount 只是弹窗里给人看的证据，
   // 取不到不影响判定。
   function payInfo(el) {
@@ -600,7 +711,12 @@
 
   async function doLocate(p) {
     // fill 这类没有单一目标的操作只要基线，不要定位
-    if (p.baselineOnly) { lastTarget = null; return { baseline: await baselineOf(null) }; }
+    if (p.baselineOnly) {
+      lastTarget = null;
+      // fill 把要填的字段放在 fields 里，逐个采下基线——见 baselineOf 里的说明
+      const refs = Array.isArray(p.fields) ? p.fields.map((f) => f.ref).filter(Boolean) : [];
+      return { baseline: await baselineOf(null, refs) };
+    }
     const el = resolve(p);
     lastTarget = el;
     el.scrollIntoView({ block: 'center', behavior: 'instant' });
@@ -647,13 +763,32 @@
     return a && a !== document.body ? `${a.tagName.toLowerCase()}${a.id ? '#' + a.id : ''}${a.name ? `[name=${a.name}]` : ''}` : '';
   };
 
+  // 密码、验证码这类字段的**值**绝不能进效果证据。
+  //
+  // fill 的回执早就脱敏了（下面的 receipt），但 targetState 这条路一直敞着：
+  // 往密码框 type 一次，返回里就是「value 空 → 明文密码」，而这句话是要写进
+  // agent 上下文的——上下文留痕、撤不回来，正是凭据隐去那一节的出发点。
+  // 和审计日志漏掉 act.steps 是同一个模式：脱敏做在一条路上，另一条敞着。
+  //
+  // 换成长度就两全了：既不泄露，又照样能判断「值到底变没变」。
+  const SECRET_FIELD = /pass|pwd|secret|token|cvv|captcha|verif|code|otp|密码|验证码/i;
+  const isSecretField = (el) => {
+    if ((el.type || '').toLowerCase() === 'password') return true;
+    try {
+      return SECRET_FIELD.test(`${el.name || ''} ${el.id || ''} ${el.getAttribute('autocomplete') || ''}`);
+    } catch {
+      return false;
+    }
+  };
+
   function targetState(el) {
     if (!el || !el.isConnected) return { gone: true };
+    const raw = String(el.value ?? '');
     return {
       expanded: el.getAttribute('aria-expanded') ?? '',
       checked: String(el.checked ?? el.getAttribute('aria-checked') ?? ''),
       selected: el.getAttribute('aria-selected') ?? '',
-      value: String(el.value ?? '').slice(0, 120),
+      value: isSecretField(el) ? (raw ? `<${raw.length} 位>` : '') : raw.slice(0, 120),
       cls: String(el.className?.baseVal ?? el.className ?? '').slice(0, 200),
     };
   }
@@ -711,7 +846,7 @@
   //
   // 代价是每个写操作多 60ms。换来的是「报告可信」，值这个价——
   // 何况早停之后总耗时通常还是比原来固定的 400ms 短。
-  async function baselineOf(el) {
+  async function baselineOf(el, fieldRefs = []) {
     const s1 = cheapStats();
     await sleep(60);
     const s2 = cheapStats();
@@ -724,6 +859,16 @@
       scope: box ? { kids: box.getElementsByTagName('*').length, len: renderedLen(box) } : null,
       alerts: collectAlerts(),
       target: targetState(el),
+      // fill 没有单一目标，但它有一组字段——把每个字段此刻的状态收下来。
+      //
+      // 不收的话，fill 的效果证据只剩全局那几个指标，而填表根本不改变 DOM 结构，
+      // 于是每次 fill 都报「没有可归因于这次操作的变化」，哪怕值已经填进去了；
+      // 更难看的是它还会把 fill 自己造成的焦点转移说成「这个页面本身在持续变化」。
+      // 填表是浏览器自动化最高频的场景，而这条路上的证据是结构性缺失的。
+      fields: fieldRefs.map((r) => {
+        const rec = refMap.get(r);
+        return rec ? { ref: r, ...targetState(rec.el) } : null;
+      }).filter(Boolean),
     };
   }
 
@@ -744,7 +889,7 @@
     // 反而会把这个信号抹掉。
     let el = null;
     try {
-      el = p.ref ? refMap.get(p.ref)
+      el = p.ref ? refMap.get(p.ref)?.el
         : p.selector ? document.querySelector(p.selector)
         : lastTarget;
     } catch {
@@ -776,6 +921,19 @@
       if (bt[k] === undefined || bt[k] === nt[k]) continue;
       if (k === 'cls') { strong.push('目标 class 变了'); continue; }
       strong.push(`${k} ${bt[k] || '空'} → ${nt[k] || '空'}`);
+    }
+
+    // ①b 各字段的状态。fill 走这条：它没有单一目标，但填进去的每个值都是证据，
+    // 而且是强证据——value 从空变成「花叔」不可能是页面自己动出来的。
+    for (const bf of (base.fields || [])) {
+      const rec = refMap.get(bf.ref);
+      if (!rec) continue;
+      const nf = targetState(rec.el);
+      if (nf.gone && !bf.gone) { strong.push(`${bf.ref} 已从页面移除`); continue; }
+      for (const k of ['value', 'checked', 'selected']) {
+        if (bf[k] === undefined || bf[k] === nf[k]) continue;
+        strong.push(`${bf.ref} ${k} ${bf[k] || '空'} → ${nf[k] || '空'}`);
+      }
     }
 
     // ② 新增的页面提示。表单流程最主要的失败模式就是校验错误，
@@ -865,7 +1023,7 @@
     realClick(el);
     const retry = await retryCombobox(el);
     invalidate();
-    return { data: { note: `已点击 [${p.ref || p.selector}]${retry}` } };
+    return { data: { note: `已点击 [${p.ref || p.selector}] ${describeHit(el)}${retry}` } };
   }
 
   // 自定义下拉「点了没反应」是最常见的一类卡住，而且完全静默：
@@ -924,7 +1082,7 @@
       el.closest('form')?.requestSubmit?.();
     }
     invalidate();
-    return { data: { note: `已在 [${p.ref || p.selector}] 输入${p.submit ? '并回车' : ''}` } };
+    return { data: { note: `已在 [${p.ref || p.selector}] ${describeHit(el)} 输入${p.submit ? '并回车' : ''}` } };
   }
 
   function doSelect(p) {
@@ -1037,7 +1195,9 @@
 
   function applySelect(el, value) {
     const opt = [...el.options].find((o) => o.value === value || o.text.trim() === value);
-    if (!opt) throw fail('REF_NOT_FOUND', `没有这个选项：${value}。可选：${[...el.options].map((o) => o.text).join(' | ')}`);
+    // 元素找得好好的，是这个**选项值**不存在——补救动作是从下面列出的可选项里
+    // 换一个，不是重新 snapshot。所以不能用 REF_NOT_FOUND。
+    if (!opt) throw fail('NO_MATCH', `没有这个选项：${value}。可选：${[...el.options].map((o) => o.text).join(' | ')}`);
     el.value = opt.value;
     el.dispatchEvent(new Event('change', { bubbles: true }));
   }
@@ -1283,6 +1443,7 @@
     let last = -1, stable = 0, grew = false;
     const started = height();
     for (let i = 0; i < times; i++) {
+      const before = height();
       window.scrollTo(0, top ? 0 : document.body.scrollHeight);
       for (const b of boxes) b.scrollTop = top ? 0 : b.scrollHeight;
 
@@ -1303,7 +1464,17 @@
       document.body.dispatchEvent(wheel());
       window.dispatchEvent(new Event('scroll'));
       document.dispatchEvent(new Event('scroll'));
-      await sleep(p.wait || 700);
+      // 等这一轮的内容落地。原先是无条件 sleep(700)——而懒加载多数在
+      // 100–300ms 内就补货了，后面那几百毫秒纯属白等，滚十次就是好几秒。
+      // 改成轮询：高度一长就立刻进下一轮，只有真没动静时才等满预算。
+      // 这和 settle 采效果证据是同一个思路，「更快」和「更稳」在这里是一件事：
+      // 页面慢的时候它等得比原来久（到底判定更准），快的时候它早走。
+      const budget = p.wait || 700;
+      const deadline = Date.now() + budget;
+      while (Date.now() < deadline) {
+        await sleep(80);
+        if (height() > before) break;   // 长出来了就说明这一轮的货已经补上
+      }
       const h = height();
       if (h > started) grew = true;
       // 连续两轮没长才算到底：懒加载常有一轮的延迟，只判一次会提前收手
@@ -1457,7 +1628,7 @@
             const selectors = [];
             (msg.targets || []).forEach((t, i) => {
               let el = null;
-              try { el = refMap.get(t) || document.querySelector(t); } catch { /* 不是合法 selector */ }
+              try { el = refMap.get(t)?.el || document.querySelector(t); } catch { /* 不是合法 selector */ }
               if (!el) return;
               el.setAttribute('data-hc-mark', String(i));
               selectors.push(`[data-hc-mark="${i}"]`);
@@ -1467,6 +1638,9 @@
           case 'unmarkTargets':
             document.querySelectorAll('[data-hc-mark]').forEach((el) => el.removeAttribute('data-hc-mark'));
             return sendResponse({ data: { ok: true } });
+          case 'payGuard':
+            if (msg.on) { armPayGuard(); return sendResponse({ data: { armed: true } }); }
+            return sendResponse({ data: { blocked: disarmPayGuard() } });
           case 'effect': return sendResponse({ data: doEffect(msg) });
           case 'click': return sendResponse(await doClick(msg));
           case 'type': return sendResponse(doType(msg));

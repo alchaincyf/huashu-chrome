@@ -387,6 +387,44 @@ test('删除这类敏感动作不弹支付确认', async () => {
   assert.doesNotMatch(r.text, /确认这笔支付/);
 });
 
+// eval 不走 performCore，所以命令层那道支付闸门管不到它。
+// 实测过：一句 `document.getElementById('payNow').click()` 就把确认整个绕开，
+// 而 eval 是使用频次第三高的命令——一个能被一句话绕过的确认等于没有确认。
+// 现在求值期间会在页面上架一道捕获阶段的拦截。
+
+test('eval 里点支付按钮，同样被拦下', async () => {
+  await go();
+  await payFast();
+  await assert.rejects(
+    () => c.call('eval', { expr: 'document.getElementById("payNow").click()' }),
+    /试图点击支付按钮/);
+  assert.equal(await val('document.getElementById("payNowOut").textContent'), '"未支付"');
+});
+
+test('eval 派发合成 MouseEvent 也绕不过去', async () => {
+  await go();
+  await payFast();
+  // .click() 只是最直白的一种写法，换成手工派发事件同样要拦住，
+  // 否则这道防线只挡住了不会绕路的攻击者
+  await assert.rejects(
+    () => c.call('eval', {
+      expr: 'document.getElementById("payAmount").dispatchEvent(new MouseEvent("click",{bubbles:true}))',
+    }),
+    /试图点击支付按钮/);
+  assert.equal(await val('document.getElementById("payAmountOut").textContent'), '"未支付"');
+});
+
+test('这道防线不碰普通的 eval', async () => {
+  await go();
+  await payFast();
+  // 防线只在 eval 执行期间生效、只认支付按钮。要是它把普通点击也拦了，
+  // eval 这个高频命令就废了——那比漏拦更糟
+  const r = await c.call('eval', { expr: 'document.title' });
+  assert.match(r.text, /靶场/);
+  await c.call('eval', { expr: 'document.getElementById("plainOk").click()' });
+  assert.equal(await val('document.getElementById("plainOkOut").textContent'), '"已确认"');
+});
+
 // ---------- v0.3：人工介入 ----------
 
 test('ask 的 until 判据命中时自动收工，不用用户点', async () => {
@@ -581,6 +619,114 @@ test('点击让隐藏区块显示出来，算「有效果」', async () => {
   const r = await c.call('click', { find: { role: 'button', name: '开始填写' } });
   assert.match(r.text, /效果：/);
   assert.doesNotMatch(r.text, /完全没有反应/);
+});
+
+// ---------- v0.6：返回里的话要对得上真实发生的事 ----------
+
+test('fill 的效果证据落在字段上，不再谎报「没有反应」', async () => {
+  await go();
+  const snap = await c.call('snapshot', {});
+  const ref = (name) => {
+    const m = new RegExp(`\\[(e\\d+)\\]\\s+\\S+\\s+"${name}"`).exec(snap.text);
+    assert.ok(m, `快照里找不到「${name}」`);
+    return m[1];
+  };
+  const r = await c.call('fill', {
+    snapshotId: snap.snapshotId,
+    fields: [{ ref: ref('姓名'), text: '花叔' }, { ref: ref('邮箱'), text: 'a@b.com' }],
+  });
+  // fill 没有单一目标，效果证据原先只剩全局指标，而填表根本不改变 DOM 结构——
+  // 于是每次都报「没有可归因于这次操作的变化」，还把自己造成的焦点转移
+  // 说成「这个页面本身在持续变化」。明明填进去了，却告诉 agent 没生效。
+  // 只看快照之前那段（效果证据），否则会撞上靶场自己写着的「页面完全没有反应」
+  const head = r.text.split('\n# ')[0];
+  assert.doesNotMatch(head, /没有可归因于这次操作的变化/);
+  assert.doesNotMatch(head, /完全没有反应/);
+  assert.match(head, /value 空 → 花叔/, `没报出字段的值变化：\n${head}`);
+});
+
+test('回执印出实际命中的元素，点错了下一轮就自曝', async () => {
+  await go();
+  // 「已点击 [e26]」是拿参数回显的，永远为真也永远不提供信息：
+  // 定位错了（编号复用、selector 匹配到别的、find 命中同名的另一个）
+  // 从返回里一个字都看不出来，而下游读到的是「成功」。
+  const r = await c.call('click', { selector: '#clickOnly' });
+  assert.match(r.text, /button\s+"点我"/);
+});
+
+test('密码框的值不进效果证据 —— 那句话是要写进上下文的', async () => {
+  await go();
+  // 密码区在靶场很靠下，而快照只收视口上下几屏内的元素，先滚过去
+  await c.call('scroll', { to: 'bottom', times: 2 });
+  const snap = await c.call('snapshot', {});
+  const m = /\[(e\d+)\]\s+\S+\s+"密码"/.exec(snap.text);
+  assert.ok(m, `快照里找不到密码框：\n${snap.text.slice(0, 600)}`);
+  const secret = 'SuperSecret123!';
+  const r = await c.call('type', { snapshotId: snap.snapshotId, ref: m[1], text: secret });
+  // fill 的回执早就脱敏了，但 targetState 这条路一直敞着：
+  // 往密码框 type 一次，效果证据就是「value 空 → 明文密码」。
+  // 和审计日志漏掉 act.steps 是同一个模式——脱敏做在一条路上，另一条敞着。
+  assert.doesNotMatch(r.text, /SuperSecret123/, '密码原文进了返回，而上下文是留痕的');
+  assert.match(r.text, /\d+ 位/, '应当只报位数');
+});
+
+// ---------- v0.6：编号跨快照稳定 ----------
+//
+// 原先每次 snapshot 都从 e1 重新数，于是 agent 上一轮建立的认知
+//（「提交按钮是 e12」）在下一次快照之后立刻作废，只能把整份快照重读一遍；
+// 页面上插进来一个元素，后面所有编号还会整体偏移。
+// 而实测同一页面连续两次快照，DOM 节点 100% 是同一个对象——编号会变
+// 纯粹是我们自己重新数了一遍造成的。
+
+const refsOf = (text) =>
+  Object.fromEntries([...text.matchAll(/^\[(e\d+)\]\s+\S+\s+"([^"]*)"/gm)].map((m) => [m[2], m[1]]));
+
+test('页面没换的情况下，编号跨快照保持不变', async () => {
+  await go();
+  const a = refsOf((await c.call('snapshot', {})).text);
+  const b = refsOf((await c.call('snapshot', {})).text);
+  const names = Object.keys(a).filter((n) => b[n]);
+  assert.ok(names.length > 5, `可比对的元素太少（${names.length}），这条测试没意义`);
+  const moved = names.filter((n) => a[n] !== b[n]);
+  assert.equal(moved.length, 0, `这些元素的编号变了：${moved.map((n) => `${n}: ${a[n]}→${b[n]}`).join('、')}`);
+});
+
+test('页面长出新元素，老元素的编号不受牵连', async () => {
+  await flow();
+  const a = refsOf((await c.call('snapshot', {})).text);
+  // 点「开始填写」会让一整块表单出现——老元素的编号不该因此偏移
+  await c.call('click', { find: { role: 'button', name: '开始填写' } });
+  const b = refsOf((await c.call('snapshot', {})).text);
+  assert.ok(Object.keys(b).length > Object.keys(a).length, '表单没出现，这条测试没意义');
+  for (const [name, ref] of Object.entries(a)) {
+    if (b[name]) assert.equal(b[name], ref, `「${name}」的编号从 ${ref} 变成了 ${b[name]}`);
+  }
+});
+
+test('新元素不会抢走老元素的编号', async () => {
+  await flow();
+  const a = refsOf((await c.call('snapshot', {})).text);
+  await c.call('click', { find: { role: 'button', name: '开始填写' } });
+  const b = refsOf((await c.call('snapshot', {})).text);
+  // 反过来看：第二份快照里，任何一个编号都不该同时属于两个不同的名字
+  const byRef = {};
+  for (const [name, ref] of Object.entries(b)) {
+    assert.ok(!byRef[ref], `${ref} 同时是「${byRef[ref]}」和「${name}」`);
+    byRef[ref] = name;
+  }
+});
+
+test('元素还在但内容被换掉时，旧编号会被拦住', async () => {
+  await go();
+  const snap = await c.call('snapshot', {});
+  const ref = refsOf(snap.text)['点我'];
+  assert.ok(ref, '快照里没找到「点我」');
+  // 编号能跨快照用了，就多出一种以前不可能有的危险：元素还在原地，
+  // 但它承载的东西换了。列表刷新时框架常常复用同一批 DOM 节点。
+  await c.call('eval', { expr: 'document.getElementById("clickOnly").textContent = "立即删除全部"' });
+  await assert.rejects(
+    () => c.call('click', { ref }),
+    /不再是你看到的那个/);
 });
 
 // ---------- v0.4：凭据隐去 ----------

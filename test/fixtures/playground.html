@@ -148,6 +148,17 @@
   <br><small>find 在这里必须报错列候选，而不是替用户挑一个；「删除全部」不该被「删除」误伤</small>
 </section>
 
+<!-- 14. 密码框：值不能出现在任何返回里 -->
+<section>
+  <h2>14. 密码框</h2>
+  <form onsubmit="return false">
+    <label>用户名 <input type="text" id="loginUser" name="username"></label><br><br>
+    <label>密码 <input type="password" id="loginPw" name="password"></label>
+    <button type="submit">登录</button>
+  </form>
+  <small>效果证据里只能出现位数，绝不能出现内容——那句话是要写进 agent 上下文的</small>
+</section>
+
 <!-- 13. 支付闸门：花钱的按钮要人点头，别的不烦人 -->
 <section>
   <h2>13. 花钱的按钮</h2>

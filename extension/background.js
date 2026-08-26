@@ -626,7 +626,9 @@ async function performCore(id, cmd, p, { blockSensitive = false } = {}, ctx) {
   // 顺带把效果基线采回来。没有 ref 的操作（fill、无 ref 的 key）只采基线。
   const hasTarget = !!(params.ref || params.selector || params.find);
   const loc = await toContent(id,
-    hasTarget ? { __hc: 'locate', ...params } : { __hc: 'locate', baselineOnly: true },
+    // fields 要带过去：fill 没有单一目标，它的效果证据靠逐个字段的状态，
+    // 不然填表这条最高频的路上永远报「页面没有反应」
+    hasTarget ? { __hc: 'locate', ...params } : { __hc: 'locate', baselineOnly: true, fields: params.fields },
     frameId);
 
   // iframe 内元素的坐标是相对该框架视口的，而 CDP 打的是顶层视口坐标；
@@ -985,7 +987,10 @@ const HANDLERS = {
 
     if (!result) throw err('INTERNAL', '读不到网络记录——页面可能禁止了脚本注入');
     if (result.one) {
-      if (result.missing) throw err('REF_NOT_FOUND', `没有匹配 "${p.body}" 的第 ${p.index || 0} 条请求（共 ${result.total} 条）。先不带 body 参数调一次看看有哪些接口。`);
+      // 不是 REF_NOT_FOUND：那个码的意思是「快照失效了，重新 snapshot」，
+      // 而这里跟 DOM 毫无关系，重新快照一百次也变不出这条请求来。
+      // 错的错误码会把 agent 引去做无用功。
+      if (result.missing) throw err('NO_MATCH', `没有匹配 "${p.body}" 的第 ${p.index || 0} 条请求（共 ${result.total} 条）。先不带 body 参数调一次看看有哪些接口。`);
       return { untrusted: true, meta: `url="${result.url}"`, text: `${result.status} ${result.url}\n\n${result.body}` };
     }
     const rows = result.list;
@@ -1055,23 +1060,49 @@ const HANDLERS = {
   // 但那是真实且可解释的边界，不再是「哪儿都不能用」。
   async eval(p, tabId) {
     const id = await resolveTab(tabId);
-    const [{ result } = {}] = await chrome.scripting.executeScript({
-      target: { tabId: id },
-      world: 'MAIN',
-      func: (src, max) => {
-        try {
-          // eslint-disable-next-line no-eval
-          const v = (0, eval)(`"use strict"; (${src})`);
-          let s;
-          try { s = JSON.stringify(v, null, 2); } catch { s = String(v); }
-          if (s === undefined) s = 'undefined';
-          return { ok: true, text: s.length > max ? s.slice(0, max) + '\n…（已截断）' : s };
-        } catch (e) {
-          return { ok: false, message: String((e && e.message) || e) };
+
+    // eval 不走 performCore，也就绕开了那里的支付闸门——实测一句
+    // `document.getElementById('pay').click()` 就能把确认整个跳过去。
+    // 所以求值期间在页面上架一道捕获阶段的拦截，只拦这一段时间。
+    // 注入失败（chrome:// 之类）不该拖垮 eval 本身：那些页面上也没有支付按钮。
+    let guarded = false;
+    try {
+      await ensureContent(id);
+      await toContent(id, { __hc: 'payGuard', on: true });
+      guarded = true;
+    } catch { /* 没有 content script 就没有这道防线，eval 照常跑 */ }
+
+    let result;
+    try {
+      ([{ result } = {}] = await chrome.scripting.executeScript({
+        target: { tabId: id },
+        world: 'MAIN',
+        func: (src, max) => {
+          try {
+            // eslint-disable-next-line no-eval
+            const v = (0, eval)(`"use strict"; (${src})`);
+            let s;
+            try { s = JSON.stringify(v, null, 2); } catch { s = String(v); }
+            if (s === undefined) s = 'undefined';
+            return { ok: true, text: s.length > max ? s.slice(0, max) + '\n…（已截断）' : s };
+          } catch (e) {
+            return { ok: false, message: String((e && e.message) || e) };
+          }
+        },
+        args: [String(p.expr || ''), p.maxLength || 20000],
+      }));
+    } finally {
+      if (guarded) {
+        const r = await toContent(id, { __hc: 'payGuard', on: false }).catch(() => null);
+        const hit = r?.blocked;
+        if (hit) {
+          throw err('PAY_DECLINED',
+            `这段 eval 试图点击支付按钮（${hit.label}${hit.amount ? ` · ${hit.amount}` : ''}），已被拦下。\n`
+            + `花钱的动作要走 click，那条路上有确认弹窗、由人点头。不要用 eval 绕过它。`);
         }
-      },
-      args: [String(p.expr || ''), p.maxLength || 20000],
-    });
+      }
+    }
+
     if (!result) throw err('NOT_INTERACTABLE', '无法在此页面注入脚本');
     if (!result.ok) {
       const csp = /Content Security Policy|unsafe-eval/i.test(result.message);
