@@ -11,6 +11,8 @@
   .state { font-weight: 500; }
   button { margin-top: 12px; width: 100%; padding: 8px; font: inherit; font-weight: 500; border: 0; border-radius: 8px; background: #2563eb; color: #fff; cursor: pointer; }
   button:disabled { opacity: .45; cursor: default; }
+  button.ghost { background: color-mix(in srgb, currentColor 10%, transparent); color: inherit; }
+  button.ghost.on { background: #16a34a; color: #fff; }
   .tip { margin-top: 12px; font-size: 11px; color: #8a8f98; }
   code { font-size: 10.5px; background: color-mix(in srgb, currentColor 9%, transparent); padding: 1px 4px; border-radius: 4px; }
 </style>
@@ -24,6 +26,16 @@
 </div>
 
 <button id="btn">立即连接</button>
+
+<div class="row" style="margin-top:10px">
+  <span class="dot" id="l2dot"></span>
+  <span class="state" id="l2state">高保真模式</span>
+</div>
+<button id="l2btn" class="ghost">开启</button>
+<div class="tip" id="l2tip">
+  默认开启。agent 能派发浏览器级的真实输入事件，应付会检查 <code>isTrusted</code> 的站点、
+  富文本编辑器，也能直接截后台标签页。只在需要的那几秒接入调试器，用完自动断开。
+</div>
 
 <div class="tip" id="tip">连不上时终端跑 <code>huashu-chrome doctor</code></div>
 

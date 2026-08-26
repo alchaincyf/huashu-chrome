@@ -16,6 +16,13 @@ const REF = { type: 'string', description: 'Element ref from the latest snapshot
 const SNAP = { type: 'string', description: 'snapshotId the ref came from' };
 const TAB = { type: 'number', description: 'Target tab id. Omit to use the active controlled tab.' };
 const SEL = { type: 'string', description: 'CSS selector fallback, for elements snapshot cannot see (zero-size, exotic editors). Skips ref safety checks — use only when ref fails.' };
+const REAL = {
+  type: 'boolean',
+  description: 'Force a real browser-level event (isTrusted) instead of a synthetic one. '
+    + 'Normally unnecessary — this is done automatically when a synthetic event produces no effect. '
+    + 'Pass it when the target is a submit/pay/delete-style control, where auto-retry is deliberately '
+    + 'held back to avoid acting twice.',
+};
 
 const TOOLS = [
   {
@@ -44,7 +51,7 @@ const TOOLS = [
       type: 'object',
       // 没有 button 参数：右键弹出的是浏览器原生菜单，扩展够不着，
       // 给了也只是个做不到的承诺；中键开新标签页用 tabs(action:"new") 更直接。
-      properties: { ref: REF, snapshotId: SNAP, selector: SEL, tabId: TAB },
+      properties: { ref: REF, snapshotId: SNAP, selector: SEL, tabId: TAB, real: REAL },
       required: [],
     },
   },
@@ -54,7 +61,7 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        ref: REF, snapshotId: SNAP, selector: SEL, tabId: TAB,
+        ref: REF, snapshotId: SNAP, selector: SEL, tabId: TAB, real: REAL,
         text: { type: 'string' },
         clear: { type: 'boolean', description: 'Clear existing value first. Default true.' },
         submit: { type: 'boolean', description: 'Press Enter after typing.' },
@@ -120,7 +127,7 @@ const TOOLS = [
         },
         ref: { ...REF, description: 'Optional: focus this element first. Omit to send to the focused element.' },
         snapshotId: SNAP,
-        tabId: TAB,
+        tabId: TAB, real: REAL,
         repeat: { type: 'number', description: 'Press N times (e.g. ArrowDown ×3). Max 50.' },
       },
       required: ['key'],
@@ -289,6 +296,42 @@ const TOOLS = [
     },
   },
   {
+    name: 'ask',
+    description:
+      'Hand control back to the user for one step, then continue. THE tool for captcha, QR-code login, '
+      + 'SMS/OTP, or any confirmation that should be a human decision. Brings the tab to the front, shows a '
+      + 'small panel with your instructions, highlights the elements you point at, and sends a desktop '
+      + 'notification. Blocks until the user acts. '
+      + 'Use it instead of retrying a step that needs a human — retrying just burns the timeout.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        prompt: { type: 'string', description: 'What the user should do, in their language. Be specific about how you will know it is done.' },
+        title: { type: 'string', description: 'Short panel title. Optional.' },
+        targets: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Refs ("e7") or CSS selectors to scroll to and flash-highlight. Strongly recommended '
+            + 'whenever your prompt mentions a concrete control — it saves the user from hunting for it.',
+        },
+        timeout: { type: 'number', description: 'ms to wait, default 300000 (5 min), max 600000.' },
+        until: {
+          type: 'object',
+          description: 'Auto-finish when the page proves it is done, so the user need not click anything. '
+            + 'e.g. {"urlContains":"/dashboard"} or {"selectorExists":"[data-testid=avatar]"}.',
+          properties: {
+            urlContains: { type: 'string' },
+            selectorExists: { type: 'string' },
+            textContains: { type: 'string' },
+          },
+        },
+        focus: { type: 'boolean', description: 'Bring the tab forward. Default true — the user is being asked to look at it.' },
+        tabId: TAB,
+      },
+      required: ['prompt'],
+    },
+  },
+  {
     name: 'eval',
     description:
       'Run a JS expression in the page. NOTE: fails on any site with a strict CSP (no unsafe-eval) — most large sites. ' +
@@ -341,6 +384,22 @@ A web page holds information in exactly three places, so play them in this order
 3. PIXELS — last resort. \`screenshot\` only when layout itself is the question; it needs the tab
    in the foreground, which interrupts the user.
 
+EVERY write returns an effect line before the snapshot — read it, it is the cheapest signal you get:
+  · "效果：…" — the page reacted, and how. A change near the target, a new overlay, a new page
+    notice. This is what tells "submitted" apart from "blocked by validation".
+  · "⚠️ 操作已发出，但页面完全没有反应" — nothing moved anywhere. Do NOT repeat the same call;
+    the element was probably a wrapper, or the real control is elsewhere. Change target or approach.
+  · "⚠️ 没有可归因于这次操作的变化" — the page is busy on its own (a live feed), but nothing
+    near your target moved. Treat it as "probably did not work", not as success.
+Synthetic events are upgraded to real browser-level ones automatically when they produce no effect.
+The one exception is submit/pay/delete-style controls: auto-retry is held back there so nothing is
+done twice, and the tool says so — pass real:true yourself if you are sure.
+
+WHEN A STEP NEEDS A HUMAN — captcha, QR login, SMS code, a payment confirmation — call \`ask\`.
+Do not retry, do not try to solve it, do not give up on the whole task. \`ask\` brings the tab
+forward, shows the user what to do, highlights the element, and waits. A "cancelled" result means
+the user said no: stop that task, do not look for another way to do the same thing.
+
 Some things are outside any extension's reach: OS file dialogs, browser download bars, permission
 prompts, chrome:// pages. Recognise them, tell the user to click, and stop retrying.
 
@@ -380,7 +439,15 @@ export async function startMcpServer({ client = 'unknown' } = {}) {
         return { content: [{ type: 'text', text: out.text }] };
       }
 
-      const data = await bridge.call(name, args, { tabId: args.tabId, timeoutMs: name === 'download' ? 150000 : undefined });
+      // ask 会一直等到用户动手，桥侧的默认 30s 在这里毫无意义。
+      // 多给 20s 余量：浮条自己会先超时并回一个 timed_out，那比桥判死有信息量得多。
+      const askMs = Math.min(Math.max(Number(args.timeout) || 300000, 5000), 600000) + 20000;
+      const data = await bridge.call(
+        name,
+        // 无人值守（cron、服务器）没有人可问。开关放在 MCP 这一侧读环境变量，
+        // 扩展只管照做——扩展不该知道自己跑在什么场景里。
+        name === 'ask' ? { ...args, disabled: process.env.HUASHU_CHROME_ASK === 'off' } : args,
+        { tabId: args.tabId, timeoutMs: name === 'download' ? 150000 : name === 'ask' ? askMs : undefined });
 
       // 浏览器只能下到 Downloads 里；下完再挪到 agent 要的位置，对它保持透明
       if (name === 'download' && args.savePath && data.path) {
@@ -429,6 +496,10 @@ function hint(e) {
     DIALOG_BLOCKING: '页面上有 alert/confirm 弹窗挡着，所有浏览器命令都会卡住。让用户先手动关掉。',
     NO_TAB: '没有可用的标签页。先用 tabs(action:"new", url:…) 开一个。',
     TIMEOUT: '浏览器侧超时。页面可能还在加载——先 wait 再重试。',
+    NEEDS_L2: '这一步需要真实输入事件，但扩展还没拿到调试器权限。让用户点开 huashu-chrome 扩展图标，'
+      + '按一下「启用高保真模式」——只需一次，之后永久生效。',
+    L2_BUSY: '真实输入事件用不了（多半是用户自己开着 DevTools，一个标签页只允许一个调试器）。'
+      + '已经用普通事件完成了；如果结果不对，让用户关掉 DevTools 再试。',
   };
   return `[${e.code || 'INTERNAL'}] ${e.message}` + (map[e.code] ? `\n→ ${map[e.code]}` : '');
 }

@@ -224,3 +224,156 @@ test('页面内容裹在 untrusted 边界里', async () => {
   const snap = await c.call('snapshot', {});
   assert.equal(snap.untrusted, true);
 });
+
+// ---------- v0.3：效果证据 ----------
+//
+// 这一组测的是「工具返回成功，页面其实没动」这类静默失败有没有被抓住。
+// 每一条都对应开发时真实撞出来的一个误判。
+
+test('点击有反应时，效果写在返回的最前面', async () => {
+  await go();
+  const r = await c.call('click', { selector: '#ctl' });
+  // 只认 mousedown 的下拉：展开与否只体现在 aria-expanded 上，
+  // DOM 节点数和正文长度都不变——所以必须有「目标自身状态」这一维证据
+  assert.match(r.text, /效果：/);
+  assert.match(r.text, /expanded false → true/);
+});
+
+test('点击毫无反应时，明确报出来，而不是回一份看着正常的快照', async () => {
+  await go();
+  const r = await c.call('click', { selector: '#deadBtn' });
+  assert.match(r.text, /没有反应|没有可归因于这次操作的变化/);
+});
+
+test('焦点落到目标自己身上不算「页面有反应」', async () => {
+  await go();
+  // 点击必然让目标获得焦点（L1 显式 focus，L2 由浏览器聚焦），
+  // 把它当证据的话任何一次点击都「有效果」，自动升级就永远不会触发
+  const r = await c.call('click', { selector: '#deadBtn' });
+  assert.doesNotMatch(r.text, /效果：焦点 → button#deadBtn/);
+});
+
+test('表单校验错误进入效果证据，不会被当成提交成功', async () => {
+  await go();
+  const r = await c.call('click', { selector: '#triggerErr' });
+  // 这条提示在长页面的下方，正文节选截不到——漏掉它，
+  // 「已提交」和「被校验拦下」在 agent 眼里一模一样
+  assert.match(r.text, /页面提示/);
+  assert.match(r.text, /手机号格式不正确/);
+});
+
+test('页面自己在动时，不把别处的变化算成这次操作的战果', async () => {
+  await go();
+  const r = await c.call('click', { selector: '#deadBtn' });
+  // 靶场的懒加载 feed 一直在填内容，全局正文长度始终在变。
+  // 判定只看目标附近，所以这里不该出现「效果：」的结论
+  assert.doesNotMatch(r.text, /^效果：/m);
+});
+
+// ---------- v0.3：L1 / L2 分层 ----------
+
+test('原生 <select> 强制走 L1，不会被升级到真实事件', async () => {
+  await go();
+  const r = await c.call('select', { selector: '#nat-city', value: '深圳' });
+  // L2 点击原生 select 打开的是浏览器进程的原生 popup，CDP 的 Input 打不到它，
+  // 键盘会被 popup 吃掉，下拉还会卡在打开状态挡住后续操作
+  assert.doesNotMatch(r.text, /（真实事件）/);
+  // value 是 option 的 value 属性（sz），不是它的可见文本（深圳）——
+  // `select` 工具两者都认，但页面上落下的是前者
+  assert.equal(await val('document.getElementById("nat-city").value'), '"sz"');
+});
+
+test('敏感文案的目标不自动升级，避免重复执行', async () => {
+  await go();
+  const r = await c.call('click', { selector: '#paySim' });
+  assert.match(r.text, /没有自动用真实事件重试/);
+  // 没有真的「支付」出去，这是这道闸门存在的全部意义
+  assert.equal(await val('document.getElementById("payOut").textContent'), '"未触发"');
+});
+
+// 下面两条需要用户在扩展弹窗里开过「高保真模式」，没开就跳过——
+// 未授权时的正确行为是干净降级，那由上面的用例覆盖。
+//
+// 判据不能写成 includes('真实事件')：未授权时的提示语是「真实事件也没能用上」，
+// 正好含这四个字，于是该跳过的用例反而跑了起来，失败得莫名其妙。
+// 认「没拿到权限」这句话本身，比认「有没有成功」可靠。
+const l2 = async () => {
+  const { text } = await c.call('click', { selector: '#deadBtn' });
+  return !/还没拿到调试器权限/.test(text);
+};
+
+test('只认 isTrusted 的按钮：普通事件无效时自动升级并成功', async (t) => {
+  await go();
+  if (!(await l2())) return t.skip('未开启高保真模式');
+  const r = await c.call('click', { selector: '#trustedOnly' });
+  assert.match(r.text, /真实事件/);
+  assert.equal(await val('document.getElementById("trustedOut").textContent'), '"已触发（真实事件）"');
+});
+
+test('敏感目标显式传 real:true 时照做', async (t) => {
+  await go();
+  if (!(await l2())) return t.skip('未开启高保真模式');
+  await c.call('click', { selector: '#paySim', real: true });
+  assert.equal(await val('document.getElementById("payOut").textContent'), '"已支付（真实事件）"');
+});
+
+// ---------- v0.3：人工介入 ----------
+
+test('ask 的 until 判据命中时自动收工，不用用户点', async () => {
+  await go();
+  const r = await c.call('ask', {
+    prompt: '自动完成测试，无需操作',
+    timeout: 15000,
+    until: { textContains: '事件记录仪' },
+    focus: false,
+  }, { timeoutMs: 40000 });
+  assert.equal(r.outcome, 'completed');
+});
+
+test('ask 超时返回 timed_out，且和「用户拒绝」分得开', async () => {
+  await go();
+  const r = await c.call('ask', {
+    prompt: '这条会超时',
+    timeout: 5000,
+    focus: false,
+  }, { timeoutMs: 30000 });
+  // timed_out = 没人在；cancelled = 用户明确说别做。
+  // 混在一起的话，agent 会把「用户拒绝」当成「再试一次」
+  assert.equal(r.outcome, 'timed_out');
+});
+
+test('无人值守模式下 ask 立即返回，不干等', async () => {
+  await go();
+  const r = await c.call('ask', { prompt: '没人可问', disabled: true }, { timeoutMs: 20000 });
+  assert.equal(r.outcome, 'disabled');
+});
+
+// ---------- v0.3：受控标签页漂移 ----------
+
+test('标签页被别人导航走时，读取操作显著警告而不是若无其事', async () => {
+  await go();
+  // 用页面自己的世界跳转，等价于「用户自己点了链接」或「站点自动重定向」——
+  // 都不经过 agent 的 navigate，所以 agent 不知道自己已经换了一页
+  await c.call('eval', { expr: '(location.href = "http://127.0.0.1:8124/frame-inner.html", "x")' });
+  await new Promise((r) => setTimeout(r, 1500));
+  const r = await c.call('read_text', {});
+  // 这条保护是一次真实事故推出来的：agent 以为还在 npm 的 access 页，
+  // 那个标签页其实已经跳到 2FA 设置页，一次 read_text 把用户的恢复码整页读走了
+  assert.match(r.text, /地址变了/);
+  assert.match(r.text, /别在陌生页面上继续操作或读取/);
+});
+
+test('agent 自己导航过去的不算漂移', async () => {
+  await go();
+  const r = await c.call('read_text', {});
+  assert.doesNotMatch(r.text, /地址变了/);
+});
+
+test('ref 和 selector 同时传要报错，不能静默只用一个', async () => {
+  await go();
+  // 两个都给时 selector 生效，而回执印的是 ref——开发中真撞到过：
+  // 回执说「已点击 [e26]（提交按钮）」，实际点掉的是页面顶部的通知关闭按钮
+  await assert.rejects(
+    () => c.call('click', { selector: 'button', ref: 'e1', snapshotId: 's1' }),
+    /只能给一个/);
+});

@@ -30,17 +30,24 @@ export class L2Unavailable extends Error {
   }
 }
 
-// ---------- 权限 ----------
+// ---------- 开关 ----------
 //
-// debugger 走 optional_permissions：默认安装时的警告文案和现在一样轻，
-// 真需要 L2 时才向用户要。chrome.permissions.request() 必须在用户手势里调用，
-// 而 SW 响应 agent 命令时没有手势——所以申请动作只能放在 popup 的按钮里，
-// 这里只负责查、并在没有时给出一句能让 agent 转达给用户的话。
-export async function hasPermission() {
+// 原本想让 debugger 走 optional_permissions，做成「默认安装轻量、用时再授权」。
+// **这条路被 Chrome 堵死了**：`debugger` 在不可选权限的清单里
+// （同类的还有 geolocation、proxy、declarativeNetRequest 等），
+// 放进 optional_permissions 会被静默忽略，chrome.permissions.request() 直接回
+// 「Only permissions specified in the manifest may be requested.」
+//
+// 所以权限只能进 manifest，安装时一次性授予。popup 上那个开关退化成**软开关**：
+// 管的是「用不用」，不是「有没有」。默认开——权限既然装的时候就给了，
+// 再让用户多点一次没有任何安全收益，只是多一道摩擦。想关的人随时能关。
+export async function isEnabled() {
+  if (!chrome.debugger) return false;
   try {
-    return await chrome.permissions.contains({ permissions: ['debugger'] });
+    const { l2Disabled } = await chrome.storage.local.get('l2Disabled');
+    return !l2Disabled;
   } catch {
-    return false;
+    return true;
   }
 }
 
@@ -50,10 +57,10 @@ async function ensureAttached(tabId) {
   const s = sessions.get(tabId);
   if (s?.ready) return touch(tabId);
 
-  if (!(await hasPermission())) {
+  if (!(await isEnabled())) {
     throw new L2Unavailable(
-      '这一步需要「高保真模式」（真实输入事件），但扩展还没拿到调试器权限。'
-      + '让用户点开 huashu-chrome 扩展图标，按一下「启用高保真模式」，然后重试。');
+      '这一步需要「高保真模式」（浏览器级的真实输入事件），但它被关掉了。'
+      + '让用户点开 huashu-chrome 扩展图标，把「高保真模式」打开，然后重试。');
   }
 
   try {
@@ -118,10 +125,26 @@ export async function detach(tabId) {
 // 于是黄条会一直挂着，没有任何东西再去 detach 它。SW 每次启动扫一遍，
 // 把上一条命的残留清掉。
 export async function reapOrphans() {
+  return reap((tabId) => !sessions.has(tabId));
+}
+
+// 用户在 popup 里关闭高保真模式时用：不管是不是自己的，全断。
+// 撤销权限之后就再也调不动 chrome.debugger 了，这是最后的机会。
+export async function reapAll() {
+  for (const [tabId] of sessions) {
+    const s = sessions.get(tabId);
+    if (s?.timer) clearTimeout(s.timer);
+  }
+  sessions.clear();
+  dialogs.clear();
+  return reap(() => true);
+}
+
+async function reap(pick) {
   try {
     const targets = await chrome.debugger.getTargets();
     for (const t of targets) {
-      if (t.attached && t.tabId != null && !sessions.has(t.tabId)) {
+      if (t.attached && t.tabId != null && pick(t.tabId)) {
         await chrome.debugger.detach({ tabId: t.tabId }).catch(() => {});
       }
     }
@@ -265,25 +288,43 @@ export async function evaluate(tabId, expression, { maxLength = 20000 } = {}) {
 
 // ---------- 原生弹窗 ----------
 
-chrome.debugger.onEvent.addListener((source, method, params) => {
-  const tabId = source.tabId;
-  if (tabId == null) return;
-  if (method === 'Page.javascriptDialogOpening') {
-    dialogs.set(tabId, { type: params.type, message: params.message, at: Date.now() });
-  } else if (method === 'Page.javascriptDialogClosed') {
-    dialogs.delete(tabId);
-  }
-});
+// ⚠️ 这两个监听器必须用可选链挂。
+//
+// debugger 走的是 optional_permissions，**未授权时整个 chrome.debugger 命名空间
+// 就是 undefined**。直接 chrome.debugger.onEvent.addListener 会在模块顶层抛
+// TypeError，而这个模块被 background.js import —— 于是 service worker 根本起不来，
+// 扩展彻底不工作，连桥都连不上。
+//
+// 症状极具迷惑性：doctor 显示「扩展没连上桥」，看着像是没重载扩展，
+// 实际是代码在加载阶段就崩了。用户授权之后命名空间才会出现，所以还要在
+// onPermissionAdded 里补挂一次。
+function wireDebuggerEvents() {
+  if (!chrome.debugger?.onEvent || wireDebuggerEvents.done) return;
+  wireDebuggerEvents.done = true;
 
-// 用户手动点了黄条上的「取消」，或标签页关了
-chrome.debugger.onDetach.addListener((source) => {
-  const tabId = source.tabId;
-  if (tabId == null) return;
-  const s = sessions.get(tabId);
-  if (s?.timer) clearTimeout(s.timer);
-  sessions.delete(tabId);
-  dialogs.delete(tabId);
-});
+  chrome.debugger.onEvent.addListener((source, method, params) => {
+    const tabId = source.tabId;
+    if (tabId == null) return;
+    if (method === 'Page.javascriptDialogOpening') {
+      dialogs.set(tabId, { type: params.type, message: params.message, at: Date.now() });
+    } else if (method === 'Page.javascriptDialogClosed') {
+      dialogs.delete(tabId);
+    }
+  });
+
+  // 用户手动点了黄条上的「取消」，或标签页关了
+  chrome.debugger.onDetach.addListener((source) => {
+    const tabId = source.tabId;
+    if (tabId == null) return;
+    const s = sessions.get(tabId);
+    if (s?.timer) clearTimeout(s.timer);
+    sessions.delete(tabId);
+    dialogs.delete(tabId);
+  });
+}
+
+wireDebuggerEvents();
+chrome.permissions?.onAdded?.addListener(wireDebuggerEvents);
 
 export const pendingDialog = (tabId) => dialogs.get(tabId) || null;
 

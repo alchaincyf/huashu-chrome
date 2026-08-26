@@ -344,6 +344,16 @@
   // ---------- ref 解析（防呆全在这里） ----------
 
   function resolve(p) {
+    // 两个都给 = 一定有一个是错的，而后果极其隐蔽：下面 selector 优先，
+    // 但回执里印的是 `p.ref || p.selector`，也就是 ref。于是「已点击 [e26]」
+    // 底下点的其实是 querySelector 匹配到的第一个元素。
+    // 开发中真撞到过：传了 {selector:"button", ref:"e26"}，点掉的是页面顶部的
+    // 通知关闭按钮，回执却说点了提交按钮——而两者的后果天差地别。
+    if (p.selector && p.ref) {
+      throw fail('INTERNAL',
+        'ref 和 selector 只能给一个。同时给的话只有 selector 生效，而回执显示的是 ref，'
+        + '点错了从返回里完全看不出来。要用快照编号就只传 ref，要用选择器就只传 selector。');
+    }
     // selector 兜底：snapshot 有抓不到的时候（渲染尺寸为 0、异形编辑器、shadow 边界），
     // 没有这条退路就只能干瞪眼。它不走快照，所以也不做快照校验——
     // 代价是失去 ref 的防呆，因此只在 ref 走不通时用。
@@ -453,15 +463,20 @@
     const name = [el.innerText, el.value, el.getAttribute?.('aria-label'), el.getAttribute?.('title')]
       .map((s) => (s || '').trim()).find(Boolean) || '';
     if (SENSITIVE_TEXT.test(name.slice(0, 40))) return true;
-    if (el.tagName === 'INPUT' && /^(submit|image)$/i.test(el.type || '')) return true;
-    if (el.tagName === 'BUTTON' && (el.type || '').toLowerCase() === 'submit') return true;
+    // 「在 form 里」这个条件不能省：**<button> 不写 type 时 el.type 就是 "submit"**，
+    // 而绝大多数按钮都不写 type。只判 type 的话整个页面的按钮全成了敏感动作，
+    // 闸门把自动升级全挡死，L2 等于没接上——实测就是这么撞出来的。
+    // form 之外的 submit 按钮没有提交语义，不该进这道闸。
+    if (/^(BUTTON|INPUT)$/.test(el.tagName)
+      && /^(submit|image)$/i.test(el.type || '')
+      && el.closest('form')) return true;
     const cls = `${el.className?.baseVal ?? el.className ?? ''} ${el.getAttribute?.('data-testid') || ''}`;
     return /\b(pay|submit|checkout|delete|remove|confirm|publish)\b/i.test(cls);
   }
 
-  function doLocate(p) {
+  async function doLocate(p) {
     // fill 这类没有单一目标的操作只要基线，不要定位
-    if (p.baselineOnly) return { baseline: baselineOf(null) };
+    if (p.baselineOnly) return { baseline: await baselineOf(null) };
     const el = resolve(p);
     el.scrollIntoView({ block: 'center', behavior: 'instant' });
     const r = el.getBoundingClientRect();
@@ -478,13 +493,16 @@
     // 内部滚动容器里而容器没跟着滚——这时候不能硬点。
     const outside = x < 0 || y < 0 || x > innerWidth || y > innerHeight;
 
+    // 基线放在最后采：前面的 scrollIntoView 本身会改变可见性和布局，
+    // 先采就把自己造成的变化算进了「页面的反应」里
+    const baseline = await baselineOf(el);
     return {
       x, y, outside,
       tag: el.tagName,
       role: roleOf(el),
       prefer: preferOf(el),
       sensitive: isSensitive(el),
-      baseline: baselineOf(el),
+      baseline,
     };
   }
 
@@ -520,10 +538,41 @@
     els: document.getElementsByTagName('*').length,
     textLen: (document.body?.textContent || '').length,
     active: activeDesc(),
+    bodyKids: document.body?.children.length ?? 0,
   });
 
-  function baselineOf(el) {
-    return { ...cheapStats(), alerts: collectAlerts(), target: targetState(el), ref: null };
+  // 「变化发生在哪里」比「有没有变化」可靠得多。
+  //
+  // 全页面的文本长度是个很脏的信号：直播弹幕、行情数字、懒加载列表每时每刻都在改它。
+  // 实测点一个只认 isTrusted 的按钮（点击必然无效），返回却是「效果：正文 +7 字」——
+  // 那 7 个字是页面自己的懒加载 feed 填进来的。
+  //
+  // 而一次点击如果真有效果，痕迹几乎必然落在这三个地方之一：目标自身的状态、
+  // 目标所在的那个区块、或者以浮层/提示的形式新挂到 body 底下。噪声通常在别处。
+  // 所以判定「动没动」只看这三处，全局数字降级成附带信息。
+  const SCOPE_SEL = 'section,form,[role=dialog],[role=listbox],[role=menu],main,article,'
+    + '[class*="modal" i],[class*="dialog" i],[class*="popover" i],[class*="dropdown" i]';
+
+  function scopeOf(el) {
+    if (!el || !el.isConnected) return null;
+    const box = el.closest(SCOPE_SEL) || el.parentElement || document.body;
+    return { len: (box.textContent || '').length, kids: box.getElementsByTagName('*').length };
+  }
+
+  // 采基线时顺便测一下「页面自己动不动」。
+  //
+  // 不做这一步，动态页面上的证据全是假的：实测点一个什么都没绑的按钮，
+  // 返回「效果：正文 -4 字」——那 4 个字是页面自己的懒加载列表在填充，
+  // 跟这次点击毫无关系。而 agent 读到「有效果」就会以为操作成功了。
+  //
+  // 代价是每个写操作多 60ms。换来的是「报告可信」，值这个价——
+  // 何况早停之后总耗时通常还是比原来固定的 400ms 短。
+  async function baselineOf(el) {
+    const s1 = cheapStats();
+    await sleep(60);
+    const s2 = cheapStats();
+    const volatile = Math.abs(s2.els - s1.els) >= 3 || Math.abs(s2.textLen - s1.textLen) >= 4;
+    return { ...s2, volatile, alerts: collectAlerts(), target: targetState(el), scope: scopeOf(el) };
   }
 
   function doEffect(p) {
@@ -535,14 +584,45 @@
       : p.selector ? document.querySelector(p.selector)
       : null;
     const now = cheapStats();
-    const parts = [];
+
+    // 证据分强弱。强证据几乎不可能是页面自己动出来的（目标自身的状态、新冒出来的
+    // 提示、元素消失）；弱证据（DOM 数量、正文长度、焦点）在直播弹幕、行情、
+    // 懒加载列表这类页面上每时每刻都在产生。
+    // 页面本身在动时（volatile），只有强证据算数——否则报告就是在编。
+    const strong = [], weak = [];
+    const parts = weak;
+
+    // 强证据 ①：目标所在区块变了。局部阈值可以定得很低（2 个字符），
+    // 因为这块地方的变化几乎不可能是别处的噪声漂过来的。
+    const bs = base.scope, ns = scopeOf(el);
+    if (bs && ns) {
+      const dLen = ns.len - bs.len, dKids = ns.kids - bs.kids;
+      if (Math.abs(dLen) >= 2) strong.push(`目标区块文本 ${dLen > 0 ? '+' : ''}${dLen} 字`);
+      else if (dKids !== 0) strong.push(`目标区块 DOM ${dKids > 0 ? '+' : ''}${dKids} 节点`);
+    }
+
+    // 强证据 ②：body 直接子元素增减。模态框、抽屉、toast 几乎都挂在这一层，
+    // 而页面自己的内容更新极少动到 body 的直接子节点。
+    const dBodyKids = now.bodyKids - (base.bodyKids ?? now.bodyKids);
+    if (dBodyKids !== 0) {
+      strong.push(`页面顶层${dBodyKids > 0 ? '新增' : '移除'} ${Math.abs(dBodyKids)} 个元素（多半是浮层/弹窗）`);
+    }
 
     // 阈值挡住噪声：页面上的时钟、轮播、埋点会让 DOM 一直微微地动，
     // 不设阈值就变成「永远有效果」，这个机制也就废了。
     const dEls = now.els - (base.els ?? now.els);
     if (Math.abs(dEls) >= 3) parts.push(`DOM ${dEls > 0 ? '+' : ''}${dEls} 节点`);
+    // 阈值定 4 不定 20：实测「未触发」→「已触发（真实事件）」只差 6 字，
+    // 阈值 20 会把这次真实的成功判成「页面完全没有反应」。
+    //
+    // 这两类误判的代价不对称，所以宁可松一点：
+    //   假阴性（真动了却说没动）→ 多一次 L2 重试，对非敏感目标是幂等的，代价小；
+    //   假阳性（没动却说动了）→ agent 以为成功继续往下走，掩盖真实失败，代价大。
+    //
+    // 比长度而不比内容，天然挡掉了最常见的一类噪声：时钟和计数器改数字时
+    // 长度往往不变（12:34:56 → 12:34:57），根本进不到这里。
     const dText = now.textLen - (base.textLen ?? now.textLen);
-    if (Math.abs(dText) >= 20) parts.push(`正文 ${dText > 0 ? '+' : ''}${dText} 字`);
+    if (Math.abs(dText) >= 4) parts.push(`正文 ${dText > 0 ? '+' : ''}${dText} 字`);
     // 焦点落到目标自己身上不算证据——点击本来就会聚焦（L1 的 realClick 显式调
     // el.focus()，L2 的真实点击由浏览器聚焦），那是这个动作的机械后果，
     // 不是页面对它的反应。
@@ -560,20 +640,30 @@
     // （展开下拉、勾选、受控组件把值回滚，这三样都不改 DOM 节点数）
     const bt = base.target || {}, nt = targetState(el);
     // 无目标的操作（fill、无 ref 的 key）两边都是 gone，不会走进这条分支
-    if (nt.gone && !bt.gone && bt.gone !== undefined) parts.push('目标元素已从页面移除');
+    if (nt.gone && !bt.gone && bt.gone !== undefined) strong.push('目标元素已从页面移除');
     else for (const k of ['expanded', 'checked', 'selected', 'value', 'cls']) {
       if (bt[k] === undefined || bt[k] === nt[k]) continue;
-      if (k === 'cls') { parts.push('目标 class 变了'); continue; }
-      parts.push(`${k} ${bt[k] || '空'} → ${nt[k] || '空'}`);
+      if (k === 'cls') { strong.push('目标 class 变了'); continue; }
+      strong.push(`${k} ${bt[k] || '空'} → ${nt[k] || '空'}`);
     }
 
     // 新增的页面提示优先级最高——表单流程最主要的失败模式就是校验错误，
     // 而它常在长页面下方，正文节选根本截不到
-    const alerts = collectAlerts();
-    const fresh = alerts.filter((a) => !(base.alerts || []).includes(a));
-    if (fresh.length) parts.push(`⚠️ 页面提示：${fresh.join(' / ')}`);
+    const fresh = collectAlerts().filter((a) => !(base.alerts || []).includes(a));
+    if (fresh.length) strong.push(`⚠️ 页面提示：${fresh.join(' / ')}`);
 
-    return { changed: parts.length > 0, parts, alerts: fresh };
+    // 判定只认强证据。全局数字（weak）照样报出来给 agent 参考，
+    // 但不用它下「动没动」这个结论——它是页面里最脏的那个信号。
+    const changed = strong.length > 0;
+    return {
+      changed,
+      parts: [...strong, ...weak],
+      alerts: fresh,
+      volatile: !!base.volatile,
+      // 页面在动、但没有一条能归到这次操作头上——必须说出来，
+      // 不能让 agent 把别人的动静当成自己的战果
+      unattributable: !strong.length && weak.length > 0,
+    };
   }
 
   // ---------- 动作 ----------
@@ -1175,7 +1265,23 @@
         switch (msg.__hc) {
           case 'ping': return sendResponse({ pong: true });
           case 'snapshot': return sendResponse({ data: buildSnapshot() });
-          case 'locate': return sendResponse({ data: doLocate(msg) });
+          case 'locate': return sendResponse({ data: await doLocate(msg) });
+          // ask 要高亮的目标可能是 ref（只有这里的 refMap 认得），而高亮画在
+          // ask-overlay 那一侧。打个临时属性当交接凭证，用完就摘。
+          case 'markTargets': {
+            const selectors = [];
+            (msg.targets || []).forEach((t, i) => {
+              let el = null;
+              try { el = refMap.get(t) || document.querySelector(t); } catch { /* 不是合法 selector */ }
+              if (!el) return;
+              el.setAttribute('data-hc-mark', String(i));
+              selectors.push(`[data-hc-mark="${i}"]`);
+            });
+            return sendResponse({ data: { selectors } });
+          }
+          case 'unmarkTargets':
+            document.querySelectorAll('[data-hc-mark]').forEach((el) => el.removeAttribute('data-hc-mark'));
+            return sendResponse({ data: { ok: true } });
           case 'effect': return sendResponse({ data: doEffect(msg) });
           case 'click': return sendResponse(await doClick(msg));
           case 'type': return sendResponse(doType(msg));

@@ -24,7 +24,7 @@ test('agent 能通过 stdio 挂上 MCP server 并拿到工具表', async () => {
   const { tools } = await client.listTools();
   const names = tools.map((t) => t.name).sort();
 
-  assert.deepEqual(names, ['click', 'download', 'eval', 'fetch', 'fill', 'key', 'navigate', 'network', 'query', 'read_text', 'screenshot', 'scroll', 'select', 'snapshot', 'tabs', 'type', 'upload', 'wait']);
+  assert.deepEqual(names, ['ask', 'click', 'download', 'eval', 'fetch', 'fill', 'key', 'navigate', 'network', 'query', 'read_text', 'screenshot', 'scroll', 'select', 'snapshot', 'tabs', 'type', 'upload', 'wait']);
 
   // 工具描述是每轮都在付的 context 成本，别让它悄悄膨胀
   const total = tools.reduce((n, t) => n + t.description.length + JSON.stringify(t.inputSchema).length, 0);

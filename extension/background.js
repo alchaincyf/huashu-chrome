@@ -382,8 +382,67 @@ async function settle(id, frameId, params, baseline, beforeUrl) {
   return last;
 }
 
+// ---------- 受控标签页漂移 ----------
+//
+// 受控标签页会在 agent 完全不知情的情况下换掉内容：用户自己在用这个浏览器、
+// 站点自动跳转、表单提交后重定向。而工具会若无其事地在新页面上继续操作。
+//
+// 这不是理论风险。开发中真实发生过：agent 以为还在 npm 的 access 页，
+// 那个标签页其实已经跳到了 2FA 设置页，一次无差别的 read_text 把用户的
+// **2FA 恢复码**整页读进了对话。没有任何环节报错——URL 变了，工具不看。
+//
+// ref 快照有 STALE_SNAPSHOT 防呆，但 read_text / query / network 这些
+// 不带 ref 的读取操作完全没有保护。这里补上：只要 URL 和上次 agent 见到的不一样，
+// 就在返回最前面显著说明。不阻断（那会让正常的跳转流程没法走），但绝不静默。
+const lastSeen = new Map();   // tabId -> 上次 agent 操作时的 URL
+
+async function driftNote(tabId) {
+  let now;
+  try { now = (await chrome.tabs.get(tabId)).url; } catch { return ''; }
+  const was = lastSeen.get(tabId);
+  lastSeen.set(tabId, now);
+  if (!was || was === now) return '';
+  return `⚠️ 这个标签页的地址变了，而且不是本次操作造成的：\n`
+    + `   原本：${was}\n   现在：${now}\n`
+    + `   可能是用户自己在用这个浏览器，或者页面自动跳转了。下面的内容来自**新页面**——\n`
+    + `   如果这不是你预期的页面，先停下来确认，别在陌生页面上继续操作或读取。\n`;
+}
+
+// agent 自己导航到的地方不算漂移
+const markNavigated = async (tabId) => {
+  try { lastSeen.set(tabId, (await chrome.tabs.get(tabId)).url); } catch { /* 标签页没了 */ }
+};
+
+// ask 的自动完成判据。轮询而不是 MutationObserver：判据里有 URL 这种
+// DOM 观察不到的东西，而 1 秒一次的成本对一个本来就要等几分钟的命令可以忽略。
+function watchUntil(tabId, until, timeout) {
+  let timer = null;
+  const stop = () => { if (timer) clearInterval(timer); timer = null; };
+  const promise = new Promise((resolve) => {
+    const deadline = Date.now() + timeout;
+    timer = setInterval(async () => {
+      if (Date.now() > deadline) return stop();
+      try {
+        const tab = await chrome.tabs.get(tabId);
+        if (until.urlContains && tab.url?.includes(until.urlContains)) { stop(); return resolve({ outcome: 'completed' }); }
+        if (until.selectorExists || until.textContains) {
+          const [{ result } = {}] = await chrome.scripting.executeScript({
+            target: { tabId },
+            func: (sel, txt) => (sel ? !!document.querySelector(sel) : false)
+              || (txt ? (document.body?.innerText || '').includes(txt) : false),
+            args: [until.selectorExists || '', until.textContains || ''],
+          });
+          if (result) { stop(); return resolve({ outcome: 'completed' }); }
+        }
+      } catch { /* 页面正在跳转 */ }
+    }, 1000);
+  });
+  return { promise, stop };
+}
+
 async function perform(id, cmd, p) {
   const { frameId, params } = prepare(id, p);
+  const drift = await driftNote(id);
   const before = (await chrome.tabs.get(id)).url;
 
   // 定位：resolve、滚动、遮挡检测全在 content script 里做（一行没改），
@@ -442,18 +501,23 @@ async function perform(id, cmd, p) {
 
   const after = (await chrome.tabs.get(id)).url;
   const navigated = before !== after;
-  if (navigated) await waitForLoad(id);
+  if (navigated) { await waitForLoad(id); await markNavigated(id); }
   const snap = await snapshotAll(id);
 
   const head = [
+    drift,
     note + (upgraded ? '　←　普通事件无效，已自动改用真实事件' : ''),
     l2note,
     ev.changed
-      ? `效果：${ev.parts.join('；')}`
-      : `⚠️ 操作已发出，但页面完全没有反应（DOM、正文、焦点、目标状态、页面提示都没变）。`
-        + `可能是：① 这个元素只是容器，真正的按钮在它内部或旁边；`
-        + `② 操作确实发生了但只有异步副作用（请求已发出、页面稍后才变）；`
-        + `③ 站点忽略了这次输入。别原样重试——换个目标，或先 wait 再看。`,
+      ? `效果：${ev.parts.join('；')}` + (ev.volatile ? '　（注意：这个页面本身也在持续变化）' : '')
+      : ev.unattributable
+        ? `⚠️ 没有可归因于这次操作的变化。这个页面本身在持续变化（${ev.parts.join('；')}），`
+          + `但目标元素的状态没动、也没有新的页面提示——那些变化多半不是这次操作造成的。`
+          + `想确认是否生效，看下面快照里目标附近的内容。`
+        : `⚠️ 操作已发出，但页面完全没有反应（DOM、正文、焦点、目标状态、页面提示都没变）。`
+          + `可能是：① 这个元素只是容器，真正的按钮在它内部或旁边；`
+          + `② 操作确实发生了但只有异步副作用（请求已发出、页面稍后才变）；`
+          + `③ 站点忽略了这次输入。别原样重试——换个目标，或先 wait 再看。`,
   ].filter(Boolean).join('\n');
 
   return { ...snap, text: `${head}\n\n${snap.text}`, navigated };
@@ -462,7 +526,9 @@ async function perform(id, cmd, p) {
 const HANDLERS = {
   async snapshot(p, tabId) {
     const id = await resolveTab(tabId);
-    return snapshotAll(id, p);
+    const drift = await driftNote(id);
+    const snap = await snapshotAll(id, p);
+    return drift ? { ...snap, text: drift + '\n' + snap.text } : snap;
   },
 
   async navigate(p, tabId) {
@@ -471,6 +537,7 @@ const HANDLERS = {
     else await toContent(id, { __hc: 'history', action: p.action || 'reload' });
     await waitForLoad(id);
     await sleep(300); // 给 SPA 的首屏渲染一点时间，否则快照经常空
+    await markNavigated(id);
     return snapshotAll(id);
   },
 
@@ -485,7 +552,9 @@ const HANDLERS = {
 
   async read_text(p, tabId) {
     const id = await resolveTab(tabId);
-    return toContent(id, { __hc: 'read_text', ...p });
+    const drift = await driftNote(id);
+    const r = await toContent(id, { __hc: 'read_text', ...p });
+    return drift ? { ...r, text: drift + '\n' + r.text } : r;
   },
 
   async wait(p, tabId) {
@@ -495,7 +564,9 @@ const HANDLERS = {
 
   async query(p, tabId) {
     const id = await resolveTab(tabId);
-    return toContent(id, { __hc: 'query', ...p });
+    const drift = await driftNote(id);
+    const r = await toContent(id, { __hc: 'query', ...p });
+    return drift ? { ...r, text: drift + '\n' + r.text } : r;
   },
 
   // 让浏览器自己下载。fetch+binary 走的是 base64 over WebSocket，几十 MB 的视频
@@ -678,30 +749,61 @@ const HANDLERS = {
     if (!result) throw err('NOT_INTERACTABLE', '无法在此页面注入脚本');
     if (!result.ok) {
       const csp = /Content Security Policy|unsafe-eval/i.test(result.message);
-      throw err('INTERNAL', csp
-        ? `页面的 CSP 禁止 eval：${result.message}\n改用 query（按 selector 提取）或 network（读接口），它们不受 CSP 限制。`
-        : `表达式执行失败：${result.message}`);
+      // CSP 拦下时升级 L2：调试器的求值通道不受页面 CSP 管。
+      // 顺序是「先页面世界、拦了再升级」而不是直接上 L2——小站和本地页面
+      // 走页面世界就够，没必要为它们挂一下黄条。
+      if (csp) {
+        try {
+          return { untrusted: true, text: await cdp.evaluate(id, `(${p.expr})`, { maxLength: p.maxLength || 20000 }) };
+        } catch (e) {
+          throw err(e.code === 'NEEDS_L2' || e.code === 'L2_BUSY' ? e.code : 'INTERNAL',
+            e.code === 'NEEDS_L2'
+              ? `这个页面的 CSP 禁止 eval。${e.message}`
+              : `页面的 CSP 禁止 eval，真实求值通道也没能用上：${e.message}\n`
+                + `改用 query（按 selector 提取）或 network（读接口），它们不受 CSP 限制。`);
+        }
+      }
+      throw err('INTERNAL', `表达式执行失败：${result.message}`);
     }
     return { untrusted: true, text: result.text };
   },
 
   // captureVisibleTab 截的是「那个窗口当前可见的标签页」，不是我们的受控标签页。
-  // 用户切走后直接截，截到的就是他自己正在看的页面——把私人内容送进了 agent 的
-  // 上下文。真实发生过一次。所以这里先核对，对不上宁可失败。
+  // 用户切走后直接截，截到的就是他自己正在看的页面——把私人内容送进 agent 的上下文。
+  // 这件事真实发生过两次，第二次是在传了 focus:true 的情况下（切前台没切成，
+  // 保护被绕过），所以下面把「确认切换成功」也做成硬检查。
+  //
+  // 但真正的解法是根本不走那条路：CDP 的 Page.captureScreenshot 截的是**指定 target**，
+  // 后台标签页照样能截，既不打断用户，也不存在截错页面的可能。
   async screenshot(p, tabId) {
     const id = await resolveTab(tabId);
-    const tab = await chrome.tabs.get(id);
-    if (!tab.active) {
-      if (!p.focus) {
-        throw err('NOT_INTERACTABLE',
-          `标签页 ${id} 不在前台，截图会截到用户当前正在看的别的页面。` +
-          `要截它必须把它切到前台——传 focus:true 显式同意打断用户，或者先用 snapshot / read_text 读内容（不需要前台）。`);
+    try {
+      return { dataUrl: await cdp.screenshot(id) };
+    } catch (e) {
+      if (e.code !== 'NEEDS_L2' && e.code !== 'L2_BUSY') throw e;
+      // 没有调试器权限时退回老路，前台保护一条不少
+      const tab = await chrome.tabs.get(id);
+      if (!tab.active) {
+        if (!p.focus) {
+          throw err('NOT_INTERACTABLE',
+            `标签页 ${id} 不在前台。启用「高保真模式」后可以直接截后台标签页；` +
+            `在那之前，要截它必须切到前台——传 focus:true 显式同意打断用户，` +
+            `或者先用 snapshot / read_text 读内容（不需要前台）。`);
+        }
+        await chrome.tabs.update(id, { active: true });
+        await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+        await sleep(250);
+        // 切换可能没成功（窗口最小化、被别的窗口盖住）。不确认就截，
+        // 截到的还是用户那一页——这正是第二次事故的成因。
+        const now = await chrome.tabs.get(id);
+        if (!now.active) {
+          throw err('NOT_INTERACTABLE',
+            `已请求把标签页 ${id} 切到前台但没有生效（窗口可能被最小化了）。` +
+            `拒绝截图——否则截到的是用户当前正在看的其它页面。`);
+        }
       }
-      await chrome.tabs.update(id, { active: true });
-      await sleep(250);
+      return { dataUrl: await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' }) };
     }
-    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
-    return { dataUrl };
   },
 
   async tabs(p) {
@@ -734,63 +836,98 @@ const HANDLERS = {
     throw err('INTERNAL', `未知 tabs 动作 ${p.action}`);
   },
 
-  // 【临时】attach 分步诊断
-  async __attach(p, tabId) {
+  // 人工介入。产品里第一个「长阻塞 + 等用户动手」的命令。
+  //
+  // 这是全项目**唯一**一个「抢焦点是对的」的场景：正在请用户帮忙，
+  // 他理应看到那个页面。其余所有工具继续守「后台干活不打扰」的硬规则。
+  //
+  // 我们的路径比 BrowserSkill 短一半：它必须把用户从自己的窗口拽到 Agent Window
+  // 去解验证码，我们本来就在用户自己的浏览器里，切个前台就行。
+  async ask(p, tabId) {
+    // 无人值守场景（定时任务、服务器）没有人可问。立刻返回，让 agent 别干等，
+    // 也别把「没人应答」误解成「用户拒绝」。
+    if (p.disabled) {
+      return { text: 'ask 已被禁用（无人值守模式）。请自行完成或干净地停止，不要重试。', outcome: 'disabled' };
+    }
+
     const id = await resolveTab(tabId);
-    const out = [];
-    let rect;
-    const step = async (label, fn) => {
-      try { out.push(`✅ ${label}: ${JSON.stringify(await fn()).slice(0, 200)}`); }
-      catch (e) { out.push(`❌ ${label}: ${e.message}`); }
+    const timeout = Math.min(Math.max(Number(p.timeout) || 300000, 5000), 600000);
+
+    // 高亮目标：把用户的视线直接送到该操作的地方。ref 由 content script 解析
+    // （只有它认得 refMap），转成临时 selector 交给浮条那一侧去画。
+    let selectors = [];
+    if (Array.isArray(p.targets) && p.targets.length) {
+      try {
+        ({ selectors } = await toContent(id, { __hc: 'markTargets', targets: p.targets }));
+      } catch { /* 高亮是锦上添花，失败不该拖垮整个请求 */ }
+    }
+
+    if (p.focus !== false) {
+      const tab = await chrome.tabs.get(id);
+      await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+      await chrome.tabs.update(id, { active: true });
+    }
+
+    await chrome.scripting.executeScript({ target: { tabId: id }, files: ['ask-overlay.js'] });
+    if (selectors.length) {
+      await chrome.tabs.sendMessage(id, { __hcAsk: 'flash', selectors }).catch(() => {});
+    }
+
+    // 用户很可能根本不在浏览器里——桌面通知是唯一能把他叫回来的东西
+    chrome.notifications?.create(`hc-ask-${Date.now()}`, {
+      type: 'basic',
+      iconUrl: 'icons/icon128.png',
+      title: p.title || 'huashu-chrome 需要你搭把手',
+      message: String(p.prompt || '').slice(0, 180),
+      priority: 2,
+    }, () => void chrome.runtime.lastError);
+
+    const started = Date.now();
+    await chrome.tabs.sendMessage(id, {
+      __hcAsk: 'show', title: p.title, prompt: p.prompt, timeout, wantNote: p.wantNote !== false,
+    });
+    // 轮询取结果，而不是攥着一条长回调等几分钟。
+    // 长回调那条路会被 back/forward cache 掐断（「The page keeping the extension port
+    // is moved into back/forward cache」），而用户去解验证码、切标签页的过程中
+    // 页面进 bfcache 恰恰是常态。
+    const panel = (async () => {
+      const deadline = Date.now() + timeout + 2000;
+      while (Date.now() < deadline) {
+        await sleep(400);
+        try {
+          const r = await chrome.tabs.sendMessage(id, { __hcAsk: 'poll' });
+          if (r && !r.pending) return r;
+        } catch {
+          // 页面正在跳转或刚从 bfcache 恢复，下一轮再问。
+          // 浮条注入过的页面导航走就没了，这时靠外层超时收尾。
+        }
+      }
+      return { outcome: 'timed_out', note: '' };
+    })();
+
+    // until 判据：用户完成后往往不会记得回来点「我完成了」——登录跳转、
+    // 验证通过这些都有明确的页面信号，能自动收工就别让他多点一下。
+    const auto = p.until ? watchUntil(id, p.until, timeout) : null;
+    const res = await (auto ? Promise.race([panel, auto.promise]) : panel);
+    auto?.stop();
+    if (res.outcome === 'completed') {
+      await chrome.tabs.sendMessage(id, { __hcAsk: 'abort' }).catch(() => {});
+    }
+    await toContent(id, { __hc: 'unmarkTargets' }).catch(() => {});
+
+    const waited = Math.round((Date.now() - started) / 1000);
+    const snap = await snapshotAll(id).catch(() => ({ text: '' }));
+    const head = {
+      continued: `✅ 用户说完成了（等了 ${waited}s）`,
+      completed: `✅ 自动判定完成（等了 ${waited}s，命中了你给的 until 条件）`,
+      cancelled: `🛑 用户点了取消（等了 ${waited}s）。这是明确的「别做这件事」——停止当前任务，不要换个方式重试。`,
+      timed_out: `⏰ ${Math.round(timeout / 1000)}s 内没有人响应。用户可能不在电脑前。`,
+    }[res.outcome] || res.outcome;
+
+    return {
+      outcome: res.outcome,
+      text: `${head}${res.note ? `\n用户留言：${res.note}` : ''}\n\n${snap.text}`,
     };
-    await step('targets(before)', async () => (await chrome.debugger.getTargets()).filter((t) => t.attached).map((t) => `${t.tabId}:${t.type}`));
-    await step('perm', () => cdp.hasPermission());
-    await step('cdp.evaluate-1', () => cdp.evaluate(id, '1+1'));
-    await step('isAttached', async () => cdp.isAttached(id));
-    if (p.focusEmu) {
-      await step('focusEmulation', () => cdp.withL2(id, (cmd) =>
-        cmd('Emulation.setFocusEmulationEnabled', { enabled: true })));
-    }
-    await step('rect', async () => (rect = JSON.parse(await cdp.evaluate(id,
-      `(() => { const el = document.querySelector('#probe'); const r = el.getBoundingClientRect();
-        return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`))));
-    await step('reset-events', () => cdp.evaluate(id, 'window.__events = []; "ok"'));
-    await step('cdp.click', () => cdp.click(id, rect.x, rect.y));
-    await step('sleep', () => sleep(400));
-    await step('read-events', () => cdp.evaluate(id, 'JSON.stringify((window.__events||[]).map(e => e.type + ":" + e.trusted))'));
-    await step('cdp.detach', async () => { await cdp.detach(id); return 'done'; });
-    return { text: out.join('\n') };
-  },
-
-  // 【临时】L2 后台有效性验证。验证完删除。
-  async __probe(p, tabId) {
-    const id = await resolveTab(tabId);
-    const tab = await chrome.tabs.get(id);
-    const out = [`标签页 ${id} active=${tab.active}（false = 后台）`];
-
-    if (p.reset) await cdp.evaluate(id, 'window.__events = []; "ok"');
-
-    const rect = JSON.parse(await cdp.evaluate(id,
-      `(() => { const el = document.querySelector(${JSON.stringify(p.selector)});
-         if (!el) return null;
-         el.scrollIntoView({block:'center'});
-         const r = el.getBoundingClientRect();
-         return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`));
-    if (!rect) throw err('REF_NOT_FOUND', `没找到 ${p.selector}`);
-    out.push(`坐标 ${Math.round(rect.x)},${Math.round(rect.y)}`);
-
-    if (p.key || p.text) {
-      await cdp.click(id, rect.x, rect.y);   // 先真实点击聚焦，再发键——和人的操作顺序一致
-      await sleep(150);
-      if (p.key) await cdp.key(id, p.key, { repeat: p.repeat || 1 });
-      else await cdp.insertText(id, p.text);
-    } else {
-      await cdp.click(id, rect.x, rect.y);
-    }
-
-    await sleep(p.settle || 400);
-    if (p.read) out.push(`${p.read} = ` + await cdp.evaluate(id, p.read));
-    return { text: out.join('\n') };
   },
 
   // 开发期用：改完扩展代码不必再手动去 chrome://extensions 点重载。
@@ -810,6 +947,9 @@ chrome.runtime.onInstalled.addListener(() => {
   connect();
   chrome.alarms.create('hc-keepalive', { periodInMinutes: 0.5 });
 });
+// SW 上一条命里挂着的调试会话，浏览器还替它留着——连同那条黄带子。
+// 每次启动扫一遍，否则用户会看到一条永远摘不掉的「已开始调试此浏览器」。
+cdp.reapOrphans();
 chrome.alarms?.onAlarm.addListener(() => connect());   // SW 被回收后靠这个复活
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   const { activeTabId } = await chrome.storage.local.get('activeTabId');
@@ -825,6 +965,12 @@ chrome.runtime.onMessage.addListener((m, _s, sendResponse) => {
   }
   if (m.__hcPopup === 'connect') {
     connect().then(() => sendResponse({ connected: ws?.readyState === 1 }));
+    return true;
+  }
+  // 用户在 popup 里关掉高保真模式时，先把还挂着的调试会话断干净，
+  // 否则权限撤销了，黄条却还留在标签页上，而且再也没人能去摘它
+  if (m.__hcPopup === 'detachAll') {
+    cdp.reapAll().finally(() => sendResponse({ ok: true }));
     return true;
   }
 });
