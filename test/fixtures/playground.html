@@ -136,6 +136,18 @@
   </p>
 </section>
 
+<!-- 12. 同名按钮：语义定位最危险的一种页面 -->
+<section>
+  <h2>12. 两个一模一样的「删除」</h2>
+  <p>
+    第 1 条 <button class="del" data-n="1">删除</button>
+    第 2 条 <button class="del" data-n="2">删除</button>
+    <button id="delAll">删除全部</button>
+  </p>
+  <b id="delOut">未删除</b>
+  <br><small>find 在这里必须报错列候选，而不是替用户挑一个；「删除全部」不该被「删除」误伤</small>
+</section>
+
 <script>
 // 跨源 iframe：localhost 和 127.0.0.1 是不同的源，端口跟随当前页面，换端口也能跑
 document.getElementById('xframe').src =
@@ -245,4 +257,11 @@ function trustedOnly(btnId, outId, text) {
 trustedOnly('trustedOnly', 'trustedOut', '已触发（真实事件）');
 trustedOnly('paySim', 'payOut', '已支付（真实事件）');
 // deadBtn 故意不绑任何东西
+
+// ---- 12. 同名按钮 ----
+document.querySelectorAll('.del').forEach((b) => {
+  b.onclick = () => { document.getElementById('delOut').textContent = '删了第 ' + b.dataset.n + ' 条'; };
+});
+document.getElementById('delAll').onclick =
+  () => { document.getElementById('delOut').textContent = '删了全部'; };
 </script>

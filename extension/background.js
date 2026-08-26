@@ -6,6 +6,7 @@
 // 外加 20s 一次的 ping；再加 chrome.alarms 兜底，把被回收后的 SW 唤醒重连。
 
 import * as cdp from './cdp.js';
+import { CRED_URL, redactCreds } from './redact.js';
 
 const PORTS = [8899, 8900, 8901, 8902, 8903];
 const PING_MS = 20000;
@@ -112,12 +113,36 @@ function emit(event, extra = {}) {
 
 // ---------- 命令分发 ----------
 
+// 这些命令自己决定用不用受控 tab——tabs 的 new/select/close 各有各的槽语义，
+// download 整条链不碰 tab，reload 是扩展级动作
+const NO_SLOT_CMDS = new Set(['tabs', 'download', 'reload']);
+
 async function onMessage(msg) {
+  // agent_closed：桥通知扩展某条 agent 连接断了，清掉它的槽，
+  // 防死槽让「别人在操控」的警告一直误报
+  if (msg.type === 'event') {
+    if (msg.event === 'agent_closed' && msg.connId !== undefined) {
+      await chrome.storage.local.remove(agentTabKey(msg.connId));
+    }
+    return;
+  }
   if (msg.type !== 'cmd') return;
   try {
     const handler = HANDLERS[msg.cmd];
     if (!handler) throw err('INTERNAL', `未知命令 ${msg.cmd}`);
-    const data = await handler(msg.params || {}, msg.tabId);
+    // 缺省 tabId 在这里统一解析成具体 tabId（连接级槽），handler 拿到的永远是实值。
+    // ctx 只在本函数内现场传——SW 里两条命令的 await 会交错，绝不能用模块级变量存「当前消息」
+    const ctx = { connId: msg.connId, adopted: false };
+    const tabId = NO_SLOT_CMDS.has(msg.cmd) ? msg.tabId : await resolveTab(msg.tabId, msg.connId, ctx);
+    const data = await handler(msg.params || {}, tabId, ctx);
+    if (ctx.adopted) {
+      // 本会话还没定过自己的受控 tab，继承的是全局槽。多 agent 并发时这是最危险的时刻：
+      // agent 不知道自己在哪个页面上。只提示一次（SW 重启后可能再来一次，无伤大雅）。
+      const head = `⚠️ 本会话还没定过自己的受控标签页，现在沿用的是最近被操控的「${ctx.adoptedTitle || ''}」[${ctx.adoptedTab}]。\n`
+        + `   多个会话同时干活时，请用 tabs(action:"select", tabId:…) 定下自己的标签页，别在同一个页面上互相踩。\n`;
+      if (typeof data === 'string') return reply(msg.id, true, head + '\n' + data, msg.__k);
+      if (data && typeof data.text === 'string') data.text = head + '\n' + data.text;
+    }
     reply(msg.id, true, data, msg.__k);
   } catch (e) {
     reply(msg.id, false, { code: e.code || 'INTERNAL', message: e.message || String(e) }, msg.__k);
@@ -134,21 +159,50 @@ const err = (code, message) => Object.assign(new Error(message), { code });
 // agent 手上正在操作的标签页就凭空「不存在」了。local 的代价是可能存着一个
 // 早已关掉的旧 id——但下面每次读都 chrome.tabs.get 校验一次，对不上就当没有。
 // 用「读时校验」换「跨重载不丢」，这笔买卖划算。
+//
+// 多 agent 并发：每个 agent 连接（桥盖章的 connId）有自己独立的槽 agentTab:<connId>。
+// activeTabId 降级为「最近被 new/select 的 tab」——新连接首次缺省调用时继承它，
+// 继承时 ctx.adopted 打标，onMessage 在返回里提示 agent 尽早 select。
+// 无 connId（旧桥）走纯全局槽，行为与 v0.3 完全一致。
 
-async function getActiveTabId() {
+const agentTabKey = (connId) => `agentTab:${connId}`;
+
+async function getActiveTabId(connId, ctx) {
+  if (connId !== undefined) {
+    const key = agentTabKey(connId);
+    const { [key]: mine } = await chrome.storage.local.get(key);
+    if (mine) {
+      try { await chrome.tabs.get(mine); return mine; } catch { await chrome.storage.local.remove(key); } // 槽里的 tab 已关，自愈
+    }
+  }
   const { activeTabId } = await chrome.storage.local.get('activeTabId');
   if (activeTabId) {
-    try { await chrome.tabs.get(activeTabId); return activeTabId; } catch { /* 已关 */ }
+    try {
+      const tab = await chrome.tabs.get(activeTabId);
+      if (connId !== undefined) {
+        await chrome.storage.local.set({ [agentTabKey(connId)]: activeTabId });   // 继承 = 写自己的槽
+        if (ctx) { ctx.adopted = true; ctx.adoptedTab = activeTabId; ctx.adoptedTitle = tab.title; }
+      }
+      return activeTabId;
+    } catch { /* 已关 */ }
   }
   throw err('NO_TAB', '还没有受控标签页——先 tabs(action:"new", url:…) 开一个');
 }
 const setActiveTabId = (id) => chrome.storage.local.set({ activeTabId: id });
 
-async function resolveTab(tabId) {
+async function resolveTab(tabId, connId, ctx) {
   if (tabId) {
     try { await chrome.tabs.get(tabId); return tabId; } catch { throw err('NO_TAB', `标签页 ${tabId} 不存在`); }
   }
-  return getActiveTabId();
+  return getActiveTabId(connId, ctx);
+}
+
+// select/close 时检查这个 tab 是不是别的会话的受控页——不阻止，但必须说清
+async function conflictNote(tabId, connId) {
+  const mine = connId === undefined ? null : agentTabKey(connId);
+  const all = await chrome.storage.local.get(null);
+  const clash = Object.entries(all).some(([k, v]) => k.startsWith('agentTab:') && k !== mine && v === tabId);
+  return clash ? '⚠️ 这个标签页正被另一个会话操控。\n' : '';
 }
 
 // content script 按需注入，注入前先探活，避免重复注入把 refMap 清空
@@ -373,13 +427,41 @@ async function settle(id, frameId, params, baseline, beforeUrl) {
     // 跳转是最强的证据，而且此时旧 baseline 已经没有意义，立刻返回
     if (url !== beforeUrl) return { changed: true, navigated: true, parts: [`已跳转到 ${url}`] };
     try {
-      last = await toContent(id, { __hc: 'effect', baseline, ref: params.ref, selector: params.selector }, frameId);
+      last = await toContent(id, { __hc: 'effect', baseline, ref: params.ref, selector: params.selector, find: params.find }, frameId);
     } catch {
       /* 页面正在换页时 content script 会短暂不在，下一轮再问 */
     }
     if (last.changed) return last;
   }
   return last;
+}
+
+// ---------- 凭据隐去 ----------
+//
+// 判定逻辑在 ./redact.js —— 那些是纯函数，抽出去是为了让 `npm test` 能直接跑到，
+// 不必开真 Chrome。这里只剩下需要 chrome API 的那一层：拿 URL、组装告诫。
+
+async function guardCreds(tabId, payload) {
+  if (!payload || typeof payload.text !== 'string') return payload;
+  let url = '';
+  try { url = (await chrome.tabs.get(tabId)).url || ''; } catch { /* 标签页没了 */ }
+
+  const { text, count } = redactCreds(payload.text);
+  const onCredPage = CRED_URL.test(url);
+  if (!count && !onCredPage) return payload;
+
+  const why = [
+    count ? `已隐去 ${count} 行疑似凭据` : '',
+    onCredPage ? '当前地址看起来是凭据/安全设置页' : '',
+  ].filter(Boolean).join('；');
+
+  return {
+    ...payload,
+    text: `🔒 ${why}。\n`
+      + `   这类内容不要转述、不要写进文件、不要发给任何人——需要的话请用户自己看屏幕。\n`
+      + `   如果你只是要在这个页面上操作，用 snapshot 拿元素就够了，不必读正文。\n\n`
+      + text,
+  };
 }
 
 // ---------- 受控标签页漂移 ----------
@@ -394,13 +476,14 @@ async function settle(id, frameId, params, baseline, beforeUrl) {
 // ref 快照有 STALE_SNAPSHOT 防呆，但 read_text / query / network 这些
 // 不带 ref 的读取操作完全没有保护。这里补上：只要 URL 和上次 agent 见到的不一样，
 // 就在返回最前面显著说明。不阻断（那会让正常的跳转流程没法走），但绝不静默。
-const lastSeen = new Map();   // tabId -> 上次 agent 操作时的 URL
+const lastSeen = new Map();   // 「connId:tabId」-> 上次 agent 操作时的 URL；无 connId（旧桥）落 '*' 共享桶
 
-async function driftNote(tabId) {
+async function driftNote(tabId, connId) {
+  const key = `${connId ?? '*'}:${tabId}`;
   let now;
   try { now = (await chrome.tabs.get(tabId)).url; } catch { return ''; }
-  const was = lastSeen.get(tabId);
-  lastSeen.set(tabId, now);
+  const was = lastSeen.get(key);
+  lastSeen.set(key, now);
   if (!was || was === now) return '';
   return `⚠️ 这个标签页的地址变了，而且不是本次操作造成的：\n`
     + `   原本：${was}\n   现在：${now}\n`
@@ -409,8 +492,8 @@ async function driftNote(tabId) {
 }
 
 // agent 自己导航到的地方不算漂移
-const markNavigated = async (tabId) => {
-  try { lastSeen.set(tabId, (await chrome.tabs.get(tabId)).url); } catch { /* 标签页没了 */ }
+const markNavigated = async (tabId, connId) => {
+  try { lastSeen.set(`${connId ?? '*'}:${tabId}`, (await chrome.tabs.get(tabId)).url); } catch { /* 标签页没了 */ }
 };
 
 // ask 的自动完成判据。轮询而不是 MutationObserver：判据里有 URL 这种
@@ -440,14 +523,15 @@ function watchUntil(tabId, until, timeout) {
   return { promise, stop };
 }
 
-async function perform(id, cmd, p) {
+// 执行一个动作并采证据，**不出快照**。
+// act 逐步调它，只在最后出一份快照——省掉的那些中间快照正是批处理的全部收益。
+async function performCore(id, cmd, p, { blockSensitive = false } = {}, ctx) {
   const { frameId, params } = prepare(id, p);
-  const drift = await driftNote(id);
   const before = (await chrome.tabs.get(id)).url;
 
   // 定位：resolve、滚动、遮挡检测全在 content script 里做（一行没改），
   // 顺带把效果基线采回来。没有 ref 的操作（fill、无 ref 的 key）只采基线。
-  const hasTarget = !!(params.ref || params.selector);
+  const hasTarget = !!(params.ref || params.selector || params.find);
   const loc = await toContent(id,
     hasTarget ? { __hc: 'locate', ...params } : { __hc: 'locate', baselineOnly: true },
     frameId);
@@ -456,6 +540,14 @@ async function perform(id, cmd, p) {
   // 换算要知道 iframe 元素在顶层的位置，跨源时子框架自己也不知道。
   // 所以 v0.3 的 L2 只覆盖顶层框架——iframe 里主要是支付、验证码、OAuth，
   // 而验证码本来就该交给 ask 让用户来。
+  // 批处理不代做敏感动作。一串动作里夹一个「提交订单」，一口气跑完的话
+  // 中间没有任何人看得见——而 prompt injection 恰恰会这么用。
+  // 停在这一步，让 agent 单独去调 click：那样它会看到完整的效果证据，
+  // 这一步在审计日志里也独立可查。
+  if (blockSensitive && loc?.sensitive) {
+    return { blocked: true, why: 'sensitive' };
+  }
+
   const l2ok = frameId === 0 && L2_CMDS.has(cmd) && hasTarget && !loc?.outside;
   let layer = (l2ok && (params.real || loc?.prefer === 'L2')) ? 'L2' : 'L1';
 
@@ -501,11 +593,32 @@ async function perform(id, cmd, p) {
 
   const after = (await chrome.tabs.get(id)).url;
   const navigated = before !== after;
-  if (navigated) { await waitForLoad(id); await markNavigated(id); }
-  const snap = await snapshotAll(id);
+  if (navigated) { await waitForLoad(id); await markNavigated(id, ctx?.connId); }
 
-  const head = [
-    drift,
+  return { note, l2note, ev, navigated, upgraded };
+}
+
+// 每一步的人话描述。批处理最怕的是「跑了一半，不知道跑到哪了」——
+// 回执里必须能一眼看出每一步动了什么。
+function describeStep(st) {
+  const t = st.find
+    ? `${st.find.role ? st.find.role + ' ' : ''}「${st.find.name || st.find.selector || ''}」`
+    : st.ref ? `[${st.ref}]`
+    : st.selector ? `(${st.selector})`
+    : '';
+  const extra = st.text !== undefined ? ` ←${String(st.text).length}字`
+    : st.value !== undefined ? ` ←"${st.value}"`
+    : st.check !== undefined ? (st.check ? ' 勾选' : ' 取消勾选')
+    : st.key !== undefined ? ` ${[].concat(st.key).join('+')}`
+    : st.url ? ` ${st.url}`
+    : st.value === undefined && st.for ? ` ${st.for} ${st.value || ''}`
+    : '';
+  return `${st.do || '?'} ${t}${extra}`.trim();
+}
+
+// 把一次执行的结果写成给 agent 看的那几行
+function effectLines({ note, l2note, ev, upgraded }) {
+  return [
     note + (upgraded ? '　←　普通事件无效，已自动改用真实事件' : ''),
     l2note,
     ev.changed
@@ -519,41 +632,151 @@ async function perform(id, cmd, p) {
           + `② 操作确实发生了但只有异步副作用（请求已发出、页面稍后才变）；`
           + `③ 站点忽略了这次输入。别原样重试——换个目标，或先 wait 再看。`,
   ].filter(Boolean).join('\n');
+}
 
-  return { ...snap, text: `${head}\n\n${snap.text}`, navigated };
+async function perform(id, cmd, p, ctx) {
+  const drift = await driftNote(id, ctx?.connId);
+  const r = await performCore(id, cmd, p, {}, ctx);
+  const snap = await snapshotAll(id);
+  const head = [drift, effectLines(r)].filter(Boolean).join('\n');
+  return { ...snap, text: `${head}\n\n${snap.text}`, navigated: r.navigated };
 }
 
 const HANDLERS = {
-  async snapshot(p, tabId) {
+  async snapshot(p, tabId, ctx) {
     const id = await resolveTab(tabId);
-    const drift = await driftNote(id);
-    const snap = await snapshotAll(id, p);
+    const drift = await driftNote(id, ctx?.connId);
+    const snap = await guardCreds(id, await snapshotAll(id, p));
     return drift ? { ...snap, text: drift + '\n' + snap.text } : snap;
   },
 
-  async navigate(p, tabId) {
+  async navigate(p, tabId, ctx) {
     const id = await resolveTab(tabId);
     if (p.url) await chrome.tabs.update(id, { url: p.url });
     else await toContent(id, { __hc: 'history', action: p.action || 'reload' });
     await waitForLoad(id);
     await sleep(300); // 给 SPA 的首屏渲染一点时间，否则快照经常空
-    await markNavigated(id);
+    await markNavigated(id, ctx?.connId);
     return snapshotAll(id);
+  },
+
+  // 批处理：把「执行 → 观察 → 决定」的循环从模型层下沉到扩展层。
+  //
+  // 存在理由是回合数。一个「点下一步 → 填手机号 → 勾同意 → 提交」的流程，
+  // 逐个调用是 4 次模型推理 + 4 份各 1–2k token 的快照，而中间那 3 份
+  // agent 根本不看——它在发出第一个 click 之前就知道后面三步要干什么。
+  // act 只在最后回一份快照，省掉的就是中间那些。
+  //
+  // 最难的是 ref 会在中途作废：第二步开始，页面可能已经重渲染，
+  // ref 要么指向别的元素，要么不存在。所以有了 find（语义定位）——
+  // 页面变了就用 role + 可访问名现场找回来。规则见下面的 structureChanged。
+  async act(p, tabId, ctx) {
+    const id = await resolveTab(tabId);
+    const steps = Array.isArray(p.steps) ? p.steps : [];
+    if (!steps.length) throw err('INTERNAL', 'steps 不能为空');
+    if (steps.length > 20) throw err('INTERNAL', `一次最多 20 步，收到 ${steps.length} 步。拆开调用。`);
+
+    const drift = await driftNote(id, ctx?.connId);
+    const done = [];
+    let stopped = null;
+    // 页面结构一旦变过，之前那份快照里的 ref 全部作废——只有 find 还能用
+    let structureChanged = false;
+
+    for (let i = 0; i < steps.length; i++) {
+      const { do: cmd, ...rest } = steps[i];
+      const label = describeStep(steps[i]);
+
+      if (!cmd) { stopped = { i, label, why: `第 ${i + 1} 步没写 do` }; break; }
+
+      if (structureChanged && rest.ref && !rest.find) {
+        stopped = {
+          i, label,
+          why: `页面结构在上一步之后变了，快照里的 ref 已经全部作废。`
+            + `这一步用的是 ref="${rest.ref}"，换成 find（按 role + 名字定位）就能继续。`,
+        };
+        break;
+      }
+
+      try {
+        if (cmd === 'wait') {
+          const r = await toContent(id, { __hc: 'wait', ...rest });
+          done.push(`✅ ${label}　${r?.text || ''}`);
+          continue;
+        }
+        if (cmd === 'navigate') {
+          await HANDLERS.navigate(rest, id, ctx);
+          structureChanged = true;
+          done.push(`✅ ${label}`);
+          continue;
+        }
+        if (cmd === 'scroll') {
+          const r = await toContent(id, { __hc: 'scroll', ...rest });
+          done.push(`✅ ${label}　${(r?.text || '').split('\n')[0]}`);
+          continue;
+        }
+
+        const r = await performCore(id, cmd, { ...rest, snapshotId: p.snapshotId },
+          { blockSensitive: !p.allowSensitive }, ctx);
+
+        if (r.blocked) {
+          stopped = {
+            i, label,
+            why: '这是提交/支付/删除一类的动作，批处理不代做——一串动作里夹一个它，'
+              + '跑完了中间没有任何人看得见。单独调用一次 click 把它做掉，'
+              + '那样你会看到它自己的效果证据。',
+          };
+          break;
+        }
+
+        if (!r.ev.changed) {
+          stopped = {
+            i, label,
+            why: `这一步没有让页面产生任何可归因的变化，后面的步骤多半建立在错误的前提上，`
+              + `所以停在这里。${r.l2note || ''}`,
+          };
+          break;
+        }
+
+        done.push(`✅ ${label}　效果：${r.ev.parts.join('；')}`);
+        // 只有「结构性」变化才作废 ref：填个值、勾个框不影响编号，
+        // 而连续填表正是批处理最常见的用法，不该逼它们全用 find
+        if (r.navigated || r.ev.parts.some((s) => /节点|顶层|跳转|移除/.test(s))) {
+          structureChanged = true;
+        }
+      } catch (e) {
+        stopped = { i, label, why: `[${e.code || 'INTERNAL'}] ${e.message}` };
+        break;
+      }
+    }
+
+    const snap = await snapshotAll(id);
+    const total = steps.length;
+    const head = [
+      drift,
+      `act ${stopped ? `停在第 ${stopped.i + 1} 步` : '完成'} ${done.length}/${total}：`,
+      ...done.map((d) => '  ' + d),
+      stopped ? `  ⏸ ${stopped.label}\n     ${stopped.why}` : '',
+      stopped && stopped.i + 1 < total
+        ? `  还剩 ${total - stopped.i - 1} 步没做：${steps.slice(stopped.i + 1).map(describeStep).join('、')}`
+        : '',
+    ].filter(Boolean).join('\n');
+
+    return { ...snap, text: `${head}\n\n${snap.text}`, completed: !stopped, doneCount: done.length };
   },
 
   // 五个写操作走同一条路径：定位 → 执行（L1 或 L2）→ 采效果证据 → 必要时升级重试。
   // select 和 fill 不进 L2：原生 <select> 的下拉是浏览器进程的 UI，CDP 打不到，
   // 点了反而卡住；fill 是多字段批量，逐字段定位的收益等 act 批处理一起做。
-  async click(p, tabId) { return perform(await resolveTab(tabId), 'click', p); },
-  async type(p, tabId) { return perform(await resolveTab(tabId), 'type', p); },
-  async key(p, tabId) { return perform(await resolveTab(tabId), 'key', p); },
-  async fill(p, tabId) { return perform(await resolveTab(tabId), 'fill', p); },
-  async select(p, tabId) { return perform(await resolveTab(tabId), 'select', p); },
+  async click(p, tabId, ctx) { return perform(await resolveTab(tabId), 'click', p, ctx); },
+  async type(p, tabId, ctx) { return perform(await resolveTab(tabId), 'type', p, ctx); },
+  async key(p, tabId, ctx) { return perform(await resolveTab(tabId), 'key', p, ctx); },
+  async fill(p, tabId, ctx) { return perform(await resolveTab(tabId), 'fill', p, ctx); },
+  async select(p, tabId, ctx) { return perform(await resolveTab(tabId), 'select', p, ctx); },
 
-  async read_text(p, tabId) {
+  async read_text(p, tabId, ctx) {
     const id = await resolveTab(tabId);
-    const drift = await driftNote(id);
-    const r = await toContent(id, { __hc: 'read_text', ...p });
+    const drift = await driftNote(id, ctx?.connId);
+    const r = await guardCreds(id, await toContent(id, { __hc: 'read_text', ...p }));
     return drift ? { ...r, text: drift + '\n' + r.text } : r;
   },
 
@@ -562,10 +785,10 @@ const HANDLERS = {
     return toContent(id, { __hc: 'wait', ...p });
   },
 
-  async query(p, tabId) {
+  async query(p, tabId, ctx) {
     const id = await resolveTab(tabId);
-    const drift = await driftNote(id);
-    const r = await toContent(id, { __hc: 'query', ...p });
+    const drift = await driftNote(id, ctx?.connId);
+    const r = await guardCreds(id, await toContent(id, { __hc: 'query', ...p }));
     return drift ? { ...r, text: drift + '\n' + r.text } : r;
   },
 
@@ -806,32 +1029,39 @@ const HANDLERS = {
     }
   },
 
-  async tabs(p) {
+  async tabs(p, tabId, ctx) {
+    const connId = ctx?.connId;
     if (p.action === 'list') {
       const all = await chrome.tabs.query({});
-      const { activeTabId } = await chrome.storage.local.get('activeTabId');
-      const lines = all.map((t) => `[${t.id}]${t.id === activeTabId ? ' *' : '  '} ${t.title || '(无标题)'} — ${t.url}`);
+      // 标的是本会话自己的受控 tab；旧桥（无 connId）退回全局槽
+      const { [connId === undefined ? 'activeTabId' : agentTabKey(connId)]: mine } =
+        await chrome.storage.local.get(connId === undefined ? 'activeTabId' : agentTabKey(connId));
+      const lines = all.map((t) => `[${t.id}]${t.id === mine ? ' *' : '  '} ${t.title || '(无标题)'} — ${t.url}`);
       return { text: `共 ${all.length} 个标签页（* = 受控）\n` + lines.join('\n') };
     }
     // active:false —— agent 在后台干活，不把用户从他正在看的页面上拽走。
     // 需要抢焦点的场合（截图、让用户看着操作）由调用方显式传 focus:true。
     if (p.action === 'new') {
       const tab = await chrome.tabs.create({ url: p.url || 'about:blank', active: !!p.focus });
-      await setActiveTabId(tab.id);
+      await setActiveTabId(tab.id);   // 全局槽照旧更新：它是「最近受控 tab」的继承源
+      if (connId !== undefined) await chrome.storage.local.set({ [agentTabKey(connId)]: tab.id });
       if (p.url) { await waitForLoad(tab.id); await sleep(300); }
       return { text: `已在后台打开标签页 ${tab.id}`, tabId: tab.id };
     }
     // 「受控」和「前台」是两件事：这里只改受控目标，不动用户的视线
     if (p.action === 'select') {
-      const id = await resolveTab(p.tabId);
+      const id = await resolveTab(p.tabId, connId, ctx);
       await setActiveTabId(id);
+      if (connId !== undefined) await chrome.storage.local.set({ [agentTabKey(connId)]: id });
+      const warn = await conflictNote(id, connId);
       if (p.focus) await chrome.tabs.update(id, { active: true });
-      return { text: `受控标签页切到 ${id}` };
+      return { text: warn + `受控标签页切到 ${id}` };
     }
     if (p.action === 'close') {
-      const id = await resolveTab(p.tabId);
+      const id = await resolveTab(p.tabId, connId);
+      const warn = await conflictNote(id, connId);
       await chrome.tabs.remove(id);
-      return { text: `已关闭标签页 ${id}` };
+      return { text: warn + `已关闭标签页 ${id}` };
     }
     throw err('INTERNAL', `未知 tabs 动作 ${p.action}`);
   },
@@ -952,8 +1182,11 @@ chrome.runtime.onInstalled.addListener(() => {
 cdp.reapOrphans();
 chrome.alarms?.onAlarm.addListener(() => connect());   // SW 被回收后靠这个复活
 chrome.tabs.onRemoved.addListener(async (tabId) => {
-  const { activeTabId } = await chrome.storage.local.get('activeTabId');
-  if (tabId === activeTabId) await chrome.storage.local.remove('activeTabId');
+  // 全局槽 + 所有连接级槽一次扫清，别留指向死 tab 的槽
+  const all = await chrome.storage.local.get(null);
+  const dead = Object.keys(all).filter((k) => (k === 'activeTabId' || k.startsWith('agentTab:')) && all[k] === tabId);
+  if (dead.length) await chrome.storage.local.remove(dead);
+  for (const k of lastSeen.keys()) if (k.endsWith(':' + tabId)) lastSeen.delete(k);
   emit('tab_closed', { tabId });
 });
 

@@ -70,7 +70,10 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
 
     ws.on('close', () => {
       clearTimeout(helloTimer);
-      agents.delete(ws);
+      if (agents.delete(ws)) {
+        // agent 走了：让扩展清掉它的连接级槽，否则死槽会让「别人在操控」警告一直误报
+        send(extension, { type: 'event', event: 'agent_closed', connId: ws.connId });
+      }
       if (ws === extension) {
         extension = null;
         log('扩展断开');
@@ -151,8 +154,9 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
       }, ms);
 
       pending.set(key, { agent: ws, cmd: msg.cmd, timer, startedAt: Date.now(), id: msg.id });
-      audit({ ev: 'cmd', id: msg.id, cmd: msg.cmd, client: ws.client, params: redact(msg.params) });
-      send(extension, { ...msg, __k: key });   // 原样带回，用于精确路由
+      audit({ ev: 'cmd', id: msg.id, cmd: msg.cmd, client: ws.client, connId: ws.connId, params: redact(msg.params) });
+      // connId 盖章：扩展据此维护每个 agent 连接自己的受控 tab 槽（多 agent 并发隔离）
+      send(extension, { ...msg, __k: key, connId: ws.connId });   // __k 原样带回，用于精确路由
       return;
     }
 

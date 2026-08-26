@@ -159,6 +159,109 @@ test('两个 agent 同时发同一个 id，响应不会串到对方', async () =
   ext.close(); a1.close(); a2.close();
 });
 
+test('桥给每条命令盖章 connId：每连接稳定、连接间互异，且不回泄给 agent', async () => {
+  const ext = open({ origin: 'chrome-extension://stamp' });
+  ext.on('open', () => ext.send(JSON.stringify({ type: 'hello', role: 'extension', extId: 'stamp', v: 1 })));
+  await firstMessage(ext);
+
+  const mk = async (name) => {
+    const a = open();
+    a.on('open', () => a.send(JSON.stringify({ type: 'hello', role: 'agent', token: TOKEN, client: name, v: 1 })));
+    await firstMessage(a);
+    return a;
+  };
+  const [a1, a2] = [await mk('stamp-one'), await mk('stamp-two')];
+
+  const seen = [];
+  ext.on('message', (d) => {
+    const m = JSON.parse(d.toString());
+    if (m.type !== 'cmd') return;
+    seen.push(m);
+    ext.send(JSON.stringify({ type: 'res', id: m.id, __k: m.__k, ok: true, data: { text: 'ok' } }));
+  });
+
+  const r1 = nextRes(a1), r2 = nextRes(a2);
+  a1.send(JSON.stringify({ type: 'cmd', id: 's1', cmd: 'snapshot', params: {} }));
+  a2.send(JSON.stringify({ type: 'cmd', id: 's2', cmd: 'snapshot', params: {} }));
+  const [res1, res2] = await Promise.all([r1, r2]);
+  assert.equal('connId' in res1, false, 'agent 的 res 里不该有 connId');
+  assert.equal('__k' in res2, false, 'agent 的 res 里不该有路由键');
+
+  // 同一个 agent 再发一条，connId 必须和第一次相同
+  const r3 = nextRes(a1);
+  a1.send(JSON.stringify({ type: 'cmd', id: 's3', cmd: 'snapshot', params: {} }));
+  await r3;
+
+  assert.equal(seen.length, 3);
+  assert.ok(seen.every((m) => Number.isInteger(m.connId)), '每条命令都带 connId');
+  assert.equal(seen.find((m) => m.id === 's1').connId, seen.find((m) => m.id === 's3').connId, '同一连接 connId 必须稳定');
+  assert.notEqual(seen.find((m) => m.id === 's1').connId, seen.find((m) => m.id === 's2').connId, '两个 agent 的 connId 必须互异');
+
+  ext.close(); a1.close(); a2.close();
+});
+
+test('agent 断开时扩展收到 agent_closed（带 connId），别的 agent 收不到', async () => {
+  const ext = open({ origin: 'chrome-extension://gone' });
+  ext.on('open', () => ext.send(JSON.stringify({ type: 'hello', role: 'extension', extId: 'gone', v: 1 })));
+  await firstMessage(ext);
+
+  const mk = async (name) => {
+    const a = open();
+    a.on('open', () => a.send(JSON.stringify({ type: 'hello', role: 'agent', token: TOKEN, client: name, v: 1 })));
+    await firstMessage(a);
+    return a;
+  };
+  const [leaver, stayer] = [await mk('leaver'), await mk('stayer')];
+
+  const closedEvent = new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('timeout')), 3000);
+    ext.on('message', (d) => {
+      const m = JSON.parse(d.toString());
+      if (m.type === 'event' && m.event === 'agent_closed') { clearTimeout(t); resolve(m); }
+    });
+  });
+  let leaked = false;
+  stayer.on('message', (d) => {
+    const m = JSON.parse(d.toString());
+    if (m.type === 'event' && m.event === 'agent_closed') leaked = true;
+  });
+
+  leaver.close();
+  const ev = await closedEvent;
+  assert.ok(Number.isInteger(ev.connId), 'agent_closed 必须带 connId 供扩展清槽');
+  await new Promise((r) => setTimeout(r, 200));   // 给广播留点时间再查泄漏
+  assert.equal(leaked, false, 'agent_closed 不该广播给别的 agent');
+
+  ext.close(); stayer.close();
+});
+
+test('扩展发的事件广播给所有 agent（tab_closed 回归）', async () => {
+  const ext = open({ origin: 'chrome-extension://bc' });
+  ext.on('open', () => ext.send(JSON.stringify({ type: 'hello', role: 'extension', extId: 'bc', v: 1 })));
+  await firstMessage(ext);
+
+  const mk = async (name) => {
+    const a = open();
+    a.on('open', () => a.send(JSON.stringify({ type: 'hello', role: 'agent', token: TOKEN, client: name, v: 1 })));
+    await firstMessage(a);
+    return a;
+  };
+  const [a1, a2] = [await mk('bc-one'), await mk('bc-two')];
+
+  const got = (a) => new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('timeout')), 3000);
+    a.on('message', (d) => {
+      const m = JSON.parse(d.toString());
+      if (m.type === 'event' && m.event === 'tab_closed') { clearTimeout(t); resolve(m); }
+    });
+  });
+  const g1 = got(a1), g2 = got(a2);
+  ext.send(JSON.stringify({ type: 'event', event: 'tab_closed', tabId: 9 }));
+  await Promise.all([g1, g2]);
+
+  ext.close(); a1.close(); a2.close();
+});
+
 test('扩展和桥的版本号必须同步', () => {
   // 桥每次握手都拿这两个数比对，对不上就警告「去重载扩展」。
   // 一旦它们因为发版时漏改一处而长期不一致，这条警告就变成了狼来了——

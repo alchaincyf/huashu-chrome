@@ -15,13 +15,23 @@ import { VERSION } from './lib/version.js';
 const REF = { type: 'string', description: 'Element ref from the latest snapshot, e.g. "e3"' };
 const SNAP = { type: 'string', description: 'snapshotId the ref came from' };
 const TAB = { type: 'number', description: 'Target tab id. Omit to use the active controlled tab.' };
-const SEL = { type: 'string', description: 'CSS selector fallback, for elements snapshot cannot see (zero-size, exotic editors). Skips ref safety checks — use only when ref fails.' };
+const SEL = { type: 'string', description: 'CSS fallback for elements the snapshot cannot see. Skips ref safety checks.' };
+// 这个对象被 4 处引用，schema 每处都会完整展开一遍 —— 描述写长一个字，
+// agent 的 context 就多付四份。规则写在 STRATEGY 里，那里只出现一次。
+const FIND = {
+  type: 'object',
+  description: 'Locate by role+name from the snapshot instead of by ref. Survives re-renders.',
+  properties: {
+    role: { type: 'string' },
+    name: { type: 'string' },
+    nth: { type: 'number', description: '0-based, when several share a name' },
+    selector: { type: 'string' },
+  },
+};
+
 const REAL = {
   type: 'boolean',
-  description: 'Force a real browser-level event (isTrusted) instead of a synthetic one. '
-    + 'Normally unnecessary — this is done automatically when a synthetic event produces no effect. '
-    + 'Pass it when the target is a submit/pay/delete-style control, where auto-retry is deliberately '
-    + 'held back to avoid acting twice.',
+  description: 'Force a real browser-level event. Automatic on no-effect, except for submit/pay/delete.',
 };
 
 const TOOLS = [
@@ -51,7 +61,7 @@ const TOOLS = [
       type: 'object',
       // 没有 button 参数：右键弹出的是浏览器原生菜单，扩展够不着，
       // 给了也只是个做不到的承诺；中键开新标签页用 tabs(action:"new") 更直接。
-      properties: { ref: REF, snapshotId: SNAP, selector: SEL, tabId: TAB, real: REAL },
+      properties: { ref: REF, find: FIND, snapshotId: SNAP, selector: SEL, tabId: TAB, real: REAL },
       required: [],
     },
   },
@@ -61,7 +71,7 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        ref: REF, snapshotId: SNAP, selector: SEL, tabId: TAB, real: REAL,
+        ref: REF, find: FIND, snapshotId: SNAP, selector: SEL, tabId: TAB, real: REAL,
         text: { type: 'string' },
         clear: { type: 'boolean', description: 'Clear existing value first. Default true.' },
         submit: { type: 'boolean', description: 'Press Enter after typing.' },
@@ -74,18 +84,16 @@ const TOOLS = [
     description: 'Choose an option in a <select> by ref. `value` matches the option value or its visible label.',
     inputSchema: {
       type: 'object',
-      properties: { ref: REF, snapshotId: SNAP, tabId: TAB, value: { type: 'string' } },
-      required: ['ref', 'snapshotId', 'value'],
+      properties: { ref: REF, find: FIND, snapshotId: SNAP, tabId: TAB, value: { type: 'string' } },
+      required: ['value'],
     },
   },
   {
     name: 'fill',
     description:
-      'Fill a whole form in ONE call — all refs from the same snapshot. ' +
-      'Strongly preferred over calling type/select repeatedly: each of those returns a full ' +
-      'snapshot you do not need, so a 10-field form costs 10 round trips and ~10k wasted tokens. ' +
-      'Each field: {ref, text} for inputs, {ref, value} for <select>, {ref, check:true|false} for ' +
-      'checkbox/radio. Set submit:true to submit afterwards (skipped automatically if any field failed).',
+      'Fill a whole form in ONE call, all refs from the same snapshot. Field: {ref, text} for inputs, ' +
+      '{ref, value} for <select>, {ref, check} for checkbox/radio. submit:true submits after ' +
+      '(skipped if any field failed).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -113,10 +121,8 @@ const TOOLS = [
   {
     name: 'key',
     description:
-      'Press a key. Use for: Escape (close modal/popup), Enter (submit), Tab (next field), ' +
-      'ArrowUp/ArrowDown (custom dropdowns), Backspace/Delete, and shortcuts via mods. ' +
-      'Without ref it goes to whatever is focused. Returns a fresh snapshot. ' +
-      'To enter text use type — this tool is for control keys, not typing.',
+      'Press a key: Escape, Enter, Tab, arrows (custom dropdowns), Backspace/Delete, or a combo. ' +
+      'Without ref it goes to whatever is focused. For entering text use type.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -146,9 +152,8 @@ const TOOLS = [
   {
     name: 'screenshot',
     description:
-      'Screenshot the controlled tab. Only works while that tab is in the foreground — otherwise it would capture ' +
-      'whatever the user is actually looking at. Pass focus:true to bring it forward, which interrupts the user. ' +
-      'Prefer snapshot / read_text: they work in the background and cost far less.',
+      'Screenshot the controlled tab, background tabs included. Prefer snapshot / read_text — ' +
+      'they cost far less.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -162,7 +167,9 @@ const TOOLS = [
     name: 'tabs',
     description:
       'List / open / switch / close tabs. New tabs open in the BACKGROUND and become the controlled tab — ' +
-      'the user keeps looking at whatever they were on. Everything except screenshot works fine on a background tab.',
+      'the user keeps looking at whatever they were on. Everything except screenshot works fine on a background tab. ' +
+      'Each agent session has its OWN controlled tab; omitting tabId uses this session\'s. ' +
+      'Selecting a tab another session operates warns, not blocks.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -192,9 +199,8 @@ const TOOLS = [
     name: 'network',
     description:
       'START HERE when you need DATA rather than an action. Lists the XHR/fetch calls the page made, then returns ' +
-      'any one response body via `body:"<url fragment>"`. Site APIs return clean JSON with real field names, ' +
-      'so you never have to guess which number on screen is which metric, and paging is a parameter instead of ' +
-      'forty scrolls. Add reload:true if nothing was captured yet.',
+      'one response body via `body:"<url fragment>"`. Real field names, real numbers, paging as a parameter. ' +
+      'Add reload:true if nothing was captured yet.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -210,8 +216,8 @@ const TOOLS = [
   {
     name: 'fetch',
     description:
-      'Call a URL from inside the page, carrying the user\'s cookies. Use it after `network` reveals an API: ' +
-      'change page/limit params to pull a full dataset in one shot instead of scrolling a lazy list. Same-origin rules apply.',
+      'Call a URL from inside the page, carrying the user\'s cookies. Use after `network` reveals an API: ' +
+      'change paging params to pull a whole dataset at once. Same-origin rules apply.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -229,8 +235,8 @@ const TOOLS = [
   {
     name: 'scroll',
     description:
-      'Scroll to load more of a lazy list. Auto-detects an inner overflow container when the page itself does not scroll, ' +
-      'and stops early once height stops growing. Prefer network/fetch for bulk data — one call beats forty scrolls.',
+      'Scroll to load more of a lazy list. Auto-detects inner scroll containers, stops early once height ' +
+      'stops growing. Prefer network/fetch for bulk data.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -244,9 +250,8 @@ const TOOLS = [
   {
     name: 'download',
     description:
-      'Download a URL via the browser itself. Use for anything large — video, archives — where fetch+binary would ' +
-      'blow up (it caps at 12MB). Goes straight to disk without passing through this conversation, and never ' +
-      'opens the OS save dialog.',
+      'Download a URL via the browser itself. For anything large (video, archives) where fetch+binary would ' +
+      'blow up at its 12MB cap. Straight to disk, never opens the OS save dialog.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -260,10 +265,9 @@ const TOOLS = [
   {
     name: 'upload',
     description:
-      'Attach a local file to the page — how you get images into an editor, since no extension can touch ' +
-      'the OS file picker. Open the upload UI first. Auto-picks a matching file input when selector is omitted; ' +
-      'if the editor only accepts drag-and-drop (X Article, Notion and friends have no file input at all), ' +
-      'pass dropSelector instead and the file is dropped onto it.',
+      'Attach a local file to the page (no extension can touch the OS file picker). Open the upload UI first. ' +
+      'Auto-picks a matching file input; for editors that only accept drag-and-drop (X Article, Notion) ' +
+      'pass dropSelector instead.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -278,11 +282,9 @@ const TOOLS = [
   {
     name: 'query',
     description:
-      'Extract structured data by CSS selector. THE tool for scraping lists and tables — read_text glues columns ' +
-      'together into unsplittable strings, and eval dies on CSP sites. ' +
-      'Pass `html:true` first to inspect the markup, then write `extract`. ' +
-      'extract maps field name → sub-selector, with "@attr" to read an attribute instead of text, e.g. ' +
-      '{title:".name", link:"a@href", views:".stat:nth-child(1)"}.',
+      'Extract structured data by CSS selector — the tool for scraping lists and tables. ' +
+      'Pass `html:true` first to inspect the markup, then write `extract`: field name → sub-selector, ' +
+      'with "@attr" for attributes, e.g. {title:".name", link:"a@href"}.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -296,13 +298,55 @@ const TOOLS = [
     },
   },
   {
+    name: 'act',
+    description:
+      'Run several steps in ONE call — use it whenever you already know the next 2+ actions. '
+      + 'Each step is effect-checked before the next runs, and only ONE snapshot comes back at the end: '
+      + 'a 4-step flow costs 1 round trip and 1 snapshot instead of 4. Stops and reports as soon as a step '
+      + 'has no effect, fails, or is a submit/pay/delete control. Target with `ref` until the page '
+      + 're-renders, `find` after.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        steps: {
+          type: 'array',
+          description: 'Up to 20 steps, executed in order.',
+          items: {
+            type: 'object',
+            properties: {
+              do: { type: 'string', enum: ['click', 'type', 'select', 'fill', 'key', 'wait', 'scroll', 'navigate'] },
+              ref: REF, find: FIND, selector: SEL,
+              text: { type: 'string', description: 'for type' },
+              value: { type: 'string', description: 'for select' },
+              key: { description: 'for key', anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
+              fields: { type: 'array', items: { type: 'object' }, description: 'for fill' },
+              url: { type: 'string', description: 'for navigate' },
+              for: { type: 'string', enum: ['selector', 'text', 'idle'], description: 'for wait' },
+              timeout: { type: 'number' },
+              times: { type: 'number', description: 'for scroll' },
+              to: { type: 'string', enum: ['bottom', 'top'], description: 'for scroll' },
+            },
+            required: ['do'],
+          },
+        },
+        snapshotId: SNAP,
+        allowSensitive: {
+          type: 'boolean',
+          description: 'Let the batch run through a submit/pay/delete control instead of stopping at it. '
+            + 'Off by default on purpose — say so explicitly and it gets recorded in the audit log.',
+        },
+        tabId: TAB,
+      },
+      required: ['steps'],
+    },
+  },
+  {
     name: 'ask',
     description:
-      'Hand control back to the user for one step, then continue. THE tool for captcha, QR-code login, '
-      + 'SMS/OTP, or any confirmation that should be a human decision. Brings the tab to the front, shows a '
-      + 'small panel with your instructions, highlights the elements you point at, and sends a desktop '
-      + 'notification. Blocks until the user acts. '
-      + 'Use it instead of retrying a step that needs a human — retrying just burns the timeout.',
+      'Hand control back to the user for one step, then continue. For captcha, QR login, SMS/OTP, or any '
+      + 'confirmation that should be a human decision. Brings the tab forward, shows a panel, highlights your '
+      + 'targets, sends a desktop notification, and blocks until the user acts. Use it instead of retrying '
+      + 'a step that needs a human.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -364,6 +408,22 @@ A web page holds information in exactly three places, so play them in this order
    Paged endpoints differ only by a cursor, so walk \`index\` to collect every batch, not just the latest.
 
 2. DOM — for ACTIONS and for prose. \`snapshot\` then \`click\`/\`fill\`/\`key\`.
+
+   BATCH WHAT YOU ALREADY KNOW. The moment you can name the next 2+ actions, put them in one
+   \`act\` call. Logins, multi-step forms, wizards, "click the tab then filter then sort" —
+   all one call. Each step is effect-checked before the next runs, so a batch is not a blind
+   macro: it stops the instant something does not respond. You get one snapshot at the end
+   instead of one per action, which is where most of the token cost goes.
+
+   Targeting inside a batch: \`ref\` works until the page re-renders, then it is void — every
+   ref belongs to one snapshot. So use \`ref\` for steps that do not change page structure
+   (filling several fields), and \`find\` ({role, name} straight off the snapshot) for anything
+   after a step that navigates, opens a modal, or swaps the DOM. When in doubt use \`find\`;
+   it re-locates on the spot. If \`find\` matches several elements it stops and lists them
+   rather than guessing — pass \`nth\` or a longer name.
+
+   act stops on its own at submit/pay/delete controls. That is deliberate: do those with a
+   single \`click\` so you see their own effect evidence before moving on.
    \`read_text\` for articles, \`query\` for scraping when a site has no usable API.
 
    FORMS: use \`fill\` — one call, all fields, one snapshot back. Calling \`type\` per field

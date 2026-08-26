@@ -14,6 +14,9 @@
   let refMap = new Map();
   let snapshotSeq = 0;
   let snapshotId = null;
+  // locate 刚定位到的那个元素。effect 拿它比对状态，不重新查找——
+  // 重新查找要跑一次全页面收集，而 effect 每 100ms 就被调一次。
+  let lastTarget = null;
 
   const INTERACTIVE_TAGS = new Set(['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA', 'SUMMARY']);
   const INTERACTIVE_ROLES = new Set(['button', 'link', 'checkbox', 'radio', 'tab', 'menuitem', 'menuitemcheckbox', 'combobox', 'textbox', 'switch', 'option', 'searchbox']);
@@ -177,10 +180,10 @@
 
   // ---------- 快照 ----------
 
-  function buildSnapshot() {
-    refMap = new Map();
-    snapshotId = 's' + ++snapshotSeq;
-
+  // 候选收集从 buildSnapshot 里抽出来，因为 find（语义定位）要用同一套判据。
+  // 两边如果各写一份，「快照里看得到、find 却找不到」这类问题会层出不穷，
+  // 而且极难排查——agent 明明照着快照写的名字。
+  function collectCandidates() {
     // 一阶段：收候选。同时遍历 open shadow root —— 现在大量站点把控件塞在里面
     const cands = [];
     const walk = (root) => {
@@ -224,6 +227,13 @@
       if (has((o) => o.el !== el && el.contains(o.el))) return false;
       return true;
     });
+    return keep;
+  }
+
+  function buildSnapshot() {
+    refMap = new Map();
+    snapshotId = 's' + ++snapshotSeq;
+    const keep = collectCandidates();
 
     const lines = [];
     let n = 0;
@@ -343,7 +353,72 @@
 
   // ---------- ref 解析（防呆全在这里） ----------
 
+  // ---------- 语义定位 ----------
+  //
+  // ref 绑在快照上，而批处理（act）走到第二步时页面往往已经变了——ref 要么指向
+  // 别的元素，要么根本不存在。所以批处理需要一种「页面重渲染后还能找回来」的定位方式。
+  //
+  // 用的是快照里已经给 agent 看过的那两样东西：role 和可访问名。
+  // 候选池来自 collectCandidates()，和快照完全同源——不能出现
+  // 「快照里明明有这个按钮，find 却说找不到」。
+
+  const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+
+  function findEl(spec) {
+    if (spec.selector) {
+      const el = document.querySelector(spec.selector);
+      if (!el) throw fail('REF_NOT_FOUND', `选择器没匹配到元素：${spec.selector}`);
+      return el;
+    }
+
+    const pool = collectCandidates()
+      .map(({ el }) => el)
+      .filter((el) => !spec.role || roleOf(el) === spec.role);
+
+    const want = norm(spec.name);
+    if (!want) {
+      if (pool.length === 1) return pool[0];
+      throw fail('REF_NOT_FOUND',
+        `只给了 role="${spec.role}"，而页面上有 ${pool.length} 个。补一个 name。`);
+    }
+
+    // 三级匹配，先严后宽，**任一级有结果就停**。
+    // 混在一起排序的话，一个包含匹配可能排在精确匹配前面——
+    // 而「确定」和「确定删除」是两个完全不同的按钮。
+    const named = pool.map((el) => ({ el, name: norm(accessibleName(el)) }));
+    const bare = (s) => s.replace(/\s/g, '');
+    const tiers = [
+      named.filter((x) => x.name === want),
+      named.filter((x) => bare(x.name) === bare(want)),
+      // 快照里的名字截断到 60 字会带一个省略号，拿它去反查要把尾巴摘掉
+      named.filter((x) => x.name && (x.name.includes(want) || want.includes(x.name.replace(/…$/, '')))),
+    ];
+    const hit = tiers.find((t) => t.length);
+
+    if (!hit) {
+      const sample = named.filter((x) => x.name).slice(0, 12).map((x) => `"${x.name}"`).join('、');
+      throw fail('REF_NOT_FOUND',
+        `找不到${spec.role ? ` role=${spec.role} 的` : ''}「${spec.name}」。`
+        + `页面上能找到的是：${sample || '（没有带名字的可交互元素）'}`);
+    }
+    // 命中多个时报错而不是猜。猜错一个按钮的代价可能是一笔订单——
+    // 「删除」和「删除全部」在页面上常常并排放着。
+    if (hit.length > 1 && spec.nth === undefined) {
+      throw fail('REF_NOT_FOUND',
+        `「${spec.name}」匹配到 ${hit.length} 个，不猜。用 nth 指定第几个（从 0 数），`
+        + `或者把 name 写得更完整。候选：${hit.slice(0, 8).map((x) => `"${x.name}"`).join('、')}`);
+    }
+    const picked = hit[spec.nth || 0];
+    if (!picked) {
+      throw fail('REF_NOT_FOUND', `nth=${spec.nth} 超出范围，「${spec.name}」只匹配到 ${hit.length} 个`);
+    }
+    return picked.el;
+  }
+
   function resolve(p) {
+    // find 走语义定位，不依赖快照，所以也不受 STALE_SNAPSHOT 约束——
+    // 这正是它在批处理中间还能用的原因
+    if (p.find) return findEl(p.find);
     // 两个都给 = 一定有一个是错的，而后果极其隐蔽：下面 selector 优先，
     // 但回执里印的是 `p.ref || p.selector`，也就是 ref。于是「已点击 [e26]」
     // 底下点的其实是 querySelector 匹配到的第一个元素。
@@ -476,8 +551,9 @@
 
   async function doLocate(p) {
     // fill 这类没有单一目标的操作只要基线，不要定位
-    if (p.baselineOnly) return { baseline: await baselineOf(null) };
+    if (p.baselineOnly) { lastTarget = null; return { baseline: await baselineOf(null) }; }
     const el = resolve(p);
+    lastTarget = el;
     el.scrollIntoView({ block: 'center', behavior: 'instant' });
     const r = el.getBoundingClientRect();
     const x = r.left + r.width / 2;
@@ -532,14 +608,25 @@
     };
   }
 
-  // textContent 而不是 innerText：innerText 会触发 reflow，而这个函数在
-  // 一次操作里最多要跑十几遍。只比长度的话 textContent 足够，且便宜一个量级。
+  // 这三样都不触发布局，随便调。
   const cheapStats = () => ({
     els: document.getElementsByTagName('*').length,
-    textLen: (document.body?.textContent || '').length,
     active: activeDesc(),
     bodyKids: document.body?.children.length ?? 0,
   });
+
+  // innerText 是另一回事：它强制 reflow。
+  //
+  // 但又非用不可——textContent 在最常见的一类交互上是瞎的：点「展开」让一个
+  // display:none 的面板显示出来，元素本来就在 DOM 里（节点数不变），
+  // textContent 把隐藏内容也算进去（长度也不变），目标按钮自己更没变，
+  // 于是判定「页面完全没有反应」，而表单已经在用户眼前了。
+  // 只有 innerText 统计**渲染出来**的文本，看得见可见性变化。
+  //
+  // 折中是**按需调用**：settle 每 100ms 轮询一次，全都算一遍的话成本被放大十几倍
+  // ——实测把整套实景测试从 2 秒级拖到 10 秒级，有 iframe 的页面更糟。
+  // 所以只在便宜指标全都没动、需要它兜底时才付这个成本。
+  const renderedLen = (node) => (node?.innerText || '').length;
 
   // 「变化发生在哪里」比「有没有变化」可靠得多。
   //
@@ -553,10 +640,17 @@
   const SCOPE_SEL = 'section,form,[role=dialog],[role=listbox],[role=menu],main,article,'
     + '[class*="modal" i],[class*="dialog" i],[class*="popover" i],[class*="dropdown" i]';
 
-  function scopeOf(el) {
+  // 找不到区块容器时退回 **body**，不是 parentElement。
+  //
+  // 用 parentElement 的那版漏掉了一整类最常见的交互：点「开始填写」，
+  // 表单出现在按钮的**兄弟节点**里——按钮自己的父元素一个字都没变，
+  // 于是判定「页面完全没有反应」，而表单已经在用户眼前了。
+  //
+  // 收窄 scope 是「页面有区块结构时」的优化（section/form/dialog 能把
+  // 直播弹幕那类噪声挡在外面）；没有结构可依时，全局才是诚实的范围。
+  function scopeBoxOf(el) {
     if (!el || !el.isConnected) return null;
-    const box = el.closest(SCOPE_SEL) || el.parentElement || document.body;
-    return { len: (box.textContent || '').length, kids: box.getElementsByTagName('*').length };
+    return el.closest(SCOPE_SEL) || document.body;
   }
 
   // 采基线时顺便测一下「页面自己动不动」。
@@ -571,8 +665,16 @@
     const s1 = cheapStats();
     await sleep(60);
     const s2 = cheapStats();
-    const volatile = Math.abs(s2.els - s1.els) >= 3 || Math.abs(s2.textLen - s1.textLen) >= 4;
-    return { ...s2, volatile, alerts: collectAlerts(), target: targetState(el), scope: scopeOf(el) };
+    const volatile = Math.abs(s2.els - s1.els) >= 3;
+    const box = scopeBoxOf(el);
+    return {
+      ...s2,
+      volatile,
+      textLen: renderedLen(document.body),
+      scope: box ? { kids: box.getElementsByTagName('*').length, len: renderedLen(box) } : null,
+      alerts: collectAlerts(),
+      target: targetState(el),
+    };
   }
 
   function doEffect(p) {
@@ -580,9 +682,24 @@
     // 目标要能重新找回来，否则 targetState 拿到 null，会把「找不回」误报成
     // 「元素已从页面移除」——而后者是一条很强的证据，误报等于凭空造证据。
     // selector 路径尤其要照顾：它本来就绕过 refMap。
-    const el = p.ref ? refMap.get(p.ref)
-      : p.selector ? document.querySelector(p.selector)
-      : null;
+    // find 的目标**不重新查找**，用 locate 时记下的那个元素引用。
+    //
+    // 一开始这里写的是 `p.find ? findEl(p.find) : ...`，而 findEl 要跑
+    // collectCandidates()——一次全页面遍历外加逐元素 getComputedStyle。
+    // settle 每 100ms 轮询一次 effect，于是一个动作要付十几次全量遍历，
+    // 实测把 act 的每一步拖到几十秒，直接撞穿 35 秒的 RPC 超时。
+    //
+    // 而且用引用比重新查找更对：我们要判断的是「刚才操作的那个元素怎么样了」，
+    // 它被移除、被替换本身就是强证据；重新 find 到一个长得一样的新元素，
+    // 反而会把这个信号抹掉。
+    let el = null;
+    try {
+      el = p.ref ? refMap.get(p.ref)
+        : p.selector ? document.querySelector(p.selector)
+        : lastTarget;
+    } catch {
+      /* 取不到就当没有，交给下面的 gone 分支表达 */
+    }
     const now = cheapStats();
 
     // 证据分强弱。强证据几乎不可能是页面自己动出来的（目标自身的状态、新冒出来的
@@ -592,37 +709,71 @@
     const strong = [], weak = [];
     const parts = weak;
 
-    // 强证据 ①：目标所在区块变了。局部阈值可以定得很低（2 个字符），
-    // 因为这块地方的变化几乎不可能是别处的噪声漂过来的。
-    const bs = base.scope, ns = scopeOf(el);
-    if (bs && ns) {
-      const dLen = ns.len - bs.len, dKids = ns.kids - bs.kids;
-      if (Math.abs(dLen) >= 2) strong.push(`目标区块文本 ${dLen > 0 ? '+' : ''}${dLen} 字`);
-      else if (dKids !== 0) strong.push(`目标区块 DOM ${dKids > 0 ? '+' : ''}${dKids} 节点`);
+    // 顺序是**按成本从低到高**排的，因为下面两处贵的检查会先看
+    // 「已经有强证据了吗」——排错顺序的话，明明 checkbox 已经勾上了，
+    // 还要再去 reflow 一遍全页面。
+
+    // ① 目标自身的状态（最便宜，也最强）。展开下拉、勾选、受控组件把值回滚，
+    // 这三样都不改 DOM 节点数，往往是唯一的证据。
+    const bt = base.target || {}, nt = targetState(el);
+    // 曾经多写了一个 `bt.gone !== undefined`，结果元素真的消失时反而不报「已移除」，
+    // 还掉进下面的字段循环，把 gone 状态的一堆 undefined 和基线的空串逐个对比，
+    // 输出「expanded 空 → 空；checked 空 → 空…」一长串废话。
+    // 无目标的操作（fill、无 ref 的 key）baseline 里 target 本来就是 {gone:true}，
+    // 两边都 gone，自然不会进这条分支——那个条件从一开始就是多余的。
+    if (nt.gone && !bt.gone) strong.push('目标元素已从页面移除');
+    else for (const k of ['expanded', 'checked', 'selected', 'value', 'cls']) {
+      if (bt[k] === undefined || bt[k] === nt[k]) continue;
+      if (k === 'cls') { strong.push('目标 class 变了'); continue; }
+      strong.push(`${k} ${bt[k] || '空'} → ${nt[k] || '空'}`);
     }
 
-    // 强证据 ②：body 直接子元素增减。模态框、抽屉、toast 几乎都挂在这一层，
+    // ② 新增的页面提示。表单流程最主要的失败模式就是校验错误，
+    // 而它常在长页面下方，正文节选根本截不到。
+    const fresh = collectAlerts().filter((a) => !(base.alerts || []).includes(a));
+    if (fresh.length) strong.push(`⚠️ 页面提示：${fresh.join(' / ')}`);
+
+    // ③ body 直接子元素增减。模态框、抽屉、toast 几乎都挂在这一层，
     // 而页面自己的内容更新极少动到 body 的直接子节点。
     const dBodyKids = now.bodyKids - (base.bodyKids ?? now.bodyKids);
     if (dBodyKids !== 0) {
-      strong.push(`页面顶层${dBodyKids > 0 ? '新增' : '移除'} ${Math.abs(dBodyKids)} 个元素（多半是浮层/弹窗）`);
+      strong.push(dBodyKids > 0
+        ? `页面顶层新增 ${dBodyKids} 个元素（多半是弹窗/浮层/toast）`
+        : `页面顶层移除 ${-dBodyKids} 个元素（多半是整块内容被换掉了）`);
     }
 
-    // 阈值挡住噪声：页面上的时钟、轮播、埋点会让 DOM 一直微微地动，
+    // ④ 目标所在区块。局部阈值可以定得很低（2 个字符），因为这块地方的变化
+    // 几乎不可能是别处的噪声漂过来的。先比节点数（不触发布局），
+    // 只有节点数没动、而且到这里还没有别的强证据时，才去算 innerText——
+    // 「隐藏 → 显示」正是节点数不变的那种情况，也只有那时才值得付 reflow 的钱。
+    const bs = base.scope, box = scopeBoxOf(el);
+    if (bs && box) {
+      const dKids = box.getElementsByTagName('*').length - bs.kids;
+      if (dKids !== 0) strong.push(`目标区块 DOM ${dKids > 0 ? '+' : ''}${dKids} 节点`);
+      else if (!strong.length) {
+        const dLen = renderedLen(box) - bs.len;
+        if (Math.abs(dLen) >= 2) strong.push(`目标区块文本 ${dLen > 0 ? '+' : ''}${dLen} 字`);
+      }
+    }
+
+    // ⑤ 以下是弱证据：页面自己也会产生，不参与「动没动」的判定，只作参考。
+    // 阈值挡住噪声：时钟、轮播、埋点会让 DOM 一直微微地动，
     // 不设阈值就变成「永远有效果」，这个机制也就废了。
     const dEls = now.els - (base.els ?? now.els);
     if (Math.abs(dEls) >= 3) parts.push(`DOM ${dEls > 0 ? '+' : ''}${dEls} 节点`);
+
+    // 全局正文长度是最贵也最脏的一个指标：贵在 reflow，脏在直播弹幕和懒加载
+    // 每时每刻都在改它。既然已经有强证据，就没必要再付这笔钱。
+    //
     // 阈值定 4 不定 20：实测「未触发」→「已触发（真实事件）」只差 6 字，
-    // 阈值 20 会把这次真实的成功判成「页面完全没有反应」。
-    //
-    // 这两类误判的代价不对称，所以宁可松一点：
-    //   假阴性（真动了却说没动）→ 多一次 L2 重试，对非敏感目标是幂等的，代价小；
-    //   假阳性（没动却说动了）→ agent 以为成功继续往下走，掩盖真实失败，代价大。
-    //
-    // 比长度而不比内容，天然挡掉了最常见的一类噪声：时钟和计数器改数字时
-    // 长度往往不变（12:34:56 → 12:34:57），根本进不到这里。
-    const dText = now.textLen - (base.textLen ?? now.textLen);
-    if (Math.abs(dText) >= 4) parts.push(`正文 ${dText > 0 ? '+' : ''}${dText} 字`);
+    // 阈值 20 会把这次真实的成功判成「页面完全没有反应」。两类误判的代价不对称——
+    // 假阴性只是多一次幂等重试，假阳性会让 agent 带着错误前提往下走。
+    // 比长度而不比内容，还顺带挡掉了时钟这类噪声（12:34:56 → 12:34:57 长度不变）。
+    if (!strong.length && base.textLen !== undefined) {
+      const dText = renderedLen(document.body) - base.textLen;
+      if (Math.abs(dText) >= 4) parts.push(`正文 ${dText > 0 ? '+' : ''}${dText} 字`);
+    }
+
     // 焦点落到目标自己身上不算证据——点击本来就会聚焦（L1 的 realClick 显式调
     // el.focus()，L2 的真实点击由浏览器聚焦），那是这个动作的机械后果，
     // 不是页面对它的反应。
@@ -635,22 +786,6 @@
     // 再把焦点交给内部 input 就是这种），属于真实反应。
     const focusedSelf = el && document.activeElement === el;
     if (now.active !== base.active && !focusedSelf) parts.push(`焦点 → ${now.active || '(无)'}`);
-
-    // 目标自身的状态变化不设阈值：它几乎不可能是噪声，而且往往是唯一的证据
-    // （展开下拉、勾选、受控组件把值回滚，这三样都不改 DOM 节点数）
-    const bt = base.target || {}, nt = targetState(el);
-    // 无目标的操作（fill、无 ref 的 key）两边都是 gone，不会走进这条分支
-    if (nt.gone && !bt.gone && bt.gone !== undefined) strong.push('目标元素已从页面移除');
-    else for (const k of ['expanded', 'checked', 'selected', 'value', 'cls']) {
-      if (bt[k] === undefined || bt[k] === nt[k]) continue;
-      if (k === 'cls') { strong.push('目标 class 变了'); continue; }
-      strong.push(`${k} ${bt[k] || '空'} → ${nt[k] || '空'}`);
-    }
-
-    // 新增的页面提示优先级最高——表单流程最主要的失败模式就是校验错误，
-    // 而它常在长页面下方，正文节选根本截不到
-    const fresh = collectAlerts().filter((a) => !(base.alerts || []).includes(a));
-    if (fresh.length) strong.push(`⚠️ 页面提示：${fresh.join(' / ')}`);
 
     // 判定只认强证据。全局数字（weak）照样报出来给 agent 参考，
     // 但不用它下「动没动」这个结论——它是页面里最脏的那个信号。

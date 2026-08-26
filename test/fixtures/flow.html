@@ -1,0 +1,60 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>多步流程靶场</title>
+<style>
+  body { font: 15px/1.7 -apple-system, "PingFang SC", sans-serif; margin: 2rem; max-width: 640px; }
+  .hidden { display: none; }
+  .step { border: 1px solid #ddd; border-radius: 10px; padding: 1rem 1.2rem; margin: 1rem 0; }
+  button { font: inherit; padding: 6px 14px; border-radius: 7px; border: 1px solid #ccc; cursor: pointer; }
+  input[type=text] { font: inherit; padding: 5px 8px; border: 1px solid #ccc; border-radius: 6px; }
+  b { color: #c2410c; }
+</style>
+
+<h1>多步流程靶场</h1>
+<p>用来测 act 批处理：连续动作、ref 中途作废、敏感动作阻断。</p>
+
+<!-- 第一屏：点开始后表单才出现（DOM 增加，但不换页） -->
+<div class="step" id="s1">
+  <h2>① 开始</h2>
+  <button id="start">开始填写</button>
+</div>
+
+<!-- 第二屏：连续填几个字段（不改变结构，ref 全程有效） -->
+<div class="step hidden" id="s2">
+  <h2>② 填写</h2>
+  <label>手机号 <input type="text" id="phone"></label><br><br>
+  <label>收件人 <input type="text" id="who"></label><br><br>
+  <label><input type="checkbox" id="agree"> 我同意条款</label>
+  <p><button id="next">下一步</button></p>
+</div>
+
+<!-- 第三屏：整块 DOM 重建，之前那份快照里的 ref 全部作废 -->
+<div class="step hidden" id="s3">
+  <h2>③ 确认</h2>
+  <p>手机号：<b id="echoPhone">—</b>　收件人：<b id="echoWho">—</b></p>
+  <button id="pay">提交订单</button>
+  <b id="payOut">未提交</b>
+  <p><small>敏感文案，act 应当停在这一步而不是代做</small></p>
+</div>
+
+<script>
+document.getElementById('start').onclick = () => {
+  document.getElementById('s2').classList.remove('hidden');
+};
+
+document.getElementById('next').onclick = () => {
+  const phone = document.getElementById('phone').value;
+  const who = document.getElementById('who').value;
+  if (!document.getElementById('agree').checked) return;
+  document.getElementById('echoPhone').textContent = phone || '—';
+  document.getElementById('echoWho').textContent = who || '—';
+  // 整块重建：把第二屏从 DOM 里拿掉，第三屏塞进来。
+  // 这一步之后，之前快照里的 ref 全部指向不存在的节点——正是 find 存在的理由。
+  document.getElementById('s2').remove();
+  document.getElementById('s3').classList.remove('hidden');
+};
+
+document.getElementById('pay').onclick = () => {
+  document.getElementById('payOut').textContent = '已提交（不该被 act 代做）';
+};
+</script>
