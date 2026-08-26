@@ -262,6 +262,49 @@ test('扩展发的事件广播给所有 agent（tab_closed 回归）', async () 
   ext.close(); a1.close(); a2.close();
 });
 
+// 扩展靠这个字段判断「桥是不是换了一代」，换了就把连接级的 tab 槽全清掉。
+// 不清的话会串台：connId 是桥进程内从 1 开始的递增序号，桥一重启就重头数，
+// 而槽存在 storage.local 里跨重启活着——新连上的第一个 agent 拿到 connId=1，
+// 就捡到了上一代同号会话的受控标签页，并且以为那本来就是自己的。
+const helloExt = async (url) => {
+  const ws = new WebSocket(url, { origin: 'chrome-extension://epoch' });
+  ws.on('open', () => ws.send(JSON.stringify({
+    type: 'hello', role: 'extension', extId: 'epoch', version: VERSION, v: 1,
+  })));
+  return { ws, welcome: await firstMessage(ws) };
+};
+
+test('桥在握手时告诉扩展自己是哪一代', async () => {
+  const { ws, welcome } = await helloExt(URL);
+  assert.equal(welcome.type, 'welcome');
+  assert.ok(welcome.epoch, 'welcome 里必须带 epoch，否则扩展无从判断桥换没换代');
+  ws.close();
+});
+
+test('同一个桥进程，重连拿到的是同一代', async () => {
+  // 扩展重载、SW 被回收后复活都会走重连。桥没变，槽就必须原样留着——
+  // 那些会话还活着。这一条守的是「别清过头」。
+  const a = await helloExt(URL);
+  const first = a.welcome.epoch;
+  a.ws.close();
+  const b = await helloExt(URL);
+  assert.equal(b.welcome.epoch, first);
+  b.ws.close();
+});
+
+test('换一个桥进程就是另一代', async () => {
+  const other = startBridge({ port: PORT + 1, token: TOKEN, writeInfo: false });
+  await other.ready;
+  try {
+    const a = await helloExt(URL);
+    const b = await helloExt(`ws://127.0.0.1:${PORT + 1}`);
+    assert.notEqual(a.welcome.epoch, b.welcome.epoch);
+    a.ws.close(); b.ws.close();
+  } finally {
+    other.close();
+  }
+});
+
 test('扩展和桥的版本号必须同步', () => {
   // 桥每次握手都拿这两个数比对，对不上就警告「去重载扩展」。
   // 一旦它们因为发版时漏改一处而长期不一致，这条警告就变成了狼来了——

@@ -28,6 +28,16 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
   // 只按 id 存会让两个会话的 c1 互相覆盖，响应串到别人的请求上，而且毫无征兆。
   const pending = new Map();
   let connSeq = 0;
+
+  // 这一代桥的身份。connId 是进程内从 1 开始的递增序号，桥一重启就重头数——
+  // 而扩展那边的连接级 tab 槽存在 storage.local 里，跨重启活着。
+  // 不给扩展一个「换代了」的信号，新连上的第一个 agent 就会拿到 connId=1，
+  // 捡到上一代同号会话的槽，并且以为那本来就是自己的。
+  // 扩展拿它跟上次记的比对，一变就清槽。见 background.js 的 syncBridgeEpoch。
+  //
+  // 生成在这里而不是模块级：一个进程里可能起多个桥实例（测试就是这么干的），
+  // 而 epoch 标识的是「这一个桥」，不是「这份代码」。
+  const epoch = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   let lastActivity = Date.now();
 
   const wss = new WebSocketServer({
@@ -105,7 +115,7 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
         log(`⚠️  版本不一致：扩展 ${ws.extVersion} vs 桥 ${VERSION} —— 去 chrome://extensions 重载扩展`);
       }
       log(`扩展已连接（Chrome ${msg.chrome || '?'} · 扩展 ${ws.extVersion}）`);
-      send(ws, { type: 'welcome', bridge: VERSION, v: PROTOCOL });
+      send(ws, { type: 'welcome', bridge: VERSION, v: PROTOCOL, epoch });
       broadcast({ type: 'event', event: 'extension_online' });
       return;
     }

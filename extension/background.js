@@ -68,6 +68,7 @@ function tryPort(port) {
       if (msg.type === 'welcome') {
         clearTimeout(t);
         ws = sock;
+        syncBridgeEpoch(msg.epoch);   // 不 await：清槽和握手互不依赖，别让它拖慢连接
         sock.onmessage = (e) => onMessage(JSON.parse(e.data));
         sock.onclose = () => { ws = null; stopPing(); setBadge('off'); scheduleReconnect(); };
         sock.onerror = () => {};
@@ -166,6 +167,30 @@ const err = (code, message) => Object.assign(new Error(message), { code });
 // 无 connId（旧桥）走纯全局槽，行为与 v0.3 完全一致。
 
 const agentTabKey = (connId) => `agentTab:${connId}`;
+
+// 桥换代了就把连接级的 tab 槽全部清掉。
+//
+// 起因是个很隐蔽的串台：connId 是桥进程内从 1 开始的递增序号，而这些槽
+// 存在 storage.local 里，跨桥重启活着。桥一重启（升级、崩溃、手动重启），
+// 新连上的第一个 agent 就拿到 connId=1，捡到上一代同号会话的槽——
+// 而且它以为那是自己的，连「你还没定过自己的标签页」那句提示都不会给。
+// agent 就这样在一个不属于它的页面上开始干活，正是隔离要防的那件事。
+//
+// 判据用桥的 epoch，不用「WS 断开」：扩展重载和桥重启撞在一起时
+// （开发期天天发生），onclose 根本来不及跑，SW 当场就没了。
+// epoch 比对在重连之后照样成立。
+//
+// 反过来也要成立：扩展自己重载、SW 被回收后复活，桥没变，
+// epoch 就没变，槽必须原样留着——那些会话还活着。
+async function syncBridgeEpoch(epoch) {
+  if (!epoch) return;                    // 旧桥没这个字段，保持原行为
+  const { bridgeEpoch } = await chrome.storage.local.get('bridgeEpoch');
+  if (bridgeEpoch === epoch) return;
+  const all = await chrome.storage.local.get(null);
+  const stale = Object.keys(all).filter((k) => k.startsWith('agentTab:'));
+  if (stale.length) await chrome.storage.local.remove(stale);
+  await chrome.storage.local.set({ bridgeEpoch: epoch });
+}
 
 async function getActiveTabId(connId, ctx) {
   if (connId !== undefined) {
