@@ -219,18 +219,19 @@ test('两个 agent 同时发同一个 id，响应不会串到对方', async () =
   ext.close(); a1.close(); a2.close();
 });
 
-test('桥给每条命令盖章 connId：每连接稳定、连接间互异，且不回泄给 agent', async () => {
+const helloAgent = async (name, sessionId) => {
+  const a = open();
+  a.on('open', () => a.send(JSON.stringify({ type: 'hello', role: 'agent', token: TOKEN, client: name, sessionId, v: 1 })));
+  await firstMessage(a);
+  return a;
+};
+
+test('桥给每条命令盖章 sid：每会话稳定、会话间互异，且不回泄给 agent', async () => {
   const ext = open({ origin: 'chrome-extension://stamp' });
   ext.on('open', () => ext.send(JSON.stringify({ type: 'hello', role: 'extension', extId: 'stamp', v: 1 })));
   await firstMessage(ext);
 
-  const mk = async (name) => {
-    const a = open();
-    a.on('open', () => a.send(JSON.stringify({ type: 'hello', role: 'agent', token: TOKEN, client: name, v: 1 })));
-    await firstMessage(a);
-    return a;
-  };
-  const [a1, a2] = [await mk('stamp-one'), await mk('stamp-two')];
+  const [a1, a2] = [await helloAgent('stamp-one', 'sess-one'), await helloAgent('stamp-two', 'sess-two')];
 
   const seen = [];
   ext.on('message', (d) => {
@@ -244,55 +245,132 @@ test('桥给每条命令盖章 connId：每连接稳定、连接间互异，且�
   a1.send(JSON.stringify({ type: 'cmd', id: 's1', cmd: 'snapshot', params: {} }));
   a2.send(JSON.stringify({ type: 'cmd', id: 's2', cmd: 'snapshot', params: {} }));
   const [res1, res2] = await Promise.all([r1, r2]);
-  assert.equal('connId' in res1, false, 'agent 的 res 里不该有 connId');
+  assert.equal('sid' in res1, false, 'agent 的 res 里不该有 sid');
   assert.equal('__k' in res2, false, 'agent 的 res 里不该有路由键');
 
-  // 同一个 agent 再发一条，connId 必须和第一次相同
   const r3 = nextRes(a1);
   a1.send(JSON.stringify({ type: 'cmd', id: 's3', cmd: 'snapshot', params: {} }));
   await r3;
 
   assert.equal(seen.length, 3);
-  assert.ok(seen.every((m) => Number.isInteger(m.connId)), '每条命令都带 connId');
-  assert.equal(seen.find((m) => m.id === 's1').connId, seen.find((m) => m.id === 's3').connId, '同一连接 connId 必须稳定');
-  assert.notEqual(seen.find((m) => m.id === 's1').connId, seen.find((m) => m.id === 's2').connId, '两个 agent 的 connId 必须互异');
+  assert.equal(seen.find((m) => m.id === 's1').sid, 'sess-one', 'sid 必须原样用 agent 自报的那个');
+  assert.equal(seen.find((m) => m.id === 's3').sid, 'sess-one', '同一会话 sid 必须稳定');
+  assert.equal(seen.find((m) => m.id === 's2').sid, 'sess-two', '两个会话的 sid 必须互异');
 
   ext.close(); a1.close(); a2.close();
 });
 
-test('agent 断开时扩展收到 agent_closed（带 connId），别的 agent 收不到', async () => {
+// 这一条守的是整晚故障的根因。以前身份是桥进程内的连接序号，桥一重启就从 1
+// 重新数，于是「换了个桥」和「换了个会话」在扩展眼里长得一模一样——所有会话
+// 的受控标签页同时失效，然后各自去继承同一个全局 tab。实测一晚桥重启 38 次。
+test('桥换了一个进程，同一个 sessionId 盖出来的章不变', async () => {
+  const other = startBridge({ port: PORT + 2, token: TOKEN, writeInfo: false });
+  await other.ready;
+  try {
+    const stamp = async (url, origin) => {
+      const ext = new WebSocket(url, { origin });
+      ext.on('open', () => ext.send(JSON.stringify({ type: 'hello', role: 'extension', extId: origin, v: 1 })));
+      await firstMessage(ext);
+      const got = new Promise((resolve) => ext.on('message', (d) => {
+        const m = JSON.parse(d.toString());
+        if (m.type === 'cmd') resolve(m.sid);
+      }));
+      const a = new WebSocket(url);
+      a.on('open', () => a.send(JSON.stringify({ type: 'hello', role: 'agent', token: TOKEN, client: 'c', sessionId: 'stable-1', v: 1 })));
+      await firstMessage(a);
+      a.send(JSON.stringify({ type: 'cmd', id: 'x1', cmd: 'snapshot', params: {} }));
+      const sid = await got;
+      ext.close(); a.close();
+      return sid;
+    };
+    assert.equal(await stamp(URL, 'chrome-extension://s1'), await stamp(`ws://127.0.0.1:${PORT + 2}`, 'chrome-extension://s2'));
+  } finally {
+    other.close();
+  }
+});
+
+// 在线会话名单跟着每条命令走，不靠事件让扩展存着。
+//
+// 事件那版有个真实的竞态：新会话连上后立刻发第一条命令，而名单还在
+// 桥→offscreen→SW→storage 这一路上，第一条命令读到旧名单就判定
+//「这个标签页没人占」——恰恰漏掉最该拦住的那一条。实景测试里真撞到了。
+//
+// 而断开只把会话从名单里摘掉，**不发删槽指令**：断开有两种可能，会话真的
+// 结束了，或者只是桥换代而 agent 马上会带着同一个 sessionId 回来。
+// 删槽会把后者一起毁掉，那正是「桥一重启就跟丢标签页」的老毛病。
+test('每条命令都带着当前的在线会话名单', async () => {
+  const ext = open({ origin: 'chrome-extension://roster' });
+  ext.on('open', () => ext.send(JSON.stringify({ type: 'hello', role: 'extension', extId: 'roster', v: 1 })));
+  await firstMessage(ext);
+
+  const seen = [];
+  ext.on('message', (d) => {
+    const m = JSON.parse(d.toString());
+    if (m.type !== 'cmd') return;
+    seen.push(m);
+    ext.send(JSON.stringify({ type: 'res', id: m.id, __k: m.__k, ok: true, data: {} }));
+  });
+
+  const [leaver, stayer] = [await helloAgent('leaver', 'sess-leaver'), await helloAgent('stayer', 'sess-stayer')];
+
+  // 会话刚连上就发第一条命令 —— 竞态最严的那一刻
+  const r1 = nextRes(stayer);
+  stayer.send(JSON.stringify({ type: 'cmd', id: 'q1', cmd: 'snapshot', params: {} }));
+  await r1;
+  const first = seen.find((m) => m.id === 'q1');
+  assert.ok(Array.isArray(first.live), '每条命令都要带 live 名单');
+  assert.ok(first.live.includes('sess-leaver'), '别的在线会话必须在名单里，否则拦不住抢标签页');
+  assert.ok(first.live.includes('sess-stayer'), '自己也在名单里');
+
+  leaver.close();
+  await new Promise((r) => setTimeout(r, 200));
+
+  const r2 = nextRes(stayer);
+  stayer.send(JSON.stringify({ type: 'cmd', id: 'q2', cmd: 'snapshot', params: {} }));
+  await r2;
+  const second = seen.find((m) => m.id === 'q2');
+  assert.equal(second.live.includes('sess-leaver'), false, '走了的会话要从名单里摘掉');
+  assert.equal(second.live.includes('sess-stayer'), true, '还连着的必须留着');
+
+  ext.close(); stayer.close();
+});
+
+test('agent 断开时不发删槽指令 —— 它可能只是要重连', async () => {
   const ext = open({ origin: 'chrome-extension://gone' });
   ext.on('open', () => ext.send(JSON.stringify({ type: 'hello', role: 'extension', extId: 'gone', v: 1 })));
   await firstMessage(ext);
 
-  const mk = async (name) => {
-    const a = open();
-    a.on('open', () => a.send(JSON.stringify({ type: 'hello', role: 'agent', token: TOKEN, client: name, v: 1 })));
-    await firstMessage(a);
-    return a;
-  };
-  const [leaver, stayer] = [await mk('leaver'), await mk('stayer')];
-
-  const closedEvent = new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error('timeout')), 3000);
-    ext.on('message', (d) => {
-      const m = JSON.parse(d.toString());
-      if (m.type === 'event' && m.event === 'agent_closed') { clearTimeout(t); resolve(m); }
-    });
-  });
-  let leaked = false;
-  stayer.on('message', (d) => {
+  const leaver = await helloAgent('leaver2', 'sess-leaver2');
+  let sawPurge = false;
+  ext.on('message', (d) => {
     const m = JSON.parse(d.toString());
-    if (m.type === 'event' && m.event === 'agent_closed') leaked = true;
+    if (m.type === 'event' && m.event === 'agent_closed') sawPurge = true;
   });
 
   leaver.close();
-  const ev = await closedEvent;
-  assert.ok(Number.isInteger(ev.connId), 'agent_closed 必须带 connId 供扩展清槽');
-  await new Promise((r) => setTimeout(r, 200));   // 给广播留点时间再查泄漏
-  assert.equal(leaked, false, 'agent_closed 不该广播给别的 agent');
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(sawPurge, false, '断开不等于会话结束，绝不能让扩展把槽删掉');
 
-  ext.close(); stayer.close();
+  ext.close();
+});
+
+test('扩展的 ping 有 pong 回执', async () => {
+  // 单向发不算数：Chrome 是靠 WebSocket 的收发活动去续 service worker 的
+  // 空闲计时的。以前这条 ping 掉进路由的缝里被默默丢掉，桥从不回应。
+  const ext = open({ origin: 'chrome-extension://ping' });
+  ext.on('open', () => ext.send(JSON.stringify({ type: 'hello', role: 'extension', extId: 'ping', v: 1 })));
+  await firstMessage(ext);
+
+  const pong = new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('timeout')), 3000);
+    ext.on('message', (d) => {
+      const m = JSON.parse(d.toString());
+      if (m.type === 'pong') { clearTimeout(t); resolve(m); }
+    });
+  });
+  ext.send(JSON.stringify({ type: 'ping' }));
+  await pong;
+  ext.close();
 });
 
 test('扩展发的事件广播给所有 agent（tab_closed 回归）', async () => {
@@ -322,47 +400,38 @@ test('扩展发的事件广播给所有 agent（tab_closed 回归）', async () 
   ext.close(); a1.close(); a2.close();
 });
 
-// 扩展靠这个字段判断「桥是不是换了一代」，换了就把连接级的 tab 槽全清掉。
-// 不清的话会串台：connId 是桥进程内从 1 开始的递增序号，桥一重启就重头数，
-// 而槽存在 storage.local 里跨重启活着——新连上的第一个 agent 拿到 connId=1，
-// 就捡到了上一代同号会话的受控标签页，并且以为那本来就是自己的。
-const helloExt = async (url) => {
-  const ws = new WebSocket(url, { origin: 'chrome-extension://epoch' });
-  ws.on('open', () => ws.send(JSON.stringify({
-    type: 'hello', role: 'extension', extId: 'epoch', version: VERSION, v: 1,
-  })));
-  return { ws, welcome: await firstMessage(ws) };
-};
+// 老客户端不带 sessionId。它拿不到「跨桥重启稳定」这个好处（行为和以前一样），
+// 但绝不能因此串到别人的槽上——退回来的身份必须仍然是每连接互异的。
+test('不带 sessionId 的老客户端仍然拿到互异的身份', async () => {
+  const ext = open({ origin: 'chrome-extension://legacy' });
+  ext.on('open', () => ext.send(JSON.stringify({ type: 'hello', role: 'extension', extId: 'legacy', v: 1 })));
+  await firstMessage(ext);
 
-test('桥在握手时告诉扩展自己是哪一代', async () => {
-  const { ws, welcome } = await helloExt(URL);
-  assert.equal(welcome.type, 'welcome');
-  assert.ok(welcome.epoch, 'welcome 里必须带 epoch，否则扩展无从判断桥换没换代');
-  ws.close();
-});
+  const seen = [];
+  ext.on('message', (d) => {
+    const m = JSON.parse(d.toString());
+    if (m.type !== 'cmd') return;
+    seen.push(m.sid);
+    ext.send(JSON.stringify({ type: 'res', id: m.id, __k: m.__k, ok: true, data: {} }));
+  });
 
-test('同一个桥进程，重连拿到的是同一代', async () => {
-  // 扩展重载、SW 被回收后复活都会走重连。桥没变，槽就必须原样留着——
-  // 那些会话还活着。这一条守的是「别清过头」。
-  const a = await helloExt(URL);
-  const first = a.welcome.epoch;
-  a.ws.close();
-  const b = await helloExt(URL);
-  assert.equal(b.welcome.epoch, first);
-  b.ws.close();
-});
+  const mk = async (name) => {
+    const a = open();
+    a.on('open', () => a.send(JSON.stringify({ type: 'hello', role: 'agent', token: TOKEN, client: name, v: 1 })));
+    await firstMessage(a);
+    return a;
+  };
+  const [a1, a2] = [await mk('old-one'), await mk('old-two')];
+  const r1 = nextRes(a1), r2 = nextRes(a2);
+  a1.send(JSON.stringify({ type: 'cmd', id: 'l1', cmd: 'snapshot', params: {} }));
+  a2.send(JSON.stringify({ type: 'cmd', id: 'l2', cmd: 'snapshot', params: {} }));
+  await Promise.all([r1, r2]);
 
-test('换一个桥进程就是另一代', async () => {
-  const other = startBridge({ port: PORT + 1, token: TOKEN, writeInfo: false });
-  await other.ready;
-  try {
-    const a = await helloExt(URL);
-    const b = await helloExt(`ws://127.0.0.1:${PORT + 1}`);
-    assert.notEqual(a.welcome.epoch, b.welcome.epoch);
-    a.ws.close(); b.ws.close();
-  } finally {
-    other.close();
-  }
+  assert.equal(seen.length, 2);
+  assert.ok(seen.every(Boolean), '没有 sessionId 也必须盖出一个身份来');
+  assert.notEqual(seen[0], seen[1], '两个老客户端不能共用同一个身份');
+
+  ext.close(); a1.close(); a2.close();
 });
 
 test('扩展和桥的版本号必须同步', () => {

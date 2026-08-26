@@ -1,116 +1,152 @@
 // Service Worker —— 扩展这一侧的总机
 //
-// MV3 的 SW 随时会被回收，所以这里没有任何「只在内存里、丢了就完蛋」的状态：
-// 受控 tab 记在 chrome.storage.local，WS 断了就重连。
-// 保活靠两条腿：WebSocket 活动本身会重置 30s 空闲计时（Chrome 116+），
-// 外加 20s 一次的 ping；再加 chrome.alarms 兜底，把被回收后的 SW 唤醒重连。
+// 与桥的那条 WebSocket **不在这里**，在 offscreen.js。理由写在那个文件的头上，
+// 一句话版本：SW 空闲 30 秒就被回收，socket 跟着断，而 offscreen 文档不受这条规则管。
+// 这边收到的每条命令都是 offscreen 用 runtime 消息递进来的——那条消息本身
+// 就会把被回收的 SW 叫醒，所以「SW 睡着了」不再等于「扩展掉线了」。
+//
+// 于是这里没有任何「只在内存里、丢了就完蛋」的状态：受控 tab 在 storage.local，
+// 漂移记录和 iframe 快照在 storage.session，连接状态由 offscreen 维护。
 
 import * as cdp from './cdp.js';
 import { CRED_URL, redactCreds } from './redact.js';
 
-const PORTS = [8899, 8900, 8901, 8902, 8903];
-const PING_MS = 20000;
+// ---------- 连接层 ----------
+//
+// 两条腿：offscreen 文档（首选，不受 SW 的 30 秒空闲回收管），
+// 以及 SW 自己直连（兜底）。
+//
+// 兜底不是防御性代码洁癖，是踩出来的：offscreen 一旦建不起来（权限没生效、
+// 浏览器版本不支持、低内存被收走），SW 这边就再没有任何东西吊着它——
+// 没有 socket、而 chrome.runtime.reload() 又**不触发 onInstalled**，
+// 连唤醒用的 alarm 都可能没重建。结果是扩展彻底哑掉，一声不响，
+// 桥那边永远显示「扩展没连上」。整个产品的连通性不能挂在一个单点上。
 
-let ws = null;
-let pingTimer = null;
-let connecting = false;
-let retryTimer = null;
-let retryDelay = 0;
+let ensuring = null;
+let offscreenFailed = null;   // 记下原因，doctor 和 popup 要能说清为什么走了兜底
 
-// 断线后立刻重连，而不是干等 alarm。
-// 桥会因为版本升级、用户重启、空闲退出而消失，全都是秒级就能重新连上的场景；
-// 只靠 30s 的 alarm 兜底，用户在升级后的第一分钟里看到的是「NO_EXTENSION」，
-// 而真实情况只是「还没轮到重连」。退避是为了桥真的没起来时不空转。
-function scheduleReconnect() {
-  if (retryTimer) return;
-  retryDelay = retryDelay ? Math.min(retryDelay * 2, 15000) : 500;
-  retryTimer = setTimeout(() => { retryTimer = null; connect(); }, retryDelay);
+// createDocument 在文档已存在时会抛错，并发调用也会互相撞上，所以认
+// hasDocument + 单飞。alarm 每 30 秒叫一次，顺带做自愈：offscreen 万一
+// 被浏览器收走，下一个 alarm 就把它建回来。
+// 绝不向外抛——调用方拿到 false 就走兜底，而不是整条链路炸掉。
+async function ensureOffscreen() {
+  if (ensuring) return ensuring;
+  ensuring = (async () => {
+    try {
+      if (!chrome.offscreen) throw new Error('这个 Chrome 没有 offscreen API');
+      if (await chrome.offscreen.hasDocument()) return true;
+      await chrome.offscreen.createDocument({
+        url: 'offscreen.html',
+        reasons: ['WORKERS'],
+        justification: '维持与本机桥（127.0.0.1）的长连接；service worker 会被回收，连接会跟着断。',
+      });
+      offscreenFailed = null;
+      return true;
+    } catch (e) {
+      // 并发时另一个调用已经建好了，这不算失败
+      if (String(e?.message || '').includes('Only a single offscreen')) return true;
+      offscreenFailed = String(e?.message || e);
+      chrome.storage.session.set({ offscreenError: offscreenFailed }).catch(() => {});
+      return false;
+    } finally {
+      ensuring = null;
+    }
+  })();
+  return ensuring;
 }
 
-// ---------- 连接 ----------
+async function toBridge(msg) {
+  if (await ensureOffscreen()) {
+    const r = await chrome.runtime.sendMessage({ __hcBridge: 'out', msg }).catch(() => null);
+    if (r?.sent) return;
+  }
+  directSend(msg);   // offscreen 没建起来，或者它手上那条 socket 断了
+}
 
-async function connect() {
-  if (connecting || (ws && ws.readyState <= 1)) return;
-  connecting = true;
+async function connected() {
+  if (directWs?.readyState === 1) return true;
+  try {
+    return !!(await chrome.storage.session.get('bridgeConnected')).bridgeConnected;
+  } catch {
+    return false;
+  }
+}
+
+// ---------- 兜底：SW 自己拿着 socket ----------
+//
+// 就是 offscreen 之前的那套。只在 offscreen 建不起来时才启用，两条腿
+// 同时连的话桥会看到两个扩展，而它「同时只认一个」，后来者会把前一个踢掉。
+
+const PORTS = [8899, 8900, 8901, 8902, 8903];
+let directWs = null;
+let directTimer = null;
+
+function directSend(msg) {
+  if (directWs?.readyState === 1) directWs.send(JSON.stringify(msg));
+  else directConnect();
+}
+
+// 判据是「连上了没有」，不是「offscreen 文档在不在」。
+//
+// 这两件事以前被当成一件，于是踩了个死局：offscreen 文档建起来了、但它自己
+// 连不上桥（它拿不到 chrome.runtime.getManifest()，握手当场 TypeError）。
+// SW 一看「文档在」就谦让，offscreen 一看自己连不上就重试——两条腿互相让路，
+// 谁都没在干活，而扩展看起来一切正常。
+//
+// 交接改成显式的：offscreen 一旦真的连上会发 'up'，SW 收到就把自己这条关掉。
+async function directConnect() {
+  if (directWs && directWs.readyState <= 1) return;
   for (const port of PORTS) {
     try {
-      await tryPort(port);
-      connecting = false;
-      retryDelay = 0;          // 连上了，退避归零
+      directWs = await new Promise((resolve, reject) => {
+        const sock = new WebSocket(`ws://127.0.0.1:${port}`);
+        const t = setTimeout(() => { sock.close(); reject(new Error('timeout')); }, 1500);
+        sock.onopen = () => sock.send(JSON.stringify({
+          type: 'hello', role: 'extension', extId: chrome.runtime.id,
+          version: chrome.runtime.getManifest().version,
+          chrome: (navigator.userAgent.match(/Chrome\/([\d.]+)/) || [])[1], v: 1,
+        }));
+        sock.onmessage = (ev) => {
+          const m = JSON.parse(ev.data);
+          if (m.type !== 'welcome') { clearTimeout(t); sock.close(); return reject(new Error('rejected')); }
+          clearTimeout(t);
+          sock.onmessage = (e) => { const x = JSON.parse(e.data); if (x.type !== 'pong') onMessage(x); };
+          sock.onclose = () => { directWs = null; stopDirectPing(); setBadge(false); };
+          sock.onerror = () => {};
+          resolve(sock);
+        };
+        sock.onerror = () => { clearTimeout(t); reject(new Error('error')); };
+      });
+      startDirectPing();
+      setBadge(true);
       return;
-    } catch {
-      /* 换下一个端口 */
-    }
+    } catch { /* 换下一个端口 */ }
   }
-  connecting = false;
-  setBadge('off');
-  scheduleReconnect();
+  setBadge(false);
 }
 
-function tryPort(port) {
-  return new Promise((resolve, reject) => {
-    const sock = new WebSocket(`ws://127.0.0.1:${port}`);
-    const t = setTimeout(() => { sock.close(); reject(new Error('timeout')); }, 1500);
-
-    sock.onopen = () => {
-      sock.send(JSON.stringify({
-        type: 'hello',
-        role: 'extension',
-        extId: chrome.runtime.id,
-        version: chrome.runtime.getManifest().version,
-        chrome: (navigator.userAgent.match(/Chrome\/([\d.]+)/) || [])[1],
-        v: 1,
-      }));
-    };
-
-    sock.onmessage = (ev) => {
-      const msg = JSON.parse(ev.data);
-      if (msg.type === 'welcome') {
-        clearTimeout(t);
-        ws = sock;
-        syncBridgeEpoch(msg.epoch);   // 不 await：清槽和握手互不依赖，别让它拖慢连接
-        sock.onmessage = (e) => onMessage(JSON.parse(e.data));
-        sock.onclose = () => { ws = null; stopPing(); setBadge('off'); scheduleReconnect(); };
-        sock.onerror = () => {};
-        startPing();
-        setBadge('on');
-        return resolve();
-      }
-      clearTimeout(t);
-      sock.close();
-      reject(new Error('rejected'));
-    };
-
-    sock.onerror = () => { clearTimeout(t); reject(new Error('error')); };
-  });
+function startDirectPing() {
+  stopDirectPing();
+  directTimer = setInterval(() => {
+    if (directWs?.readyState === 1) directWs.send(JSON.stringify({ type: 'ping' }));
+    else directConnect();
+  }, 15000);
+}
+function stopDirectPing() {
+  if (directTimer) clearInterval(directTimer);
+  directTimer = null;
 }
 
-function startPing() {
-  stopPing();
-  pingTimer = setInterval(() => {
-    if (ws?.readyState === 1) ws.send(JSON.stringify({ type: 'ping' }));
-    else connect();
-  }, PING_MS);
-}
-function stopPing() {
-  if (pingTimer) clearInterval(pingTimer);
-  pingTimer = null;
+function setBadge(on) {
+  chrome.action.setBadgeText({ text: on ? '' : '·' });
+  chrome.action.setBadgeBackgroundColor({ color: on ? '#22c55e' : '#94a3b8' });
 }
 
-function setBadge(state) {
-  chrome.action.setBadgeText({ text: state === 'on' ? '' : '·' });
-  chrome.action.setBadgeBackgroundColor({ color: state === 'on' ? '#22c55e' : '#94a3b8' });
-}
-
-function reply(id, ok, payload, k) {
-  if (ws?.readyState === 1) {
-    const base = { type: 'res', id, __k: k };
-    ws.send(JSON.stringify(ok ? { ...base, ok: true, data: payload } : { ...base, ok: false, error: payload }));
-  }
-}
-function emit(event, extra = {}) {
-  if (ws?.readyState === 1) ws.send(JSON.stringify({ type: 'event', event, ...extra }));
-}
+const reply = (id, ok, payload, k) => {
+  const base = { type: 'res', id, __k: k };
+  return toBridge(ok ? { ...base, ok: true, data: payload } : { ...base, ok: false, error: payload });
+};
+const emit = (event, extra = {}) => toBridge({ type: 'event', event, ...extra });
 
 // ---------- 命令分发 ----------
 
@@ -119,22 +155,14 @@ function emit(event, extra = {}) {
 const NO_SLOT_CMDS = new Set(['tabs', 'download', 'reload']);
 
 async function onMessage(msg) {
-  // agent_closed：桥通知扩展某条 agent 连接断了，清掉它的槽，
-  // 防死槽让「别人在操控」的警告一直误报
-  if (msg.type === 'event') {
-    if (msg.event === 'agent_closed' && msg.connId !== undefined) {
-      await chrome.storage.local.remove(agentTabKey(msg.connId));
-    }
-    return;
-  }
   if (msg.type !== 'cmd') return;
   try {
     const handler = HANDLERS[msg.cmd];
     if (!handler) throw err('INTERNAL', `未知命令 ${msg.cmd}`);
-    // 缺省 tabId 在这里统一解析成具体 tabId（连接级槽），handler 拿到的永远是实值。
+    // 缺省 tabId 在这里统一解析成具体 tabId（会话级槽），handler 拿到的永远是实值。
     // ctx 只在本函数内现场传——SW 里两条命令的 await 会交错，绝不能用模块级变量存「当前消息」
-    const ctx = { connId: msg.connId, adopted: false };
-    const tabId = NO_SLOT_CMDS.has(msg.cmd) ? msg.tabId : await resolveTab(msg.tabId, msg.connId, ctx);
+    const ctx = { sid: msg.sid, live: msg.live, adopted: false };
+    const tabId = NO_SLOT_CMDS.has(msg.cmd) ? msg.tabId : await resolveTab(msg.tabId, msg.sid, ctx);
     const data = await handler(msg.params || {}, tabId, ctx);
     if (ctx.adopted) {
       // 本会话还没定过自己的受控 tab，继承的是全局槽。多 agent 并发时这是最危险的时刻：
@@ -161,73 +189,95 @@ const err = (code, message) => Object.assign(new Error(message), { code });
 // 早已关掉的旧 id——但下面每次读都 chrome.tabs.get 校验一次，对不上就当没有。
 // 用「读时校验」换「跨重载不丢」，这笔买卖划算。
 //
-// 多 agent 并发：每个 agent 连接（桥盖章的 connId）有自己独立的槽 agentTab:<connId>。
-// activeTabId 降级为「最近被 new/select 的 tab」——新连接首次缺省调用时继承它，
-// 继承时 ctx.adopted 打标，onMessage 在返回里提示 agent 尽早 select。
-// 无 connId（旧桥）走纯全局槽，行为与 v0.3 完全一致。
+// 多 agent 并发：每个会话（桥盖章的 sid）有自己独立的槽 agentTab:<sid>。
+// activeTabId 降级为「最近被 new/select 的 tab」，只在**没有活着的会话占着它**时
+// 才允许新会话继承——见 getActiveTabId。
+//
+// sid 由 agent 进程自己生成、跨桥重启稳定（见 src/lib/rpc.js）。这一点是整块
+// 逻辑的地基：上一版拿桥的连接序号当身份，而那个序号桥一重启就从 1 重新数，
+// 于是每次桥换代都会让所有会话的槽同时失效、集体去继承同一个全局 tab。
+// 实测一晚上桥重启 38 次，症状就是「受控标签页莫名其妙换成了别人的页面」。
 
-const agentTabKey = (connId) => `agentTab:${connId}`;
+const agentTabKey = (sid) => `agentTab:${sid}`;
+const SLOT_CAP = 32;   // 死会话的槽不主动删（它可能只是断线重连），按 LRU 收口
 
-// 桥换代了就把连接级的 tab 槽全部清掉。
-//
-// 起因是个很隐蔽的串台：connId 是桥进程内从 1 开始的递增序号，而这些槽
-// 存在 storage.local 里，跨桥重启活着。桥一重启（升级、崩溃、手动重启），
-// 新连上的第一个 agent 就拿到 connId=1，捡到上一代同号会话的槽——
-// 而且它以为那是自己的，连「你还没定过自己的标签页」那句提示都不会给。
-// agent 就这样在一个不属于它的页面上开始干活，正是隔离要防的那件事。
-//
-// 判据用桥的 epoch，不用「WS 断开」：扩展重载和桥重启撞在一起时
-// （开发期天天发生），onclose 根本来不及跑，SW 当场就没了。
-// epoch 比对在重连之后照样成立。
-//
-// 反过来也要成立：扩展自己重载、SW 被回收后复活，桥没变，
-// epoch 就没变，槽必须原样留着——那些会话还活着。
-async function syncBridgeEpoch(epoch) {
-  if (!epoch) return;                    // 旧桥没这个字段，保持原行为
-  const { bridgeEpoch } = await chrome.storage.local.get('bridgeEpoch');
-  if (bridgeEpoch === epoch) return;
+// 在线会话名单跟着每条命令一起来（见 bridge.js 的 dispatch），不落盘。
+// 落盘那版有竞态：新会话连上后立刻发第一条命令，而名单还在路上，
+// 第一条命令读到旧名单就判定「没人占」——恰恰漏掉最该拦住的那一条。
+const liveOf = (ctx) => new Set(Array.isArray(ctx?.live) ? ctx.live : []);
+
+// 谁占着这个 tab？只算**还连着**的会话——已经结束的会话留下的槽不算数，
+// 否则关掉一个 Claude Code 窗口之后，它的标签页就再没人能接手了。
+async function liveOwnersOf(tabId, exceptSid, live) {
   const all = await chrome.storage.local.get(null);
-  const stale = Object.keys(all).filter((k) => k.startsWith('agentTab:'));
-  if (stale.length) await chrome.storage.local.remove(stale);
-  await chrome.storage.local.set({ bridgeEpoch: epoch });
+  return Object.entries(all)
+    .filter(([k, v]) => k.startsWith('agentTab:') && v === tabId)
+    .map(([k]) => k.slice('agentTab:'.length))
+    .filter((sid) => sid !== exceptSid && live.has(sid));
 }
 
-async function getActiveTabId(connId, ctx) {
-  if (connId !== undefined) {
-    const key = agentTabKey(connId);
+// 记下这个会话的受控 tab，并顺手把最老的槽挤掉
+async function claimTab(sid, tabId, ctx) {
+  if (!sid) return;
+  await chrome.storage.local.set({ [agentTabKey(sid)]: tabId, [`slotTouch:${sid}`]: Date.now() });
+  const all = await chrome.storage.local.get(null);
+  const slots = Object.keys(all).filter((k) => k.startsWith('agentTab:')).map((k) => k.slice('agentTab:'.length));
+  if (slots.length <= SLOT_CAP) return;
+  const live = liveOf(ctx);
+  const victims = slots
+    .filter((s) => !live.has(s))
+    .sort((a, b) => (all[`slotTouch:${a}`] || 0) - (all[`slotTouch:${b}`] || 0))
+    .slice(0, slots.length - SLOT_CAP);
+  if (victims.length) await chrome.storage.local.remove(victims.flatMap((s) => [agentTabKey(s), `slotTouch:${s}`]));
+}
+
+async function getActiveTabId(sid, ctx) {
+  if (sid !== undefined) {
+    const key = agentTabKey(sid);
     const { [key]: mine } = await chrome.storage.local.get(key);
     if (mine) {
-      try { await chrome.tabs.get(mine); return mine; } catch { await chrome.storage.local.remove(key); } // 槽里的 tab 已关，自愈
+      try { await chrome.tabs.get(mine); return mine; } catch { await chrome.storage.local.remove([key, `slotTouch:${sid}`]); } // 槽里的 tab 已关，自愈
     }
   }
   const { activeTabId } = await chrome.storage.local.get('activeTabId');
   if (activeTabId) {
-    try {
-      const tab = await chrome.tabs.get(activeTabId);
-      if (connId !== undefined) {
-        await chrome.storage.local.set({ [agentTabKey(connId)]: activeTabId });   // 继承 = 写自己的槽
+    let tab = null;
+    try { tab = await chrome.tabs.get(activeTabId); } catch { /* 已关 */ }
+    if (tab) {
+      // 这才是「两个 agent 撞进同一个页面」唯一能拦住的地方。
+      // 以前这里无条件继承，只在返回里加一句警告——而警告是在操作**已经跑完**
+      // 之后才出现的，等于事后通知你刚才踩了别人。现在直接不给。
+      const owners = await liveOwnersOf(activeTabId, sid, liveOf(ctx));
+      if (owners.length) {
+        throw err('NO_TAB',
+          `最近受控的标签页 [${activeTabId}]「${tab.title || ''}」正被另一个还在线的会话操控，不替你抢过来。\n`
+          + `  要自己开一个：tabs(action:"new", url:…)\n`
+          + `  确实要接管同一个页面：tabs(action:"select", tabId:${activeTabId})——那会和对方在同一页面上互相踩，先想清楚。\n`
+          + `  想看有哪些页面可选：tabs(action:"list")`);
+      }
+      if (sid !== undefined) {
+        await claimTab(sid, activeTabId, ctx);   // 继承 = 写自己的槽
         if (ctx) { ctx.adopted = true; ctx.adoptedTab = activeTabId; ctx.adoptedTitle = tab.title; }
       }
       return activeTabId;
-    } catch { /* 已关 */ }
+    }
   }
   throw err('NO_TAB', '还没有受控标签页——先 tabs(action:"new", url:…) 开一个');
 }
 const setActiveTabId = (id) => chrome.storage.local.set({ activeTabId: id });
 
-async function resolveTab(tabId, connId, ctx) {
+async function resolveTab(tabId, sid, ctx) {
   if (tabId) {
     try { await chrome.tabs.get(tabId); return tabId; } catch { throw err('NO_TAB', `标签页 ${tabId} 不存在`); }
   }
-  return getActiveTabId(connId, ctx);
+  return getActiveTabId(sid, ctx);
 }
 
-// select/close 时检查这个 tab 是不是别的会话的受控页——不阻止，但必须说清
-async function conflictNote(tabId, connId) {
-  const mine = connId === undefined ? null : agentTabKey(connId);
-  const all = await chrome.storage.local.get(null);
-  const clash = Object.entries(all).some(([k, v]) => k.startsWith('agentTab:') && k !== mine && v === tabId);
-  return clash ? '⚠️ 这个标签页正被另一个会话操控。\n' : '';
+// select/close 时检查这个 tab 是不是别的会话的受控页——不阻止（显式 select
+// 是明确的接管意图），但必须说清
+async function conflictNote(tabId, sid, ctx) {
+  const owners = await liveOwnersOf(tabId, sid, liveOf(ctx));
+  return owners.length ? '⚠️ 这个标签页正被另一个还在线的会话操控，你们会在同一个页面上互相踩。\n' : '';
 }
 
 // content script 按需注入，注入前先探活，避免重复注入把 refMap 清空
@@ -272,7 +322,13 @@ async function ensureContent(tabId, frameId = 0) {
 // 于是 click / type / fill / key 这些工具一行都不用改。
 //
 // 快照 id 也一样：agent 只看到顶层那个 sN，各框架自己的 id 记在这儿。
-const frameSnaps = new Map();   // tabId -> { [frameId]: snapshotId }
+//
+// 同样存 storage.session，理由同 driftNote：放内存里的话，SW 一被回收，
+// 上一次 snapshot 拿到的 iframe ref 就必然报 STALE_SNAPSHOT——
+// 而 agent 明明刚拍完快照什么都没做，这个错误对它毫无道理可讲。
+const frameSnapKey = (tabId) => `frames:${tabId}`;
+const getFrameSnaps = async (tabId) => (await chrome.storage.session.get(frameSnapKey(tabId)))[frameSnapKey(tabId)] || null;
+const setFrameSnaps = (tabId, snaps) => chrome.storage.session.set({ [frameSnapKey(tabId)]: snaps });
 
 async function listFrames(tabId) {
   try {
@@ -406,15 +462,15 @@ async function snapshotAll(tabId, p = {}) {
       parts.push(`\n--- iframe f${f.frameId} · ${f.url} ---\n  （注入不了，多半是 sandbox 或已跳走）`);
     }
   }
-  frameSnaps.set(tabId, snaps);
+  await setFrameSnaps(tabId, snaps);
   return parts.length ? { ...top, text: top.text + '\n' + parts.join('\n') } : top;
 }
 
 // 拆框架号、还原 ref、换上那个框架自己的 snapshotId。
-function prepare(tabId, p) {
+async function prepare(tabId, p) {
   const { frameId, params } = routeOf(p);
   if (frameId !== 0) {
-    const known = frameSnaps.get(tabId)?.[frameId];
+    const known = (await getFrameSnaps(tabId))?.[frameId];
     if (!known) throw err('STALE_SNAPSHOT', `没有框架 f${frameId} 的快照，重新 snapshot 一次`);
     params.snapshotId = known;   // agent 只认顶层那个 id，框架内部的 id 由这里补
   }
@@ -423,7 +479,7 @@ function prepare(tabId, p) {
 
 // 带 ref 的命令统一从这里走。
 async function toFrame(tabId, cmd, p) {
-  const { frameId, params } = prepare(tabId, p);
+  const { frameId, params } = await prepare(tabId, p);
   const data = await toContent(tabId, { __hc: cmd, ...params }, frameId);
   // 回执里把框架后缀补回去，否则 agent 传的是 e1@f602、收到的却是「已点击 [e1]」，
   // 看着像操作到了顶层框架的另一个元素上
@@ -528,14 +584,20 @@ async function guardCreds(tabId, payload) {
 // ref 快照有 STALE_SNAPSHOT 防呆，但 read_text / query / network 这些
 // 不带 ref 的读取操作完全没有保护。这里补上：只要 URL 和上次 agent 见到的不一样，
 // 就在返回最前面显著说明。不阻断（那会让正常的跳转流程没法走），但绝不静默。
-const lastSeen = new Map();   // 「connId:tabId」-> 上次 agent 操作时的 URL；无 connId（旧桥）落 '*' 共享桶
+//
+// 存 storage.session 而不是模块级 Map：MV3 的 SW 随时被回收，实测一条连接的
+// 存活中位数只有 106 秒。存在内存里，SW 一没就全清空——而清空之后 `was` 是
+// undefined，driftNote 返回空串，**漂移检测静默失效**。这条保护正是防
+// 「一次无差别的 read_text 把 2FA 恢复码读进对话」那种事故的，
+// 它失效的时候没有任何征兆，这是最坏的一种坏法。
+const seenKey = (sid, tabId) => `seen:${sid ?? '*'}:${tabId}`;
 
-async function driftNote(tabId, connId) {
-  const key = `${connId ?? '*'}:${tabId}`;
+async function driftNote(tabId, sid) {
+  const key = seenKey(sid, tabId);
   let now;
   try { now = (await chrome.tabs.get(tabId)).url; } catch { return ''; }
-  const was = lastSeen.get(key);
-  lastSeen.set(key, now);
+  const { [key]: was } = await chrome.storage.session.get(key);
+  await chrome.storage.session.set({ [key]: now });
   if (!was || was === now) return '';
   return `⚠️ 这个标签页的地址变了，而且不是本次操作造成的：\n`
     + `   原本：${was}\n   现在：${now}\n`
@@ -543,9 +605,58 @@ async function driftNote(tabId, connId) {
     + `   如果这不是你预期的页面，先停下来确认，别在陌生页面上继续操作或读取。\n`;
 }
 
+// ---------- 点击开出新标签页 ----------
+//
+// target="_blank" 和 window.open 把新内容开在**另一个标签页**里，而受控槽
+// 还钉在原来那个。原页面确实什么都没变，于是工具老老实实报「操作已发出，
+// 但页面完全没有反应」——一句完全正确、又完全帮不上忙的话。agent 接着换个
+// 元素重试，而它要的东西早就在隔壁开好了。
+//
+// 记账写 storage.session（SW 随时被回收，而「刚才那次点击开了什么」必须
+// 活过回收，否则记账等于没记）。
+//
+// **每个**新标签页都记，不只记带 openerTabId 的那些——这是踩出来的：
+// Chrome 88 起 target="_blank" 隐含 rel=noopener，实测这样开出来的标签页
+// 拿不到 opener 关系。只按 openerTabId 记账的话，最常见的那种「点链接开新页」
+// 恰恰一个都认不出来，而症状是工具报「页面完全没有反应」——完全正确又完全没用。
+//
+// 所以判据分两级，并且把用了哪一级写进回执：opener 对得上是确凿的，
+// 同窗口内新出现是推断的，agent 该知道这个区别。
+const RECENT_TABS = 'recentTabs';
+const RECENT_CAP = 20;
+
+chrome.tabs.onCreated.addListener(async (tab) => {
+  const { [RECENT_TABS]: list = [] } = await chrome.storage.session.get(RECENT_TABS);
+  list.push({ id: tab.id, opener: tab.openerTabId, win: tab.windowId, at: Date.now() });
+  await chrome.storage.session.set({ [RECENT_TABS]: list.slice(-RECENT_CAP) });
+});
+
+// 这次操作有没有开出新标签页？只认操作开始之后才出现的那个。
+async function childOpenedSince(openerId, since) {
+  const { [RECENT_TABS]: list = [] } = await chrome.storage.session.get(RECENT_TABS);
+  const fresh = list.filter((r) => r.at >= since && r.id !== openerId);
+  if (!fresh.length) return null;
+
+  let win = null;
+  try { win = (await chrome.tabs.get(openerId)).windowId; } catch { /* 受控页没了 */ }
+
+  const hit = fresh.find((r) => r.opener === openerId)
+    || (win !== null ? fresh.find((r) => r.win === win) : null);
+  if (!hit) return null;
+
+  // 认领过就从账上划掉，别让下一条命令再报一遍同一个标签页
+  await chrome.storage.session.set({ [RECENT_TABS]: list.filter((r) => r.id !== hit.id) });
+  try {
+    const tab = await chrome.tabs.get(hit.id);
+    return { ...tab, how: hit.opener === openerId ? 'opener' : 'window' };
+  } catch {
+    return null;   // 开完又被关掉了（有些站点用它做中转）
+  }
+}
+
 // agent 自己导航到的地方不算漂移
-const markNavigated = async (tabId, connId) => {
-  try { lastSeen.set(`${connId ?? '*'}:${tabId}`, (await chrome.tabs.get(tabId)).url); } catch { /* 标签页没了 */ }
+const markNavigated = async (tabId, sid) => {
+  try { await chrome.storage.session.set({ [seenKey(sid, tabId)]: (await chrome.tabs.get(tabId)).url }); } catch { /* 标签页没了 */ }
 };
 
 // ask 的自动完成判据。轮询而不是 MutationObserver：判据里有 URL 这种
@@ -646,8 +757,9 @@ async function confirmPay(id, pay) {
 }
 
 async function performCore(id, cmd, p, { blockSensitive = false } = {}, ctx) {
-  const { frameId, params } = prepare(id, p);
+  const { frameId, params } = await prepare(id, p);
   const before = (await chrome.tabs.get(id)).url;
+  const startedAt = Date.now();
 
   // 定位：resolve、滚动、遮挡检测全在 content script 里做（一行没改），
   // 顺带把效果基线采回来。没有 ref 的操作（fill、无 ref 的 key）只采基线。
@@ -725,7 +837,20 @@ async function performCore(id, cmd, p, { blockSensitive = false } = {}, ctx) {
 
   const after = (await chrome.tabs.get(id)).url;
   const navigated = before !== after;
-  if (navigated) { await waitForLoad(id); await markNavigated(id, ctx?.connId); }
+  if (navigated) { await waitForLoad(id); await markNavigated(id, ctx?.sid); }
+
+  // 这次操作把内容开到了另一个标签页里（target=_blank / window.open）。
+  // 受控槽跟过去——不跟的话，agent 会一直对着一个「什么都没变」的原页面
+  // 换着花样重试，而它要的东西就在隔壁。回执里把两个 id 都写清楚，
+  // 想回原页面 tabs(action:"select") 一句话的事。
+  const child = await childOpenedSince(id, startedAt);
+  if (child) {
+    await waitForLoad(child.id);
+    await setActiveTabId(child.id);
+    await claimTab(ctx?.sid, child.id, ctx);
+    await markNavigated(child.id, ctx?.sid);
+    return { note, l2note, ev, navigated, upgraded, followed: { from: id, to: child.id, url: child.url, how: child.how } };
+  }
 
   return { note, l2note, ev, navigated, upgraded };
 }
@@ -749,7 +874,21 @@ function describeStep(st) {
 }
 
 // 把一次执行的结果写成给 agent 看的那几行
-function effectLines({ note, l2note, ev, upgraded }) {
+function effectLines({ note, l2note, ev, upgraded, followed }) {
+  if (followed) {
+    return [
+      note + (upgraded ? '　←　普通事件无效，已自动改用真实事件' : ''),
+      l2note,
+      `↪️ 这次操作开了一个**新标签页**，受控标签页已经跟过去了：\n`
+      + `   现在在 [${followed.to}] ${followed.url}\n`
+      + `   原来那页是 [${followed.from}]，要回去：tabs(action:"select", tabId:${followed.from})\n`
+      + `   下面的快照来自新页面。`
+      + (followed.how === 'window'
+        ? `\n   （判据是「同一个窗口里刚出现的标签页」，不是确凿的父子关系——`
+          + `如果用户正好在这几秒里自己开了一个页面，跟错的可能性存在。不对就 select 回去。）`
+        : ''),
+    ].filter(Boolean).join('\n');
+  }
   return [
     note + (upgraded ? '　←　普通事件无效，已自动改用真实事件' : ''),
     l2note,
@@ -767,17 +906,18 @@ function effectLines({ note, l2note, ev, upgraded }) {
 }
 
 async function perform(id, cmd, p, ctx) {
-  const drift = await driftNote(id, ctx?.connId);
+  const drift = await driftNote(id, ctx?.sid);
   const r = await performCore(id, cmd, p, {}, ctx);
-  const snap = await snapshotAll(id);
+  // 跟到新标签页了就拍新的那个——拍老的等于把 agent 留在它已经离开的页面上
+  const snap = await snapshotAll(r.followed ? r.followed.to : id);
   const head = [drift, effectLines(r)].filter(Boolean).join('\n');
-  return { ...snap, text: `${head}\n\n${snap.text}`, navigated: r.navigated };
+  return { ...snap, text: `${head}\n\n${snap.text}`, navigated: r.navigated || !!r.followed };
 }
 
 const HANDLERS = {
   async snapshot(p, tabId, ctx) {
     const id = await resolveTab(tabId);
-    const drift = await driftNote(id, ctx?.connId);
+    const drift = await driftNote(id, ctx?.sid);
     const snap = await guardCreds(id, await snapshotAll(id, p));
     return drift ? { ...snap, text: drift + '\n' + snap.text } : snap;
   },
@@ -788,7 +928,7 @@ const HANDLERS = {
     else await toContent(id, { __hc: 'history', action: p.action || 'reload' });
     await waitForLoad(id);
     await sleep(300); // 给 SPA 的首屏渲染一点时间，否则快照经常空
-    await markNavigated(id, ctx?.connId);
+    await markNavigated(id, ctx?.sid);
     return snapshotAll(id);
   },
 
@@ -803,12 +943,12 @@ const HANDLERS = {
   // ref 要么指向别的元素，要么不存在。所以有了 find（语义定位）——
   // 页面变了就用 role + 可访问名现场找回来。规则见下面的 structureChanged。
   async act(p, tabId, ctx) {
-    const id = await resolveTab(tabId);
+    let id = await resolveTab(tabId);
     const steps = Array.isArray(p.steps) ? p.steps : [];
     if (!steps.length) throw err('INTERNAL', 'steps 不能为空');
     if (steps.length > 20) throw err('INTERNAL', `一次最多 20 步，收到 ${steps.length} 步。拆开调用。`);
 
-    const drift = await driftNote(id, ctx?.connId);
+    const drift = await driftNote(id, ctx?.sid);
     const done = [];
     let stopped = null;
     // 页面结构一旦变过，之前那份快照里的 ref 全部作废——只有 find 还能用
@@ -860,6 +1000,15 @@ const HANDLERS = {
           break;
         }
 
+        // 开出新标签页是比「页面有没有变」更强的证据，而且后面几步必须打到
+        // 新页面上——不换的话，剩下的步骤会全部落在一个已经被丢在身后的页面里
+        if (r.followed) {
+          id = r.followed.to;
+          structureChanged = true;
+          done.push(`✅ ${label}　↪️ 开了新标签页 [${r.followed.to}]，后面几步已改在新页面上执行`);
+          continue;
+        }
+
         if (!r.ev.changed) {
           stopped = {
             i, label,
@@ -907,7 +1056,7 @@ const HANDLERS = {
 
   async read_text(p, tabId, ctx) {
     const id = await resolveTab(tabId);
-    const drift = await driftNote(id, ctx?.connId);
+    const drift = await driftNote(id, ctx?.sid);
     const r = await guardCreds(id, await toContent(id, { __hc: 'read_text', ...p }));
     return drift ? { ...r, text: drift + '\n' + r.text } : r;
   },
@@ -919,7 +1068,7 @@ const HANDLERS = {
 
   async query(p, tabId, ctx) {
     const id = await resolveTab(tabId);
-    const drift = await driftNote(id, ctx?.connId);
+    const drift = await driftNote(id, ctx?.sid);
     const r = await guardCreds(id, await toContent(id, { __hc: 'query', ...p }));
     return drift ? { ...r, text: drift + '\n' + r.text } : r;
   },
@@ -1191,36 +1340,50 @@ const HANDLERS = {
   },
 
   async tabs(p, tabId, ctx) {
-    const connId = ctx?.connId;
+    const sid = ctx?.sid;
     if (p.action === 'list') {
-      const all = await chrome.tabs.query({});
-      // 标的是本会话自己的受控 tab；旧桥（无 connId）退回全局槽
-      const { [connId === undefined ? 'activeTabId' : agentTabKey(connId)]: mine } =
-        await chrome.storage.local.get(connId === undefined ? 'activeTabId' : agentTabKey(connId));
-      const lines = all.map((t) => `[${t.id}]${t.id === mine ? ' *' : '  '} ${t.title || '(无标题)'} — ${t.url}`);
-      return { text: `共 ${all.length} 个标签页（* = 受控）\n` + lines.join('\n') };
+      const live = liveOf(ctx);
+      const [all, mineSlot] = await Promise.all([
+        chrome.tabs.query({}),
+        chrome.storage.local.get(sid === undefined ? 'activeTabId' : agentTabKey(sid)),
+      ]);
+      const mine = mineSlot[sid === undefined ? 'activeTabId' : agentTabKey(sid)];
+      // 别的会话占着哪些 tab 也标出来——agent 要挑一个安全的页面接手时，
+      // 「哪些不能碰」和「哪个是我的」一样重要
+      const slots = await chrome.storage.local.get(null);
+      const takenBy = new Map();
+      for (const [k, v] of Object.entries(slots)) {
+        if (!k.startsWith('agentTab:')) continue;
+        const owner = k.slice('agentTab:'.length);
+        if (owner !== sid && live.has(owner)) takenBy.set(v, owner);
+      }
+      const lines = all.map((t) => {
+        const mark = t.id === mine ? ' *' : takenBy.has(t.id) ? ' ×' : '  ';
+        return `[${t.id}]${mark} ${t.title || '(无标题)'} — ${t.url}`;
+      });
+      return { text: `共 ${all.length} 个标签页（* = 你的受控页，× = 别的会话占着）\n` + lines.join('\n') };
     }
     // active:false —— agent 在后台干活，不把用户从他正在看的页面上拽走。
     // 需要抢焦点的场合（截图、让用户看着操作）由调用方显式传 focus:true。
     if (p.action === 'new') {
       const tab = await chrome.tabs.create({ url: p.url || 'about:blank', active: !!p.focus });
       await setActiveTabId(tab.id);   // 全局槽照旧更新：它是「最近受控 tab」的继承源
-      if (connId !== undefined) await chrome.storage.local.set({ [agentTabKey(connId)]: tab.id });
+      await claimTab(sid, tab.id, ctx);
       if (p.url) { await waitForLoad(tab.id); await sleep(300); }
       return { text: `已在后台打开标签页 ${tab.id}`, tabId: tab.id };
     }
     // 「受控」和「前台」是两件事：这里只改受控目标，不动用户的视线
     if (p.action === 'select') {
-      const id = await resolveTab(p.tabId, connId, ctx);
+      const id = await resolveTab(p.tabId, sid, ctx);
+      const warn = await conflictNote(id, sid, ctx);
       await setActiveTabId(id);
-      if (connId !== undefined) await chrome.storage.local.set({ [agentTabKey(connId)]: id });
-      const warn = await conflictNote(id, connId);
+      await claimTab(sid, id, ctx);
       if (p.focus) await chrome.tabs.update(id, { active: true });
       return { text: warn + `受控标签页切到 ${id}` };
     }
     if (p.action === 'close') {
-      const id = await resolveTab(p.tabId, connId);
-      const warn = await conflictNote(id, connId);
+      const id = await resolveTab(p.tabId, sid, ctx);
+      const warn = await conflictNote(id, sid, ctx);
       await chrome.tabs.remove(id);
       return { text: warn + `已关闭标签页 ${id}` };
     }
@@ -1324,32 +1487,77 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---------- 生命周期 ----------
 
-chrome.runtime.onStartup.addListener(connect);
-chrome.runtime.onInstalled.addListener(() => {
-  connect();
-  chrome.alarms.create('hc-keepalive', { periodInMinutes: 0.5 });
-});
+// alarm 是 SW 被回收之后唯一能把它叫醒的东西，所以**每次 SW 醒来都重建一遍**，
+// 不只在 onInstalled / onStartup 里建。
+//
+// 这条是踩出来的：`chrome.runtime.reload()` 不触发 onInstalled，扩展更新也会
+// 清掉已注册的 alarm。以前那套靠 socket 常驻吊着 SW，看不出问题；socket 一搬走，
+// 「没 alarm + 没 socket」就等于扩展永久哑掉，而且一声不响。
+// create 同名 alarm 是幂等的（覆盖），重复调用没有代价。
+chrome.alarms.create('hc-keepalive', { periodInMinutes: 0.5 });
+chrome.runtime.onStartup.addListener(() => chrome.alarms.create('hc-keepalive', { periodInMinutes: 0.5 }));
 // SW 上一条命里挂着的调试会话，浏览器还替它留着——连同那条黄带子。
 // 每次启动扫一遍，否则用户会看到一条永远摘不掉的「已开始调试此浏览器」。
 cdp.reapOrphans();
-chrome.alarms?.onAlarm.addListener(() => connect());   // SW 被回收后靠这个复活
+// SW 被回收后靠 alarm 复活。醒来只认一个判据：**现在连上了没有**。
+// 没连上就先把 offscreen 扶起来，还不行就自己顶上——这是「装完就自动连上、
+// 永远不需要用户手点」的最后一道保险，所以判据必须是连通性本身。
+chrome.alarms?.onAlarm.addListener(async () => {
+  await ensureOffscreen();
+  if (await connected()) return setBadge(true);
+  await directConnect();
+  setBadge(await connected());
+});
 chrome.tabs.onRemoved.addListener(async (tabId) => {
-  // 全局槽 + 所有连接级槽一次扫清，别留指向死 tab 的槽
+  // 全局槽 + 所有会话级槽一次扫清，别留指向死 tab 的槽
   const all = await chrome.storage.local.get(null);
   const dead = Object.keys(all).filter((k) => (k === 'activeTabId' || k.startsWith('agentTab:')) && all[k] === tabId);
   if (dead.length) await chrome.storage.local.remove(dead);
-  for (const k of lastSeen.keys()) if (k.endsWith(':' + tabId)) lastSeen.delete(k);
+  const sess = await chrome.storage.session.get(null);
+  const gone = Object.keys(sess).filter((k) =>
+    (k.startsWith('seen:') && k.endsWith(':' + tabId)) || k === frameSnapKey(tabId) || k === childKey(tabId));
+  if (gone.length) await chrome.storage.session.remove(gone);
   emit('tab_closed', { tabId });
 });
 
-// popup 点「立即连接」时用
 chrome.runtime.onMessage.addListener((m, _s, sendResponse) => {
+  // offscreen 递进来的：桥发来的命令/事件。这条消息同时把被回收的 SW 叫醒——
+  // 这正是把 socket 搬出去之后，SW 仍然能及时干活的原因。
+  if (m?.__hcBridge === 'in') {
+    onMessage(m.msg);
+    return false;
+  }
+  // offscreen 真的连上了，把 SW 自己那条兜底 socket 关掉——
+  // 两条同时连着的话，桥「同时只认一个扩展」，会互相踢，命令随机丢
+  if (m?.__hcBridge === 'up') {
+    setBadge(true);
+    if (directWs) { stopDirectPing(); try { directWs.close(); } catch { /* 已经废了 */ } directWs = null; }
+    return false;
+  }
+  // offscreen 拿不到 chrome.runtime.getManifest()，握手身份只能由这边供给
+  if (m?.__hcBridge === 'identity') {
+    sendResponse({ extId: chrome.runtime.id, version: chrome.runtime.getManifest().version });
+    return true;
+  }
+  // 同理，它也够不着 chrome.storage，连接状态托这边落盘
+  if (m?.__hcBridge === 'status') {
+    chrome.storage.session.set({ bridgeConnected: !!m.connected }).catch(() => {});
+    setBadge(!!m.connected);
+    return false;
+  }
+
   if (m.__hcPopup === 'status') {
-    sendResponse({ connected: ws?.readyState === 1 });
+    connected().then((c) => sendResponse({ connected: c }));
     return true;
   }
   if (m.__hcPopup === 'connect') {
-    connect().then(() => sendResponse({ connected: ws?.readyState === 1 }));
+    (async () => {
+      if (await ensureOffscreen()) await chrome.runtime.sendMessage({ __hcBridge: 'kick' }).catch(() => {});
+      if (!(await connected())) await directConnect();
+      const c = await connected();
+      setBadge(c);
+      sendResponse({ connected: c });
+    })();
     return true;
   }
   // 用户在 popup 里关掉高保真模式时，先把还挂着的调试会话断干净，
@@ -1360,4 +1568,10 @@ chrome.runtime.onMessage.addListener((m, _s, sendResponse) => {
   }
 });
 
-connect();
+// SW 每次醒来（安装、浏览器启动、alarm 唤醒、offscreen 递消息）都会跑到这里。
+// 给 offscreen 一点时间自己连上，它没连上就自己顶。
+(async () => {
+  await ensureOffscreen();
+  await sleep(2000);
+  if (!(await connected())) await directConnect();
+})();

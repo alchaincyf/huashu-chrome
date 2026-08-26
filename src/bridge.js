@@ -52,16 +52,18 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
     + `所以桥已经替你等过一轮（最多 ${WAIT_MAX / 1000}s）。仍然没回来的话，多半是 Chrome 没开、`
     + '扩展被停用，或者改过扩展代码后忘了去 chrome://extensions 点重载。';
 
-  // 这一代桥的身份。connId 是进程内从 1 开始的递增序号，桥一重启就重头数——
-  // 而扩展那边的连接级 tab 槽存在 storage.local 里，跨重启活着。
-  // 不给扩展一个「换代了」的信号，新连上的第一个 agent 就会拿到 connId=1，
-  // 捡到上一代同号会话的槽，并且以为那本来就是自己的。
-  // 扩展拿它跟上次记的比对，一变就清槽。见 background.js 的 syncBridgeEpoch。
-  //
-  // 生成在这里而不是模块级：一个进程里可能起多个桥实例（测试就是这么干的），
-  // 而 epoch 标识的是「这一个桥」，不是「这份代码」。
-  const epoch = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   let lastActivity = Date.now();
+
+  // 在线会话集合。扩展靠它判断「最近那个受控标签页还有主吗」——有主就不让
+  // 新会话继承，没主才放行。这是「两个 agent 撞进同一个页面」唯一能拦住的地方，
+  // 而拦截判据只有桥知道（谁还连着）。
+  //
+  // 跟着**每条命令**一起送，而不是断线/上线时推事件让扩展存着。
+  // 推事件那版有个真实的竞态：新会话连上后立刻发第一条命令，而名单还在
+  // 桥→offscreen→SW→storage 这一路上，于是第一条命令读到的是旧名单、
+  // 判定「没人占」，照样撞进别人的页面——而这恰恰是最该拦住的那一条。
+  // 几十字节换掉一整条时序假设，划算。
+  const liveSessions = () => [...new Set([...agents].map((a) => a.sid).filter(Boolean))];
 
   const wss = new WebSocketServer({
     host: '127.0.0.1',
@@ -104,8 +106,11 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
     ws.on('close', () => {
       clearTimeout(helloTimer);
       if (agents.delete(ws)) {
-        // agent 走了：让扩展清掉它的连接级槽，否则死槽会让「别人在操控」警告一直误报
-        send(extension, { type: 'event', event: 'agent_closed', connId: ws.connId });
+        // 只把它从在线集合里摘掉，**不删它的受控标签页槽**。
+        // 这条连接断开有两种可能：会话真的结束了，或者只是桥在换代/抖了一下
+        // 而 agent 马上会带着同一个 sessionId 回来。删槽会把后者也一起毁掉，
+        // 那正是「桥一重启就跟丢标签页」的老毛病。槽由扩展侧按 LRU 收口。
+        //
         // 它排在队里的命令也一并撤掉，别等扩展回来了再去操作一个没人要结果的动作
         for (let i = waiting.length - 1; i >= 0; i--) {
           if (waiting[i].ws === ws) { clearTimeout(waiting[i].timer); waiting.splice(i, 1); }
@@ -142,7 +147,7 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
         log(`⚠️  版本不一致：扩展 ${ws.extVersion} vs 桥 ${VERSION} —— 去 chrome://extensions 重载扩展`);
       }
       log(`扩展已连接（Chrome ${msg.chrome || '?'} · 扩展 ${ws.extVersion}）`);
-      send(ws, { type: 'welcome', bridge: VERSION, v: PROTOCOL, epoch });
+      send(ws, { type: 'welcome', bridge: VERSION, v: PROTOCOL });
       broadcast({ type: 'event', event: 'extension_online' });
       flushWaiting();
       return;
@@ -157,7 +162,10 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
       agents.add(ws);
       ws.helloed = true;
       ws.client = msg.client || 'unknown';
-      log(`agent 已连接：${ws.client}`);
+      // 会话身份由 agent 自己带来，跨桥重启稳定。老客户端不带，退回连接序号——
+      // 行为和以前一样（桥一重启就丢槽），但至少不会串到别人的槽上。
+      ws.sid = msg.sessionId || `conn:${ws.connId}`;
+      log(`agent 已连接：${ws.client}（会话 ${ws.sid}）`);
       send(ws, {
         type: 'welcome', bridge: VERSION, v: PROTOCOL,
         extensionOnline: !!extension,
@@ -233,12 +241,18 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
     // 只有 281 个不同的 id，最多的一个出现了 1088 次。
     // 路由用的一直是 connId:id，审计却记裸 id——「出事能查」这条承诺
     // 在数据结构层面就不成立。
-    audit({ ev: 'cmd', id: key, cmd: msg.cmd, client: ws.client, connId: ws.connId, params: redact(msg.params) });
-    // connId 盖章：扩展据此维护每个 agent 连接自己的受控 tab 槽（多 agent 并发隔离）
-    send(extension, { ...msg, __k: key, connId: ws.connId });   // __k 原样带回，用于精确路由
+    audit({ ev: 'cmd', id: key, cmd: msg.cmd, client: ws.client, sid: ws.sid, params: redact(msg.params) });
+    // sid 盖章：扩展据此维护每个会话自己的受控 tab 槽（多 agent 并发隔离）。
+    // live 是此刻还连着的会话，扩展拿它判断某个标签页「还有没有主」。
+    send(extension, { ...msg, __k: key, sid: ws.sid, live: liveSessions() });   // __k 原样带回，用于精确路由
   }
 
   function routeBack(ws, msg) {
+    // 扩展的保活心跳。以前这条消息掉进下面的分支里被默默丢掉，桥从不回应——
+    // 而 Chrome 是靠 WebSocket 的**收发**活动去续 service worker 的空闲计时的，
+    // 单向发等于只续了一半。回一条 pong，让扩展那侧也有「收到」这个事件。
+    if (msg.type === 'ping') return send(ws, { type: 'pong' });
+
     // extension → agent
     if (msg.type === 'res') {
       if (ws !== extension) return;

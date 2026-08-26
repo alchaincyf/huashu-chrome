@@ -10,13 +10,15 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BridgeClient } from '../src/lib/rpc.js';
+import { BridgeClient, stopBridge } from '../src/lib/rpc.js';
+import { readBridgeInfo } from '../src/lib/paths.js';
 
 const DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
 const PORT = 8124;
 const PAGE = `http://127.0.0.1:${PORT}/playground.html`;
 const FLOW = `http://127.0.0.1:${PORT}/flow.html`;
 const CREDS = `http://127.0.0.1:${PORT}/creds.html`;
+const NEWTAB = `http://127.0.0.1:${PORT}/newtab.html`;
 
 let server, server6, c, mainTab;
 
@@ -778,10 +780,13 @@ test('普通页面不会被误判成凭据页', async () => {
 //
 // 2026-08-26 的真实事故：两个 agent 会话同时干活，一个操控签证页、一个操控小红书。
 // 「受控 tab」是全机唯一的全局单值，一个会话的 tabs(new/select) 会把另一个会话的
-// 缺省调用拽到自己的页面上。现在每个连接有自己的槽（agentTab:<connId>）。
+// 缺省调用拽到自己的页面上。现在每个会话有自己的槽（agentTab:<sessionId>）。
 
+// sessionId 必须显式给：默认那个是从父进程 pid 推出来的，同一个测试进程里
+// 建两个 client 会拿到**同一个**身份，多会话隔离就等于根本没在测。
+let sessionSeq = 0;
 const mkClient = async (name) => {
-  const cc = new BridgeClient({ client: name });
+  const cc = new BridgeClient({ client: name, sessionId: `test-sess-${++sessionSeq}` });
   await cc.connect();
   if (!cc.extensionOnline) throw new Error('扩展没连上');
   return cc;
@@ -808,20 +813,45 @@ test('两个会话各开各的 tab，缺省调用互不串', async () => {
   }
 });
 
-test('新会话首次缺省调用继承最近受控的 tab，并提示尽早 select', async () => {
+// 上一版这里是「继承 + 事后警告」：新会话的第一条缺省调用直接落在别人的页面上，
+// 返回里加一句「你还没定过自己的受控标签页」。而那句警告是在操作**已经跑完**
+// 之后才出现的——等于事后通知你刚才踩了别人。现在直接不给。
+test('新会话不许继承一个还有主的标签页，且要说清下一步', async () => {
   const c2 = await mkClient('test2');
   try {
-    await c.call('navigate', { url: PAGE + '?inherited=yes' });
-    // c2 是全新连接，没有自己的槽：第一次缺省调用应该落在 c 的 tab 上，且看到提示
-    const r = await c2.call('read_text', {});
-    assert.match(r.text, /还没定过自己的受控标签页/);
-    assert.match(r.text, /别在同一个页面上互相踩/);
-    assert.match(r.text, /靶场/);   // 内容确实是那个页面
-    // 槽已初始化，第二次缺省调用不该再提示（只断言至少一次，SW 重启会复燃）
-    const r2 = await c2.call('read_text', {});
-    assert.doesNotMatch(r2.text, /还没定过自己的受控标签页/);
+    await c.call('navigate', { url: PAGE + '?owned=yes' });
+    await assert.rejects(
+      () => c2.call('read_text', {}),
+      (e) => {
+        assert.equal(e.code, 'NO_TAB');
+        assert.match(e.message, /正被另一个还在线的会话操控/);
+        assert.match(e.message, /tabs\(action:"new"/);      // 自己开一个
+        assert.match(e.message, /tabs\(action:"select"/);   // 或者明确接管
+        return true;
+      });
   } finally {
     c2.close();
+  }
+});
+
+// 反过来也要成立：主人走了，页面就该能被接手。只认「还连着的会话」而不是
+// 「storage 里有没有这个槽」——不然关掉一个 Claude Code 窗口之后，
+// 它留下的标签页就再没人能用了，而那个槽会一直躺在 storage.local 里。
+test('主人已经断开的标签页可以被新会话继承', async () => {
+  const gone = await mkClient('test-gone');
+  const { tabId: t } = await gone.call('tabs', { action: 'new', url: PAGE + '?abandoned=1' });
+  gone.close();
+  await new Promise((r) => setTimeout(r, 400));   // 让桥把它从在线名单里摘掉
+
+  const heir = await mkClient('test-heir');
+  try {
+    const r = await heir.call('read_text', {});
+    assert.match(r.text, /还没定过自己的受控标签页/, '继承要提示，但不该阻拦');
+    assert.match(r.text, /靶场/);
+    await heir.call('tabs', { action: 'close', tabId: t });
+  } finally {
+    heir.close();
+    await c.call('tabs', { action: 'select', tabId: mainTab });
   }
 });
 
@@ -830,7 +860,7 @@ test('select 别的会话正在操控的 tab：警告但不阻止', async () => 
   try {
     const { tabId: ta } = await c.call('tabs', { action: 'new', url: PAGE + '?mine=a' });
     const r = await c2.call('tabs', { action: 'select', tabId: ta });
-    assert.match(r.text, /另一个会话/);
+    assert.match(r.text, /正被另一个还在线的会话操控/);
     // select 真的生效了：c2 随后的缺省调用落在这个 tab
     const e = await c2.call('eval', { expr: 'location.search' });
     assert.match(e.text, /\?mine=a/);
@@ -844,18 +874,92 @@ test('漂移警告按会话记录：自己的导航不算漂移，别人的会�
   const c2 = await mkClient('test2');
   try {
     const { tabId: t } = await c.call('tabs', { action: 'new', url: PAGE + '?drift=1' });
+    // tabId 走第三个参数，不是 params —— 除了 tabs 之外的命令都不看 params.tabId。
+    // 这几行原先写在 params 里，靠「新会话继承别人的受控标签页」误打误撞地过了；
+    // 那条继承路一堵上，它就露出来了。
+    const at = (cc, cmd, p = {}) => cc.call(cmd, p, { tabId: t });
     // 两个会话在同一个 tab 上各读一次，建立各自的基线
-    await c.call('read_text', { tabId: t });
-    await c2.call('read_text', { tabId: t });
+    await at(c, 'read_text');
+    await at(c2, 'read_text');
     // c 自己导航走（经 agent 的 navigate，不算漂移）
-    await c.call('navigate', { tabId: t, url: PAGE + '?drift=2' });
-    const own = await c.call('read_text', { tabId: t });
+    await at(c, 'navigate', { url: PAGE + '?drift=2' });
+    const own = await at(c, 'read_text');
     assert.doesNotMatch(own.text, /地址变了/);
     // c2 的基线还是 ?drift=1，它读同一个 tab 应该看到漂移警告
-    const other = await c2.call('read_text', { tabId: t });
+    const other = await at(c2, 'read_text');
     assert.match(other.text, /地址变了/);
     await c.call('tabs', { action: 'close', tabId: t });
   } finally {
+    c2.close();
+  }
+});
+
+// ---------- v0.7：连接层与标签页跟随 ----------
+//
+// 这三条对应花叔 2026-08-26 晚上报的三个症状，而它们其实是同一个根因：
+// 会话身份以前用的是桥进程内的连接序号，桥一重启就从 1 重新数。
+// 实测那一晚桥重启了 38 次（版本换代、空闲自杀、手动重启），
+// 每一次都让所有会话的受控标签页同时失效、集体去继承同一个全局 tab。
+
+test('桥换了一个进程，受控标签页还在原地', async () => {
+  const c2 = await mkClient('test-restart');
+  try {
+    await c2.call('tabs', { action: 'new', url: PAGE + '?survive=1' });
+    const before = readBridgeInfo();
+    stopBridge(before);
+    await new Promise((r) => setTimeout(r, 1500));
+
+    // 会自动重连到新起的那个桥。sessionId 不变，所以槽认得出来
+    const after = await c2.call('read_text', {});
+    assert.notEqual(readBridgeInfo()?.pid, before?.pid, '桥应该换了一个进程');
+    assert.doesNotMatch(after.text, /还没定过自己的受控标签页/, '受控标签页不该丢');
+    assert.match(after.text, /靶场/);
+    const where = await c2.call('eval', { expr: 'location.search' });
+    assert.match(where.text, /\?survive=1/, '应该还在同一个页面上');
+  } finally {
+    try { await c2.call('tabs', { action: 'close' }); } catch { /* 已经关了 */ }
+    c2.close();
+    await c.call('tabs', { action: 'select', tabId: mainTab });
+  }
+});
+
+// target="_blank" 和 window.open 把内容开在**另一个**标签页里，而受控槽还钉在
+// 原来那个。原页面确实什么都没变，于是工具老老实实报「操作已发出，但页面完全
+// 没有反应」——一句完全正确、又完全帮不上忙的话，agent 接着换个元素重试，
+// 而它要的东西早就在隔壁开好了。
+//
+// ⚠️ 判据不能只看 openerTabId：Chrome 88 起 target="_blank" 隐含 rel=noopener，
+// 实测这样开出来的标签页拿不到 opener 关系——也就是最常见的那一种一个都认不出来。
+test('点 target=_blank 的链接，受控标签页跟过去', async () => {
+  const c2 = await mkClient('test-newtab');
+  try {
+    const { tabId: from } = await c2.call('tabs', { action: 'new', url: NEWTAB });
+    const r = await c2.call('click', { find: { role: 'link', name: 'target=_blank 的链接' } });
+    assert.match(r.text, /开了一个\*\*新标签页\*\*/);
+    assert.match(r.text, new RegExp(`tabId:${from}`), '要给出原页面的 id 好回去');
+    assert.match(r.text, /这是新开的那一页/, '快照必须来自新页面');
+    const now = await c2.call('eval', { expr: 'location.search' });
+    assert.match(now.text, /via=link/);
+  } finally {
+    try { await c2.call('tabs', { action: 'close' }); } catch { /* 已经关了 */ }
+    c2.close();
+  }
+});
+
+test('window.open 开的新标签页同样跟得上，而没开新页时不误报', async () => {
+  const c2 = await mkClient('test-newtab2');
+  try {
+    const { tabId: from } = await c2.call('tabs', { action: 'new', url: NEWTAB });
+    const opened = await c2.call('click', { find: { role: 'button', name: 'window.open 的按钮' } });
+    assert.match(opened.text, /开了一个\*\*新标签页\*\*/);
+
+    // 对照组同样重要：把「同一个窗口里刚出现的标签页」当判据之后，
+    // 最容易坏的方向是**误报**——什么都没开也说跟过去了
+    await c2.call('tabs', { action: 'select', tabId: from });
+    const nothing = await c2.call('click', { find: { role: 'button', name: '点了什么都不开' } });
+    assert.doesNotMatch(nothing.text, /开了一个\*\*新标签页\*\*/);
+  } finally {
+    try { await c2.call('tabs', { action: 'close' }); } catch { /* 已经关了 */ }
     c2.close();
   }
 });

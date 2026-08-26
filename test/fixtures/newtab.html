@@ -1,0 +1,27 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>靶场 — 开新标签页</title>
+<style>body { font: 14px/1.6 system-ui, sans-serif; max-width: 700px; margin: 2rem auto; }</style>
+
+<h1>开新标签页</h1>
+
+<!-- 这一页要撞的故障：内容被开到**另一个标签页**里，而受控槽还钉在原来那个。
+     原页面确实什么都没变，于是工具老老实实报「操作已发出，但页面完全没有反应」——
+     一句完全正确、又完全帮不上忙的话。agent 接着换个元素重试，
+     而它要的东西早就在隔壁开好了。
+
+     单独一页而不是并进 playground：那一页很长，第 15 屏以下的元素按设计
+     根本不进快照（content.js 的 isVisible），滚动和视口会把信号搅浑，
+     而这里要测的是标签页级别的行为，跟页面多长没有半点关系。 -->
+
+<p><a id="blankLink" href="newtab-child.html?via=link" target="_blank">target=_blank 的链接</a></p>
+
+<p><button id="openerBtn">window.open 的按钮</button></p>
+
+<p><button id="deadBtn">点了什么都不开</button>（对照组：不该误报「跟到新标签页」）</p>
+
+<script>
+  document.getElementById('openerBtn').addEventListener('click', () => {
+    window.open('newtab-child.html?via=js', '_blank');
+  });
+</script>

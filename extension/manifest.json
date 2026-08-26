@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "huashu-chrome",
-  "version": "0.6.3",
+  "version": "0.7.0",
   "description": "让 Claude Code / Codex / Cursor 等 AI agent 操控你自己的 Chrome，带着全部登录态。",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAq6xRqEwG4yTuHRG1Zah3j//T3B72XnazyZ+9fOCa5P4bBLPmNBN7YAGL5WnjtPVJefXT9r2Ol0qvNztayDG3dMjK6AZoWccgKa5rhxcvWgFUjanXtmBBQ0qgYwNhuEJSkdinLLtyUg6YmK7Mn72NWpfa/NfqNHdK5AHslvvtJ50iQAYmabl2Nd3vOJ9DxtLBt8a2DfoGPWizgEB3+gkqm2PB8LywwwoiGKd7acr1wZEWmWK9/s0YWdzIstjlvk5AO5XFn6EtEzW8tAAOwBka9239pcyj0kEogWctHLJn7p9VFru38r+I1USyGn6u9XQ68n9edWddxBYokETCqEMT9QIDAQAB",
   "minimum_chrome_version": "116",
@@ -18,6 +18,7 @@
     "scripting",
     "storage",
     "alarms",
+    "offscreen",
     "downloads",
     "notifications",
     "debugger"

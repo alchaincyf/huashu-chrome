@@ -12,9 +12,28 @@ import { VERSION } from './version.js';
 
 const CLI = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'cli.js');
 
+// 会话身份。扩展用它认领「我的受控标签页」，所以它必须比桥活得久——
+// 桥会因为版本换代、空闲自杀、崩溃而重启，而每次重启都会让桥自己的连接序号
+// 从 1 重新数起。以前拿那个序号当身份，结果是：桥一重启，所有会话的受控标签页
+// 集体丢失，然后各自去继承「最近被谁碰过的那个 tab」——两个 agent 撞进同一个
+// 页面，或者莫名其妙落在一个陌生页面上。实测一晚上桥重启 38 次。
+//
+// 用父进程 pid：同一个 Claude Code 窗口里 MCP server 重启也不变，
+// 不同窗口天然互异，而且不需要落盘。pid 被系统回收复用时会跟一个早已结束的
+// 会话撞号——但那个会话已经不在线，它的标签页本来就该可被继承，
+// 撞上的后果和今天的默认行为一样，不额外制造问题。
+function makeSessionId(client) {
+  const ppid = process.ppid;
+  if (!ppid || ppid <= 1) return `${client}:r${Math.random().toString(36).slice(2, 10)}`;
+  return `${client}:p${ppid}`;
+}
+
 export class BridgeClient {
-  constructor({ client = 'unknown' } = {}) {
+  // sessionId 可以由调用方指定：宿主如果自己有一个稳定的会话标识，那个比
+  // 从 ppid 猜出来的更准。不指定就用默认那套。
+  constructor({ client = 'unknown', sessionId } = {}) {
     this.client = client;
+    this.sessionId = sessionId || makeSessionId(client);
     this.ws = null;
     this.seq = 0;
     this.waiting = new Map();
@@ -58,7 +77,7 @@ export class BridgeClient {
       const t = setTimeout(() => { ws.close(); fail(new Error('握手超时')); }, 4000);
 
       ws.onerror = fail;
-      ws.onopen = () => ws.send(JSON.stringify({ type: 'hello', role: 'agent', token: info.token, client: this.client, v: 1 }));
+      ws.onopen = () => ws.send(JSON.stringify({ type: 'hello', role: 'agent', token: info.token, client: this.client, sessionId: this.sessionId, v: 1 }));
       ws.onmessage = (ev) => {
         const msg = JSON.parse(ev.data);
         if (msg.type === 'welcome') {
