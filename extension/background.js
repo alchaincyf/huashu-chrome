@@ -309,12 +309,39 @@ function routeOf(p) {
   return { frameId, params: out };
 }
 
+// 页面里的对话框会把整条链路挂死，而这是唯一一种「扩展完全够不着」的状态：
+// alert / confirm / 「离开此页？」一弹出来，那一页的 JS 全停，
+// content script 的 onMessage 永远不会跑，下面这个 await 就永久悬着。
+// 原先没有超时，最后由桥在 32 秒后回一个 TIMEOUT，而 TIMEOUT 给 agent 的
+// 建议是「先 wait 再重试」——wait 同样走这条路，同样挂死，循环到用户自己发现。
+//
+// 预算按命令算：wait 和 scroll 本来就可能跑很久，用固定值会打断合法的长等待。
+// 后台标签页的对话框会被 Chrome 抑制（靶场里有一条测试守着），
+// 所以真撞上多半是用户正好切到了这一页，或者 beforeunload 拦下了导航。
+const contentBudget = (p) => {
+  if (p?.__hc === 'wait') return (Number(p.timeout) || 10000) + 5000;
+  if (p?.__hc === 'scroll') return Math.min(Number(p.times) || 1, 50) * (Number(p.wait) || 700) + 10000;
+  return 15000;
+};
+
 async function toContent(tabId, payload, frameId = 0) {
   await ensureContent(tabId, frameId);
   let r;
   try {
-    r = await chrome.tabs.sendMessage(tabId, payload, { frameId });
+    let timer;
+    const budget = contentBudget(payload);
+    r = await Promise.race([
+      chrome.tabs.sendMessage(tabId, payload, { frameId }),
+      new Promise((_, rej) => {
+        timer = setTimeout(() => rej(err('DIALOG_BLOCKING',
+          `页面脚本 ${Math.round(budget / 1000)} 秒没有响应。最常见的原因是这一页上弹了 `
+          + `alert / confirm / 「离开此页？」对话框——一弹出来页面的 JS 就全停了，扩展也够不着它。\n`
+          + `请让用户到浏览器里手动关掉那个框。别原样重试，wait 走的是同一条路，一样会挂住。\n`
+          + `（也可能是页面正在跑一段很重的脚本，那种情况稍后重试是有用的。）`)), budget);
+      }),
+    ]).finally(() => clearTimeout(timer));
   } catch (e) {
+    if (e?.code) throw e;
     throw err('TIMEOUT', `页面无响应（${e.message}）`);
   }
   if (!r) throw err('INTERNAL', '页面脚本没有返回');

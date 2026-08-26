@@ -164,7 +164,12 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
       }, ms);
 
       pending.set(key, { agent: ws, cmd: msg.cmd, timer, startedAt: Date.now(), id: msg.id });
-      audit({ ev: 'cmd', id: msg.id, cmd: msg.cmd, client: ws.client, connId: ws.connId, params: redact(msg.params) });
+      // 审计里的 id 必须全局唯一，否则 cmd 和 res 根本配不上对：
+      // msg.id 是每个 agent 进程内自增的（都从 c1 开始数），实测 5381 条 cmd
+      // 只有 281 个不同的 id，最多的一个出现了 1088 次。
+      // 路由用的一直是 connId:id，审计却记裸 id——「出事能查」这条承诺
+      // 在数据结构层面就不成立。
+      audit({ ev: 'cmd', id: key, cmd: msg.cmd, client: ws.client, connId: ws.connId, params: redact(msg.params) });
       // connId 盖章：扩展据此维护每个 agent 连接自己的受控 tab 槽（多 agent 并发隔离）
       send(extension, { ...msg, __k: key, connId: ws.connId });   // __k 原样带回，用于精确路由
       return;
@@ -182,7 +187,7 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
       if (!p) return; // 已超时，丢弃
       clearTimeout(p.timer);
       pending.delete(key);
-      audit({ ev: 'res', id: p.id, cmd: p.cmd, ok: msg.ok, ms: Date.now() - p.startedAt, error: msg.error?.code });
+      audit({ ev: 'res', id: key, cmd: p.cmd, ok: msg.ok, ms: Date.now() - p.startedAt, error: msg.error?.code });
       const { __k, ...clean } = msg;
       send(p.agent, clean);
       return;

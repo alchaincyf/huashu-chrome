@@ -499,6 +499,25 @@ export async function startMcpServer({ client = 'unknown' } = {}) {
         return { content: [{ type: 'text', text: out.text }] };
       }
 
+      // 慢命令的超时预算。桥的默认是 32 秒，而有几个命令的耗时上限
+      // 由参数决定，可以合法地超过它——`wait(timeout:60000)` 是 schema
+      // 允许的调用，却必然在 32 秒被判死，而扩展那边还在老老实实等着。
+      // 这类错配是最坏的一种：把「已经在做」报成「没做，去重试」。
+      //
+      // 只放宽、不收窄。那 32 秒同时是唯一的活性保证，收窄任何一条都可能
+      // 把本来跑得好好的命令判死；而放宽最多让一个真卡住的调用多等一会儿。
+      // 600 秒的上限跟 ask 对齐，别让 wait(timeout:3600000) 把调用挂一小时。
+      const cap = (ms) => Math.min(Math.max(ms, 35000), 600000);
+      const budgetOf = (n, a, ask) => {
+        if (n === 'download') return 150000;
+        if (n === 'ask') return ask;
+        if (n === 'wait') return cap((Number(a.timeout) || 10000) + 15000);
+        // act 一步步跑，每步都可能等 settle 和 L2 重试；实测最长的一次
+        // 已经跑到 30.8 秒，离 32 秒的墙只剩一秒多
+        if (n === 'act') return cap((Array.isArray(a.steps) ? a.steps.length : 1) * 8000 + 20000);
+        return undefined;   // 其余维持默认，它们的真实耗时离墙还很远
+      };
+
       // ask 会一直等到用户动手，桥侧的默认 30s 在这里毫无意义。
       // 多给 20s 余量：浮条自己会先超时并回一个 timed_out，那比桥判死有信息量得多。
       const askMs = Math.min(Math.max(Number(args.timeout) || 300000, 5000), 600000) + 20000;
@@ -507,7 +526,7 @@ export async function startMcpServer({ client = 'unknown' } = {}) {
         // 无人值守（cron、服务器）没有人可问。开关放在 MCP 这一侧读环境变量，
         // 扩展只管照做——扩展不该知道自己跑在什么场景里。
         name === 'ask' ? { ...args, disabled: process.env.HUASHU_CHROME_ASK === 'off' } : args,
-        { tabId: args.tabId, timeoutMs: name === 'download' ? 150000 : name === 'ask' ? askMs : undefined });
+        { tabId: args.tabId, timeoutMs: budgetOf(name, args, askMs) });
 
       // 浏览器只能下到 Downloads 里；下完再挪到 agent 要的位置，对它保持透明
       if (name === 'download' && args.savePath && data.path) {
