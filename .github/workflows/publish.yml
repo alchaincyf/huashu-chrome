@@ -1,0 +1,39 @@
+# 打 tag 自动发 npm。走 OIDC 可信发布，仓库里不存任何 token。
+#
+# 用法：
+#   npm version patch   # 或 minor / major，会自动 commit 并打 tag
+#   git push --follow-tags
+#
+# npm 网页上必须先把这个文件名（publish.yml）填进
+# Settings → Trusted Publisher，大小写和扩展名都要一致，否则 OIDC 换不到凭据。
+
+name: publish
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # OIDC 换发布凭据，缺这条整条链路不成立
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false # 发布构建不吃缓存
+
+      # 可信发布要求 npm >= 11.5.1。Node 24 自带的版本不一定够，显式抬一次。
+      - run: npm install -g npm@latest
+
+      - run: npm ci
+      - run: npm test
+
+      - run: npm publish
