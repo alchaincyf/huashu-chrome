@@ -75,3 +75,65 @@ test('不炸在循环引用和奇怪输入上', () => {
   assert.equal(redact(null), null);
   assert.equal(redact('字符串'), '字符串');
 });
+
+// ——— 按键名脱敏漏掉的第二条路：写在正文里的凭据 ———
+//
+// 上面那批测试守的是「有名字的输入框」：text、value、fields[]、steps[]。
+// 但 2026-08-26 翻日志发现，密码是从另一条路进去的——`ask` 的 prompt。
+// 那不是输入框，是 agent 写给人看的一段话，原文长这样：
+//
+//   「TLScontact 登录页已打开，邮箱和密码我都填好了（alchaincyf@gmail.com / <密码>），
+//     现在只剩验证码这一步，图片我读不了，得你亲手点。」
+//
+// 键名脱敏对它结构性无效：字段叫 prompt，而 prompt 的全部价值就是那段话本身，
+// 把它整条脱成 <312字>，`ask` 的审计就废了。
+//
+// 更关键的是这条路不是意外——`ask` 就是「我填好密码了、验证码你来」这个
+// 人工接管场景的专用通道，产品自己在把凭据往这里引。和 act 那次一模一样：
+// 说明文字推荐什么，敏感数据就流向什么。
+//
+// 所以这里改成按词切：只挖掉长得像凭据的那几个词，正文一个字不动。
+test('ask 的 prompt 里写在正文中的密码被挖掉，话还看得懂', () => {
+  const out = redact({
+    prompt: '登录页已打开，邮箱和密码我都填好了（alchaincyf@gmail.com / 027565FranceTLS!），'
+          + '现在只剩图片验证码这一步，得你亲手点。',
+  });
+  assert.doesNotMatch(out.prompt, /027565France/, '密码原文进了审计日志');
+  // 正文必须还在——否则 ask 的审计就没意义了
+  assert.match(out.prompt, /图片验证码/);
+  assert.match(out.prompt, /得你亲手点/);
+  assert.match(out.prompt, /alchaincyf@gmail\.com/, '邮箱是身份不是凭据，脱掉就查不出谁在操作');
+});
+
+test('随机生成的新密码同样挖得掉', () => {
+  const out = redact({ prompt: '新密码是 n6KRhYJcOA4ZnbpDGK_v ，存进密码管理器。' });
+  assert.doesNotMatch(out.prompt, /n6KRhYJcOA4ZnbpDGK/);
+  assert.match(out.prompt, /存进密码管理器/);
+});
+
+test('正文里的手机号也挖掉，但不误伤长数字 ID', () => {
+  const out = redact({
+    prompt: '他表里填的是 008618600755478，和项目记的 +8618600755479 对不上；'
+          + '推文是 https://x.com/CVPR/status/2025091650171031 那条。',
+  });
+  assert.doesNotMatch(out.prompt, /18600755478/);
+  assert.doesNotMatch(out.prompt, /18600755479/);
+  // 19 位推文 ID 里嵌着 11 位数字，按词切+词边界才不会把它当手机号
+  assert.match(out.prompt, /2025091650171031/, '推文 ID 被误当手机号挖了');
+});
+
+test('正文脱敏不能吃掉定位信息：URL、路径、选择器、代码', () => {
+  // 审计的核心价值是「agent 去过哪、点了什么」，这些必须原样留下
+  const out = redact({
+    prompt: '在 https://video.twimg.com/amplify_video/2085812345678/vid/1280x720.mp4 上，'
+          + '存到 /Users/alchain/Documents/写作/_X采集/2026-08-25/media/2085812345678.mp4',
+    expr: 'document.querySelectorAll("input[name=is_author]")',
+    url: 'https://registry.npmjs.org/huashu-chrome',
+    selector: '#submit-btn-2026',
+  });
+  assert.match(out.prompt, /amplify_video\/2085812345678/, 'URL 被脱敏吃掉了');
+  assert.match(out.prompt, /_X采集\/2026-08-25/, '文件路径被脱敏吃掉了');
+  assert.equal(out.expr, 'document.querySelectorAll("input[name=is_author]")');
+  assert.equal(out.url, 'https://registry.npmjs.org/huashu-chrome');
+  assert.equal(out.selector, '#submit-btn-2026');
+});

@@ -10,6 +10,8 @@ import { WebSocketServer } from 'ws';
 import fs from 'node:fs';
 import { DEFAULT_PORT, writeBridgeInfo, newToken, tokenEquals, audit, ensureHome, ALLOWLIST_FILE } from './lib/paths.js';
 import { VERSION } from './lib/version.js';
+// 纯字符串判定、不碰 chrome API，所以桥这边直接复用，不再抄一份
+import { scrubProse } from '../extension/redact.js';
 
 export { VERSION };
 const PROTOCOL = 1;
@@ -286,12 +288,21 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
 // 按键名脱敏而不是按路径点名：新增一个带 text 的命令是迟早的事，
 // 而下一个人不会记得回来改这里。宁可把「深圳」这种无害的 value 也脱成 <2字>，
 // 也不能再漏一条密码——审计要的是「谁在什么时候做了什么」，不是内容本身。
+//
+// 【第二次，同一个形状】按键名脱敏还漏着一条路：**写在正文里的凭据**。
+// `ask` 的 prompt 是 agent 写给人看的一段话，而 `ask` 恰恰是
+//「密码我填好了、验证码你来点」这个人工接管场景的专用通道——
+// 产品又一次亲手把凭据引到了没脱敏的字段上。键名脱敏对它结构性无效：
+// 字段叫 prompt，而 prompt 的全部价值就是那段话，整条脱掉审计就废了。
+// 补法见 extension/redact.js 的 scrubProse：按词切，只挖像凭据的词。
 const SECRET_KEYS = new Set(['text', 'value', 'password', 'token', 'secret', 'code']);
 
 function scrub(v, depth = 0) {
   if (v == null || depth > 8) return v;
   if (Array.isArray(v)) return v.map((x) => scrub(x, depth + 1));
-  if (typeof v !== 'object') return v;
+  // 任何还没被键名接走的字符串都过一遍正文层：不点名 prompt，
+  // 是因为下一个带正文的命令叫什么现在还不知道，而下一个人不会记得回来改这里
+  if (typeof v !== 'object') return typeof v === 'string' ? scrubProse(v) : v;
   const out = {};
   for (const [k, val] of Object.entries(v)) {
     if (typeof val === 'string' && SECRET_KEYS.has(k)) out[k] = `<${val.length}字>`;
