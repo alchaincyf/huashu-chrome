@@ -148,6 +148,29 @@
   <br><small>find 在这里必须报错列候选，而不是替用户挑一个；「删除全部」不该被「删除」误伤</small>
 </section>
 
+<!-- 13. 支付闸门：花钱的按钮要人点头，别的不烦人 -->
+<section>
+  <h2>13. 花钱的按钮</h2>
+  <p>
+    <button id="payNow">立即支付</button> <b id="payNowOut">未支付</b>
+    <br><small>明确的支付文案 → 必须弹确认</small>
+  </p>
+  <p>
+    合计 <b>¥1,280.00</b>
+    <button id="payAmount">确认</button> <b id="payAmountOut">未支付</b>
+    <br><small>通用文案 + 紧挨着有金额 → 也必须弹。真实支付页最后一下常常就写「确认」</small>
+  </p>
+  <p>
+    <button id="plainOk">确认</button> <b id="plainOkOut">未确认</b>
+    <br><small>通用文案、附近无金额 → 不该弹。这是「别太烦」的那一半</small>
+  </p>
+  <p>
+    <button id="riskySim">删除全部记录（敏感文案 + 只认 isTrusted）</button>
+    <b id="riskyOut">未触发</b>
+    <br><small>敏感但不花钱：走「不自动重试」那道闸，不该弹确认</small>
+  </p>
+</section>
+
 <script>
 // 跨源 iframe：localhost 和 127.0.0.1 是不同的源，端口跟随当前页面，换端口也能跑
 document.getElementById('xframe').src =
@@ -257,6 +280,15 @@ function trustedOnly(btnId, outId, text) {
 trustedOnly('trustedOnly', 'trustedOut', '已触发（真实事件）');
 trustedOnly('paySim', 'payOut', '已支付（真实事件）');
 // deadBtn 故意不绑任何东西
+
+// ---- 13. 花钱的按钮 ----
+document.getElementById('payNow').onclick =
+  () => { document.getElementById('payNowOut').textContent = '已支付'; };
+document.getElementById('payAmount').onclick =
+  () => { document.getElementById('payAmountOut').textContent = '已支付'; };
+document.getElementById('plainOk').onclick =
+  () => { document.getElementById('plainOkOut').textContent = '已确认'; };
+trustedOnly('riskySim', 'riskyOut', '已删除（真实事件）');
 
 // ---- 12. 同名按钮 ----
 document.querySelectorAll('.del').forEach((b) => {

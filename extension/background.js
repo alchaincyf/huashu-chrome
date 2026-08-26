@@ -525,6 +525,74 @@ function watchUntil(tabId, until, timeout) {
 
 // 执行一个动作并采证据，**不出快照**。
 // act 逐步调它，只在最后出一份快照——省掉的那些中间快照正是批处理的全部收益。
+// 轮询取浮条的结果，而不是攥着一条长回调等几分钟。
+// 长回调那条路会被 back/forward cache 掐断（「The page keeping the extension port
+// is moved into back/forward cache」），而用户去解验证码、掏手机付款的过程中
+// 页面进 bfcache 恰恰是常态。
+function pollPanel(id, timeout) {
+  return (async () => {
+    const deadline = Date.now() + timeout + 2000;
+    while (Date.now() < deadline) {
+      await sleep(400);
+      try {
+        const r = await chrome.tabs.sendMessage(id, { __hcAsk: 'poll' });
+        if (r && !r.pending) return r;
+      } catch {
+        // 页面正在跳转或刚从 bfcache 恢复，下一轮再问。
+        // 浮条注入过的页面导航走就没了，这时靠外层超时收尾。
+      }
+    }
+    return { outcome: 'timed_out', note: '' };
+  })();
+}
+
+// ---------- 支付确认 ----------
+//
+// 花钱的那一下要人点头。这是整个产品里唯一一处「明知会打扰也要打扰」的地方：
+// 别处的设计都在让 agent 别抢用户的焦点，这里反过来——看不见的确认等于没有确认。
+// 所以要把标签页切到前台，还要发桌面通知，因为人很可能根本不在浏览器里。
+//
+// 闸门在扩展里，agent 够不着：没有任何参数能让它跳过这一步。这一点很重要——
+// prompt injection 能让 agent 说出任何话，但说不动一个它调不到的开关。
+//
+// 超时按「不执行」处理。没人应答时放行等于这道闸不存在，
+// 而无人值守的机器上恰恰最没有人来阻止一笔支付。
+//
+// 时长可以被调短（回归测试要用，否则每条用例得等三分钟）。这不是后门：
+// 调短只会让支付更容易被拒，没有任何取值能让一笔支付**通过**。
+// 真正的开关——「跳过确认」——不存在，agent 那一侧根本没有这个参数。
+let payTimeout = 180000;
+
+async function confirmPay(id, pay) {
+  const tab = await chrome.tabs.get(id);
+  await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+  await chrome.tabs.update(id, { active: true });
+  await chrome.scripting.executeScript({ target: { tabId: id }, files: ['ask-overlay.js'] });
+
+  chrome.notifications?.create(`hc-pay-${Date.now()}`, {
+    type: 'basic',
+    iconUrl: 'icons/icon128.png',
+    title: '确认这笔支付？',
+    message: `${pay.label}${pay.amount ? ` · ${pay.amount}` : ''}\n${tab.title || ''}`.slice(0, 180),
+    priority: 2,
+  }, () => void chrome.runtime.lastError);
+
+  await chrome.tabs.sendMessage(id, {
+    __hcAsk: 'show',
+    danger: true,
+    title: '要花钱了，确认一下',
+    prompt: 'agent 请求点击这个按钮。确认之后才会真的点下去。',
+    facts: [['按钮', pay.label], ['金额', pay.amount], ['页面', tab.title || ''], ['地址', tab.url || '']],
+    okText: '确认，点下去',
+    noText: '不要',
+    wantNote: false,
+    timeout: payTimeout,
+  });
+
+  const res = await pollPanel(id, payTimeout);
+  return res.outcome === 'continued';
+}
+
 async function performCore(id, cmd, p, { blockSensitive = false } = {}, ctx) {
   const { frameId, params } = prepare(id, p);
   const before = (await chrome.tabs.get(id)).url;
@@ -546,6 +614,16 @@ async function performCore(id, cmd, p, { blockSensitive = false } = {}, ctx) {
   // 这一步在审计日志里也独立可查。
   if (blockSensitive && loc?.sensitive) {
     return { blocked: true, why: 'sensitive' };
+  }
+
+  // 支付闸门。批处理在上面那一步就已经停住了（支付按钮必然也命中 sensitive），
+  // 所以走到这里的一定是 agent 单独发的一次操作——正是该问人的时刻。
+  if (loc?.pay) {
+    if (!await confirmPay(id, loc.pay)) {
+      throw err('PAY_DECLINED',
+        `用户没有确认这笔支付（${loc.pay.label}${loc.pay.amount ? ` · ${loc.pay.amount}` : ''}）。`
+        + '这是明确的「别做」——不要重试，也不要换个方式绕过去。');
+    }
   }
 
   const l2ok = frameId === 0 && L2_CMDS.has(cmd) && hasTarget && !loc?.outside;
@@ -1116,24 +1194,7 @@ const HANDLERS = {
     await chrome.tabs.sendMessage(id, {
       __hcAsk: 'show', title: p.title, prompt: p.prompt, timeout, wantNote: p.wantNote !== false,
     });
-    // 轮询取结果，而不是攥着一条长回调等几分钟。
-    // 长回调那条路会被 back/forward cache 掐断（「The page keeping the extension port
-    // is moved into back/forward cache」），而用户去解验证码、切标签页的过程中
-    // 页面进 bfcache 恰恰是常态。
-    const panel = (async () => {
-      const deadline = Date.now() + timeout + 2000;
-      while (Date.now() < deadline) {
-        await sleep(400);
-        try {
-          const r = await chrome.tabs.sendMessage(id, { __hcAsk: 'poll' });
-          if (r && !r.pending) return r;
-        } catch {
-          // 页面正在跳转或刚从 bfcache 恢复，下一轮再问。
-          // 浮条注入过的页面导航走就没了，这时靠外层超时收尾。
-        }
-      }
-      return { outcome: 'timed_out', note: '' };
-    })();
+    const panel = pollPanel(id, timeout);
 
     // until 判据：用户完成后往往不会记得回来点「我完成了」——登录跳转、
     // 验证通过这些都有明确的页面信号，能自动收工就别让他多点一下。
@@ -1158,6 +1219,14 @@ const HANDLERS = {
       outcome: res.outcome,
       text: `${head}${res.note ? `\n用户留言：${res.note}` : ''}\n\n${snap.text}`,
     };
+  },
+
+  // 回归测试用：把支付确认的等待时间调短，否则每条相关用例都要等三分钟。
+  // 故意不写进 MCP 工具列表，所以 agent 那一侧看不到、也调不到它。
+  // 即使被调到也不危险——超时一律按拒绝处理，调短只会让支付更容易失败。
+  async __pay_timeout(p) {
+    payTimeout = Math.min(Math.max(Number(p.ms) || 180000, 1000), 600000);
+    return { text: `支付确认等待时间设为 ${payTimeout}ms` };
   },
 
   // 开发期用：改完扩展代码不必再手动去 chrome://extensions 点重载。

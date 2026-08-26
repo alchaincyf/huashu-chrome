@@ -549,6 +549,55 @@
     return /\b(pay|submit|checkout|delete|remove|confirm|publish)\b/i.test(cls);
   }
 
+  // ---------- 支付闸门 ----------
+  //
+  // 花钱的那一下要人点头。判据必须比 SENSITIVE_TEXT 窄得多——那条含
+  // 「确认/确定/提交」，拿它弹窗的话几乎每个页面都要打断一次，
+  // 而「烦」的终点是用户把整个功能关掉，那就一点保护都不剩了。
+  // 所以这里只认花钱的语义，别的敏感动作照旧只走「不自动重试」那道闸。
+  const PAY_TEXT = /支付|付款|下单|结算|购买|充值|提现|转账|打赏|续费|开通会员|确认订单|微信支付|支付宝|pay\s?now|checkout|place\s?order|buy\s?now|purchase|subscribe/i;
+
+  // 金额是比文案更强的信号：「确认」两个字到处都是，但「确认 ¥1,280」
+  // 只可能是一件事。真实支付页最后那一下常常就写着「确认」——
+  // 只看文案会把最该拦的那一类漏掉。
+  const MONEY = /[¥$€£￥]\s?\d[\d,]*(?:\.\d+)?|\d[\d,]*(?:\.\d+)?\s*(?:元|块|美元|USD|CNY|RMB)/i;
+  const GENERIC_OK = /^(确认|确定|提交|同意|继续|下一步|ok|confirm|submit|continue|next)/i;
+
+  const labelOf = (el) => [el.innerText, el.value, el.getAttribute?.('aria-label'), el.getAttribute?.('title')]
+    .map((s) => (s || '').trim()).find(Boolean) || '';
+
+  // 只看按钮自己和它的直接父元素。
+  //
+  // 试过往上找三四层，也试过用「容器文本量」当刹车，都不行：靶场里一个
+  // 本不该拦的「确认」，被同一个 section 里另一笔订单的 ¥1,280 拦了下来，
+  // 而那个 section 的文字量恰好在阈值以内。容器有多大是页面说了算的，
+  // 拿它当判据就是在碰运气。
+  //
+  // 这么定会漏掉一类结构：金额在外层、按钮又被 .actions 多包了一层。
+  // 认下这个漏——那种页面上的按钮通常自己就写着「确认支付」，
+  // 早在文案那一关就被拦住了。而误报的代价要重得多：
+  // 一个见「确认」就弹窗的闸门，用户两天就把它关了，剩下的保护是零。
+  function moneyNear(el) {
+    let box = el;
+    for (let up = 0; box && up < 2; up++, box = box.parentElement) {
+      const m = MONEY.exec((box.innerText || '').trim());
+      if (m) return m[0].trim();
+    }
+    return '';
+  }
+
+  // 返回 null 或 { label, amount }。amount 只是弹窗里给人看的证据，
+  // 取不到不影响判定。
+  function payInfo(el) {
+    const label = labelOf(el).slice(0, 60);
+    if (PAY_TEXT.test(label)) return { label, amount: moneyNear(el) };
+    if (GENERIC_OK.test(label)) {
+      const amount = moneyNear(el);
+      if (amount) return { label, amount };
+    }
+    return null;
+  }
+
   async function doLocate(p) {
     // fill 这类没有单一目标的操作只要基线，不要定位
     if (p.baselineOnly) { lastTarget = null; return { baseline: await baselineOf(null) }; }
@@ -578,6 +627,7 @@
       role: roleOf(el),
       prefer: preferOf(el),
       sensitive: isSensitive(el),
+      pay: payInfo(el),
       baseline,
     };
   }

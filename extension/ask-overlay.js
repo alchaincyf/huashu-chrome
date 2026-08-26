@@ -53,12 +53,24 @@
     .ok:hover { background: #ea580c; }
     .no { background: #fff; color: #666; border-color: #e2e2e2; }
     .no:hover { background: #f6f6f6; }
+    /* 支付确认：同一个浮条换一身红。这类打断一年也遇不上几次，
+       它必须一眼就和「帮我解个验证码」区分开——看错了是要花钱的。 */
+    .panel.danger .head { background: linear-gradient(135deg,#fef2f2,#fee2e2); }
+    .panel.danger .dot { background: #dc2626; }
+    .panel.danger .ok { background: #dc2626; }
+    .panel.danger .ok:hover { background: #b91c1c; }
+    .what { margin-top: 8px; padding: 8px 10px; border-radius: 8px; background: #f8f8f8;
+            font-size: 13px; word-break: break-all; }
+    .amount { font-weight: 700; font-size: 16px; color: #dc2626; }
     @media (prefers-color-scheme: dark) {
       .panel { background: #1c1c1e; color: #f2f2f2; border-color: rgba(255,255,255,.1); }
       .head { background: linear-gradient(135deg,#3b2a1a,#2c1f14); border-bottom-color: rgba(255,255,255,.07); }
       .note { background: #2a2a2c; border-color: #3a3a3c; color: #f2f2f2; }
       .no { background: #2a2a2c; color: #ccc; border-color: #3a3a3c; }
       .no:hover { background: #333; }
+      .panel.danger .head { background: linear-gradient(135deg,#3f1d1d,#2a1414); }
+      .what { background: #2a2a2c; }
+      .amount { color: #f87171; }
     }
   `;
 
@@ -102,6 +114,27 @@
     // 「数据不当代码用」的边界。
     panel.querySelector('.t').textContent = msg.title || 'huashu-chrome 需要你搭把手';
     panel.querySelector('.p').textContent = msg.prompt || '';
+    if (msg.danger) panel.classList.add('danger');
+    if (msg.okText) panel.querySelector('.ok').textContent = msg.okText;
+    if (msg.noText) panel.querySelector('.no').textContent = msg.noText;
+    // 「点哪个按钮、在哪个站、多少钱」三样单独拎出来，不混在正文里。
+    // 正文是 agent 写的（可能源自被注入的页面），这三样是扩展自己看到的事实。
+    if (msg.facts) {
+      const box = document.createElement('div');
+      box.className = 'what';
+      for (const [k, v] of msg.facts) {
+        if (!v) continue;
+        const line = document.createElement('div');
+        const key = document.createElement('span');
+        key.textContent = `${k}：`;
+        const val = document.createElement('span');
+        val.textContent = v;
+        if (k === '金额') val.className = 'amount';
+        line.append(key, val);
+        box.appendChild(line);
+      }
+      panel.querySelector('.body').appendChild(box);
+    }
 
     let noteEl = null;
     if (msg.wantNote) {

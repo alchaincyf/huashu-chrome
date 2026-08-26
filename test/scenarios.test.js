@@ -294,10 +294,12 @@ test('原生 <select> 强制走 L1，不会被升级到真实事件', async () =
 
 test('敏感文案的目标不自动升级，避免重复执行', async () => {
   await go();
-  const r = await c.call('click', { selector: '#paySim' });
+  // 用「删除全部记录」而不是支付按钮：支付另有一道确认闸门（下面那组），
+  // 会把这条用例挂在弹窗上。这里要验的是「敏感就不自动重试」，与花不花钱无关。
+  const r = await c.call('click', { selector: '#riskySim' });
   assert.match(r.text, /没有自动用真实事件重试/);
-  // 没有真的「支付」出去，这是这道闸门存在的全部意义
-  assert.equal(await val('document.getElementById("payOut").textContent'), '"未触发"');
+  // 没有真的执行出去，这是这道闸门存在的全部意义
+  assert.equal(await val('document.getElementById("riskyOut").textContent'), '"未触发"');
 });
 
 // 下面两条需要用户在扩展弹窗里开过「高保真模式」，没开就跳过——
@@ -322,8 +324,67 @@ test('只认 isTrusted 的按钮：普通事件无效时自动升级并成功', 
 test('敏感目标显式传 real:true 时照做', async (t) => {
   await go();
   if (!(await l2())) return t.skip('未开启高保真模式');
-  await c.call('click', { selector: '#paySim', real: true });
-  assert.equal(await val('document.getElementById("payOut").textContent'), '"已支付（真实事件）"');
+  await c.call('click', { selector: '#riskySim', real: true });
+  assert.equal(await val('document.getElementById("riskyOut").textContent'), '"已删除（真实事件）"');
+});
+
+// ---------- v0.4.1：支付确认 ----------
+//
+// 这一组守的是产品里唯一一处「明知会打扰也要打扰」的设计。两边都要守住：
+// 花钱的那一下必须有人点头，而别的动作一次也不许烦人——「烦」的终点是
+// 用户把功能关掉，那就一点保护都不剩了。
+//
+// 测试环境里没有人去点那个浮条，所以确认永远等不到，超时按拒绝处理。
+// 等待时间调到 2 秒（`__pay_timeout` 不在 MCP 工具列表里，agent 看不到它）。
+
+const payFast = () => c.call('__pay_timeout', { ms: 2000 });
+
+test('明确的支付按钮会被拦下，没人确认就不执行', async () => {
+  await go();
+  await payFast();
+  await assert.rejects(
+    () => c.call('click', { selector: '#payNow' }),
+    (e) => /PAY_DECLINED/.test(e.code || '') || /没有确认这笔支付/.test(e.message));
+  // 最要紧的一条：钱没花出去
+  assert.equal(await val('document.getElementById("payNowOut").textContent'), '"未支付"');
+});
+
+test('通用文案 + 附近有金额，同样拦下', async () => {
+  await go();
+  await payFast();
+  // 真实支付页最后一下常常就写着「确认」两个字。只看文案会把最该拦的那类漏掉，
+  // 而「确认 ¥1,280」放在一起只可能是一件事。
+  await assert.rejects(
+    () => c.call('click', { selector: '#payAmount' }),
+    /没有确认这笔支付/);
+  assert.equal(await val('document.getElementById("payAmountOut").textContent'), '"未支付"');
+});
+
+test('金额被带进拒绝理由里，agent 知道自己拦在了什么上面', async () => {
+  await go();
+  await payFast();
+  await assert.rejects(
+    () => c.call('click', { selector: '#payAmount' }),
+    /¥1,280/);
+});
+
+test('普通的「确认」不弹窗，照常点下去', async () => {
+  await go();
+  await payFast();
+  // 这条和上面三条同样重要：闸门要是见「确认」就拦，用户两天就把它关了
+  const r = await c.call('click', { selector: '#plainOk' });
+  assert.ok(!r.isError, JSON.stringify(r));
+  assert.equal(await val('document.getElementById("plainOkOut").textContent'), '"已确认"');
+});
+
+test('删除这类敏感动作不弹支付确认', async () => {
+  await go();
+  await payFast();
+  // 花叔的口径：只有花钱的动作要二次弹窗，别的不限制。
+  // 删除仍然受「不自动用真实事件重试」那道闸保护，但不该打断人。
+  const r = await c.call('click', { selector: '#riskySim' });
+  assert.ok(!r.isError, JSON.stringify(r));
+  assert.doesNotMatch(r.text, /确认这笔支付/);
 });
 
 // ---------- v0.3：人工介入 ----------
