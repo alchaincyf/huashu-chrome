@@ -144,7 +144,12 @@ async function doctor() {
       r.ok ? ok(`握手正常${r.extensionOnline ? ` · Chrome 扩展在线 (v${r.extensionVersion})` : ''}`) : bad('握手失败：' + r.error);
       if (r.versionMismatch) bad(`扩展版本 ${r.extensionVersion} 和 CLI 不一致`, '去 chrome://extensions 点重载，再刷新目标页面');
       if (r.ok && !r.extensionOnline) {
-        bad('Chrome 扩展没连上桥', '确认 Chrome 开着、扩展已启用；改过扩展代码要去 chrome://extensions 重载');
+        // 这一句原先只说「确认扩展已启用」，而它最常见的原因根本不是没启用：
+        // Chrome 会回收扩展的后台进程，桥这边就表现为「没连上」。先说这个，
+        // 免得用户一上来就去重载一个其实好好的扩展。
+        bad('Chrome 扩展这会儿没连着桥',
+          '多半是 Chrome 回收了扩展的后台进程——去浏览器里点开任意页面，几秒后再跑一次 doctor。'
+          + '还是不行再看：Chrome 开着吗、扩展启用了吗、改过扩展代码没去 chrome://extensions 重载？');
       }
     }
   }

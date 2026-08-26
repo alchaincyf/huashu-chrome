@@ -67,18 +67,78 @@ test('扩展冒充 agent（有 Origin 却报 role:agent）被拒', async () => {
   await assert.rejects(firstMessage(ws), (e) => /closed 4003/.test(e.message));
 });
 
-test('扩展离线时 agent 发命令，立刻收到 NO_EXTENSION 而不是干等', async () => {
+// 这条原先断言的是「立刻收到 NO_EXTENSION 而不是干等」。2026-08-26 推翻：
+// 「立刻失败」当初防的是 agent 干等 30 秒，但它把两种情况当成了一种——
+//
+//   a) 扩展被浏览器回收了，一会儿就回来   ← 常态，实测 111 次断开里 103 次 ≤1s 恢复
+//   b) 扩展真的没装 / 没启用             ← 例外
+//
+// MV3 的 SW 本来就随时会被回收（实测连接存活中位数 106s），而桥是本地进程，
+// **唤不醒**一个被回收的 SW——能唤醒它的只有 chrome.alarms（30s 一次）、
+// tabs.onRemoved、content script 消息，全是「用户在浏览网页」才发生的事。
+// 所以用户活跃时秒回、静止时最长等一个 alarm 周期。
+//
+// 对 a) 判死是错的：agent 拿到的是一个假故障，而正确动作只是等一下。
+// 现在改成排队，超过窗口才判死——b) 仍然会失败，只是慢 40 秒，
+// 而它本来就需要人去处理，快 40 秒没有任何价值。
+test('扩展离线时命令先排队，扩展一连上就送达（不再假判死）', async () => {
   const agent = open();
   agent.on('open', () => agent.send(JSON.stringify({ type: 'hello', role: 'agent', token: TOKEN, client: 'test', v: 1 })));
   await firstMessage(agent);
 
-  const res = await new Promise((resolve) => {
-    agent.on('message', (d) => resolve(JSON.parse(d.toString())));
-    agent.send(JSON.stringify({ type: 'cmd', id: 'c1', cmd: 'snapshot', params: {} }));
+  const res = nextRes(agent);
+  agent.send(JSON.stringify({ type: 'cmd', id: 'q1', cmd: 'snapshot', params: {} }));
+
+  // 命令发出去时扩展还不在。200ms 后它才连上——够久，足以证明桥真的等了
+  await new Promise((r) => setTimeout(r, 200));
+  const ext = open({ origin: 'chrome-extension://late' });
+  ext.on('open', () => ext.send(JSON.stringify({ type: 'hello', role: 'extension', extId: 'late', v: 1 })));
+  ext.on('message', (d) => {
+    const m = JSON.parse(d.toString());
+    if (m.type === 'cmd') ext.send(JSON.stringify({ type: 'res', id: m.id, __k: m.__k, ok: true, data: { queued: true } }));
   });
-  assert.equal(res.ok, false);
-  assert.equal(res.error.code, 'NO_EXTENSION');
+
+  const r = await res;
+  assert.equal(r.ok, true, '排队的命令没有在扩展连上后送达');
+  assert.equal(r.data.queued, true);
+  ext.close();
   agent.close();
+});
+
+test('扩展一直不来，排队的命令最终仍要失败——且话要说对', async () => {
+  const agent = open();
+  agent.on('open', () => agent.send(JSON.stringify({ type: 'hello', role: 'agent', token: TOKEN, client: 'test', v: 1 })));
+  await firstMessage(agent);
+
+  const res = nextRes(agent);
+  // 调用方自己声明只等 300ms —— 排队窗口不能超过它，否则就成了另一种「干等」
+  agent.send(JSON.stringify({ type: 'cmd', id: 'q2', cmd: 'snapshot', params: {}, timeout: 300 }));
+  const r = await res;
+  assert.equal(r.ok, false);
+  assert.equal(r.error.code, 'NO_EXTENSION');
+  // 老话术「确认 Chrome 开着、扩展已启用」会把人骗去点重载，而真实情况多半是
+  // 「再等一下它自己就回来了」。新话术必须说出「被浏览器回收」这件事。
+  assert.match(r.error.message, /回收|等/, '错误信息没说清扩展是被浏览器回收了');
+  agent.close();
+});
+
+test('排队期间 agent 自己走了，不能在它关闭的连接上回包', async () => {
+  const agent = open();
+  agent.on('open', () => agent.send(JSON.stringify({ type: 'hello', role: 'agent', token: TOKEN, client: 'test', v: 1 })));
+  await firstMessage(agent);
+  agent.send(JSON.stringify({ type: 'cmd', id: 'q3', cmd: 'snapshot', params: {}, timeout: 5000 }));
+  await new Promise((r) => setTimeout(r, 50));
+  agent.close();
+
+  // 扩展随后连上：队列里那条属于已关闭 agent 的命令必须被丢掉，不能派给扩展
+  const ext = open({ origin: 'chrome-extension://after' });
+  let got = 0;
+  ext.on('open', () => ext.send(JSON.stringify({ type: 'hello', role: 'extension', extId: 'after', v: 1 })));
+  ext.on('message', (d) => { if (JSON.parse(d.toString()).type === 'cmd') got++; });
+  await firstMessage(ext);
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(got, 0, '把命令派给了一个已经走掉的 agent');
+  ext.close();
 });
 
 test('端到端：agent 的 cmd 走到扩展，扩展的 res 走回 agent', async () => {

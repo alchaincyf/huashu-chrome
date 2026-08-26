@@ -566,7 +566,11 @@ export async function startMcpServer({ client = 'unknown' } = {}) {
 // 错误不只报「什么坏了」，还报「下一步该干嘛」——省掉 agent 一轮瞎试
 function hint(e) {
   const map = {
-    NO_EXTENSION: '浏览器扩展没连上。确认 Chrome 开着、huashu-chrome 扩展已启用，然后重试。',
+    // 老话术是「确认 Chrome 开着、扩展已启用，然后重试」，它把人引向了错误的动作：
+    // 绝大多数 NO_EXTENSION 其实是「Chrome 把扩展的后台进程回收了，几秒后自己回来」，
+    // 而桥现在已经替你等过一轮了——还失败就说明真的不是等一下能解决的。
+    NO_EXTENSION: '扩展没连上，桥已经替你等过一轮了。别再重试同一条命令——'
+      + '让用户去 chrome://extensions 看 huashu-chrome 是否启用；改过扩展代码的话点一下重载。',
     STALE_SNAPSHOT: '页面已经变了，之前的 ref 全部作废。重新调用 snapshot，用新 ref 再点。',
     REF_NOT_FOUND: '这个 ref 在页面上找不到了。重新 snapshot。',
     NOT_INTERACTABLE: '元素当前不可点（被遮挡、隐藏或 disabled）。先 wait，或换一个目标。',

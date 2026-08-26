@@ -31,6 +31,27 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
   const pending = new Map();
   let connSeq = 0;
 
+  // 扩展缺席时的等待队列。
+  //
+  // MV3 的 service worker 随时会被 Chrome 回收——实测一条连接的存活中位数只有
+  // 106 秒，一晚上断开 111 次。而桥是个本地进程，**唤不醒**被回收的 SW：
+  // 能唤醒它的只有 chrome.alarms（30s 一次）、tabs.onRemoved、content script 消息，
+  // 全都是「用户在浏览网页」才会发生的事。所以用户活跃时扩展秒回（111 次里 103 次
+  // ≤1s），静止时最长要等一个 alarm 周期。
+  //
+  // 原先这里是「扩展不在就立刻判死」。那当初防的是 agent 干等 30 秒，方向没错，
+  // 但它把两件事当成了一件：扩展「一会儿就回来」和扩展「真的没装」。对前者判死，
+  // agent 拿到的是个假故障，而正确动作只是等一下。
+  //
+  // 注意跟「命令执行途中掉线」的区别：那种情况**绝不能**排队重发——点击可能
+  // 已经生效，重发等于重复操作。那条路仍然立刻失败，见下面 ws.on('close')。
+  const waiting = [];
+  const WAIT_CAP = 64;                 // 扩展长期不在时别无限堆积
+  const WAIT_MAX = 40000;              // 一个 30s alarm 周期 + 余量
+  const NO_EXT_MSG = '扩展没连上。Chrome 会回收扩展的后台进程，通常几秒内自己回来，'
+    + `所以桥已经替你等过一轮（最多 ${WAIT_MAX / 1000}s）。仍然没回来的话，多半是 Chrome 没开、`
+    + '扩展被停用，或者改过扩展代码后忘了去 chrome://extensions 点重载。';
+
   // 这一代桥的身份。connId 是进程内从 1 开始的递增序号，桥一重启就重头数——
   // 而扩展那边的连接级 tab 槽存在 storage.local 里，跨重启活着。
   // 不给扩展一个「换代了」的信号，新连上的第一个 agent 就会拿到 connId=1，
@@ -85,6 +106,10 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
       if (agents.delete(ws)) {
         // agent 走了：让扩展清掉它的连接级槽，否则死槽会让「别人在操控」警告一直误报
         send(extension, { type: 'event', event: 'agent_closed', connId: ws.connId });
+        // 它排在队里的命令也一并撤掉，别等扩展回来了再去操作一个没人要结果的动作
+        for (let i = waiting.length - 1; i >= 0; i--) {
+          if (waiting[i].ws === ws) { clearTimeout(waiting[i].timer); waiting.splice(i, 1); }
+        }
       }
       if (ws === extension) {
         extension = null;
@@ -119,6 +144,7 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
       log(`扩展已连接（Chrome ${msg.chrome || '?'} · 扩展 ${ws.extVersion}）`);
       send(ws, { type: 'welcome', bridge: VERSION, v: PROTOCOL, epoch });
       broadcast({ type: 'event', event: 'extension_online' });
+      flushWaiting();
       return;
     }
 
@@ -148,35 +174,71 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
     // agent → extension
     if (msg.type === 'cmd') {
       if (!agents.has(ws)) return;
-      if (!extension || extension.readyState !== 1) {
-        return send(ws, { type: 'res', id: msg.id, ok: false, error: { code: 'NO_EXTENSION', message: 'Chrome 扩展未连接——请确认 Chrome 开着、huashu-chrome 扩展已启用' } });
-      }
-      const gate = checkSite(msg);
-      if (gate) {
-        audit({ ev: 'blocked', cmd: msg.cmd, client: ws.client, reason: gate.code });
-        return send(ws, { type: 'res', id: msg.id, ok: false, error: gate });
-      }
-
-      // 下载、上传这类命令天然比一次点击慢得多，让调用方自己说要等多久
-      const ms = Math.min(Math.max(Number(msg.timeout) || CMD_TIMEOUT, 1000), 600000);
-      const key = `${ws.connId}:${msg.id}`;
-      const timer = setTimeout(() => {
-        pending.delete(key);
-        send(ws, { type: 'res', id: msg.id, ok: false, error: { code: 'TIMEOUT', message: `扩展 ${Math.round(ms / 1000)}s 未响应` } });
-      }, ms);
-
-      pending.set(key, { agent: ws, cmd: msg.cmd, timer, startedAt: Date.now(), id: msg.id });
-      // 审计里的 id 必须全局唯一，否则 cmd 和 res 根本配不上对：
-      // msg.id 是每个 agent 进程内自增的（都从 c1 开始数），实测 5381 条 cmd
-      // 只有 281 个不同的 id，最多的一个出现了 1088 次。
-      // 路由用的一直是 connId:id，审计却记裸 id——「出事能查」这条承诺
-      // 在数据结构层面就不成立。
-      audit({ ev: 'cmd', id: key, cmd: msg.cmd, client: ws.client, connId: ws.connId, params: redact(msg.params) });
-      // connId 盖章：扩展据此维护每个 agent 连接自己的受控 tab 槽（多 agent 并发隔离）
-      send(extension, { ...msg, __k: key, connId: ws.connId });   // __k 原样带回，用于精确路由
-      return;
+      if (!extension || extension.readyState !== 1) return enqueue(ws, msg);
+      return dispatch(ws, msg);
     }
 
+    // extension → agent
+    return routeBack(ws, msg);
+  }
+
+  // 扩展不在时先挂起，等它回来（或等到窗口用完）。
+  // 窗口取「调用方自己声明的 timeout」和 WAIT_MAX 里更小的那个——
+  // 调用方说只等 300ms，桥就不该替它等 40 秒，那只是换了个姿势干等。
+  function enqueue(ws, msg) {
+    const fail = () => send(ws, { type: 'res', id: msg.id, ok: false, error: { code: 'NO_EXTENSION', message: NO_EXT_MSG } });
+    if (waiting.length >= WAIT_CAP) return fail();
+
+    const ms = Math.min(Number(msg.timeout) || WAIT_MAX, WAIT_MAX);
+    const item = { ws, msg };
+    item.timer = setTimeout(() => {
+      const i = waiting.indexOf(item);
+      if (i >= 0) waiting.splice(i, 1);
+      fail();
+    }, ms);
+    waiting.push(item);
+    // 排队本身要留痕：否则「这条命令为什么慢了 8 秒」在审计里是查不出来的
+    audit({ ev: 'queued', id: `${ws.connId}:${msg.id}`, cmd: msg.cmd, client: ws.client, waitMs: ms });
+  }
+
+  // 扩展一连上就把队列放出去。丢掉那些 agent 已经走掉的——
+  // 往一个关闭的连接上回包不会报错，只会静默地什么都没发生。
+  function flushWaiting() {
+    const q = waiting.splice(0);
+    for (const it of q) {
+      clearTimeout(it.timer);
+      if (agents.has(it.ws) && it.ws.readyState === 1) dispatch(it.ws, it.msg);
+    }
+    if (q.length) log(`扩展回来了，补发 ${q.length} 条排队的命令`);
+  }
+
+  function dispatch(ws, msg) {
+    const gate = checkSite(msg);
+    if (gate) {
+      audit({ ev: 'blocked', cmd: msg.cmd, client: ws.client, reason: gate.code });
+      return send(ws, { type: 'res', id: msg.id, ok: false, error: gate });
+    }
+
+    // 下载、上传这类命令天然比一次点击慢得多，让调用方自己说要等多久
+    const ms = Math.min(Math.max(Number(msg.timeout) || CMD_TIMEOUT, 1000), 600000);
+    const key = `${ws.connId}:${msg.id}`;
+    const timer = setTimeout(() => {
+      pending.delete(key);
+      send(ws, { type: 'res', id: msg.id, ok: false, error: { code: 'TIMEOUT', message: `扩展 ${Math.round(ms / 1000)}s 未响应` } });
+    }, ms);
+
+    pending.set(key, { agent: ws, cmd: msg.cmd, timer, startedAt: Date.now(), id: msg.id });
+    // 审计里的 id 必须全局唯一，否则 cmd 和 res 根本配不上对：
+    // msg.id 是每个 agent 进程内自增的（都从 c1 开始数），实测 5381 条 cmd
+    // 只有 281 个不同的 id，最多的一个出现了 1088 次。
+    // 路由用的一直是 connId:id，审计却记裸 id——「出事能查」这条承诺
+    // 在数据结构层面就不成立。
+    audit({ ev: 'cmd', id: key, cmd: msg.cmd, client: ws.client, connId: ws.connId, params: redact(msg.params) });
+    // connId 盖章：扩展据此维护每个 agent 连接自己的受控 tab 槽（多 agent 并发隔离）
+    send(extension, { ...msg, __k: key, connId: ws.connId });   // __k 原样带回，用于精确路由
+  }
+
+  function routeBack(ws, msg) {
     // extension → agent
     if (msg.type === 'res') {
       if (ws !== extension) return;
