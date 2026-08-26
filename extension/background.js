@@ -1,0 +1,832 @@
+// Service Worker —— 扩展这一侧的总机
+//
+// MV3 的 SW 随时会被回收，所以这里没有任何「只在内存里、丢了就完蛋」的状态：
+// 受控 tab 记在 chrome.storage.local，WS 断了就重连。
+// 保活靠两条腿：WebSocket 活动本身会重置 30s 空闲计时（Chrome 116+），
+// 外加 20s 一次的 ping；再加 chrome.alarms 兜底，把被回收后的 SW 唤醒重连。
+
+import * as cdp from './cdp.js';
+
+const PORTS = [8899, 8900, 8901, 8902, 8903];
+const PING_MS = 20000;
+
+let ws = null;
+let pingTimer = null;
+let connecting = false;
+let retryTimer = null;
+let retryDelay = 0;
+
+// 断线后立刻重连，而不是干等 alarm。
+// 桥会因为版本升级、用户重启、空闲退出而消失，全都是秒级就能重新连上的场景；
+// 只靠 30s 的 alarm 兜底，用户在升级后的第一分钟里看到的是「NO_EXTENSION」，
+// 而真实情况只是「还没轮到重连」。退避是为了桥真的没起来时不空转。
+function scheduleReconnect() {
+  if (retryTimer) return;
+  retryDelay = retryDelay ? Math.min(retryDelay * 2, 15000) : 500;
+  retryTimer = setTimeout(() => { retryTimer = null; connect(); }, retryDelay);
+}
+
+// ---------- 连接 ----------
+
+async function connect() {
+  if (connecting || (ws && ws.readyState <= 1)) return;
+  connecting = true;
+  for (const port of PORTS) {
+    try {
+      await tryPort(port);
+      connecting = false;
+      retryDelay = 0;          // 连上了，退避归零
+      return;
+    } catch {
+      /* 换下一个端口 */
+    }
+  }
+  connecting = false;
+  setBadge('off');
+  scheduleReconnect();
+}
+
+function tryPort(port) {
+  return new Promise((resolve, reject) => {
+    const sock = new WebSocket(`ws://127.0.0.1:${port}`);
+    const t = setTimeout(() => { sock.close(); reject(new Error('timeout')); }, 1500);
+
+    sock.onopen = () => {
+      sock.send(JSON.stringify({
+        type: 'hello',
+        role: 'extension',
+        extId: chrome.runtime.id,
+        version: chrome.runtime.getManifest().version,
+        chrome: (navigator.userAgent.match(/Chrome\/([\d.]+)/) || [])[1],
+        v: 1,
+      }));
+    };
+
+    sock.onmessage = (ev) => {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === 'welcome') {
+        clearTimeout(t);
+        ws = sock;
+        sock.onmessage = (e) => onMessage(JSON.parse(e.data));
+        sock.onclose = () => { ws = null; stopPing(); setBadge('off'); scheduleReconnect(); };
+        sock.onerror = () => {};
+        startPing();
+        setBadge('on');
+        return resolve();
+      }
+      clearTimeout(t);
+      sock.close();
+      reject(new Error('rejected'));
+    };
+
+    sock.onerror = () => { clearTimeout(t); reject(new Error('error')); };
+  });
+}
+
+function startPing() {
+  stopPing();
+  pingTimer = setInterval(() => {
+    if (ws?.readyState === 1) ws.send(JSON.stringify({ type: 'ping' }));
+    else connect();
+  }, PING_MS);
+}
+function stopPing() {
+  if (pingTimer) clearInterval(pingTimer);
+  pingTimer = null;
+}
+
+function setBadge(state) {
+  chrome.action.setBadgeText({ text: state === 'on' ? '' : '·' });
+  chrome.action.setBadgeBackgroundColor({ color: state === 'on' ? '#22c55e' : '#94a3b8' });
+}
+
+function reply(id, ok, payload, k) {
+  if (ws?.readyState === 1) {
+    const base = { type: 'res', id, __k: k };
+    ws.send(JSON.stringify(ok ? { ...base, ok: true, data: payload } : { ...base, ok: false, error: payload }));
+  }
+}
+function emit(event, extra = {}) {
+  if (ws?.readyState === 1) ws.send(JSON.stringify({ type: 'event', event, ...extra }));
+}
+
+// ---------- 命令分发 ----------
+
+async function onMessage(msg) {
+  if (msg.type !== 'cmd') return;
+  try {
+    const handler = HANDLERS[msg.cmd];
+    if (!handler) throw err('INTERNAL', `未知命令 ${msg.cmd}`);
+    const data = await handler(msg.params || {}, msg.tabId);
+    reply(msg.id, true, data, msg.__k);
+  } catch (e) {
+    reply(msg.id, false, { code: e.code || 'INTERNAL', message: e.message || String(e) }, msg.__k);
+  }
+}
+
+const err = (code, message) => Object.assign(new Error(message), { code });
+
+// ---------- 受控 tab ----------
+// 「当前 tab」不取用户正在看的那个——agent 不该在用户眼皮底下乱点他手上的页面。
+// 只认自己开过/被显式指定的 tab。
+//
+// 存 local 而不是 session：session 在扩展重载时会被清空，于是每次升级扩展，
+// agent 手上正在操作的标签页就凭空「不存在」了。local 的代价是可能存着一个
+// 早已关掉的旧 id——但下面每次读都 chrome.tabs.get 校验一次，对不上就当没有。
+// 用「读时校验」换「跨重载不丢」，这笔买卖划算。
+
+async function getActiveTabId() {
+  const { activeTabId } = await chrome.storage.local.get('activeTabId');
+  if (activeTabId) {
+    try { await chrome.tabs.get(activeTabId); return activeTabId; } catch { /* 已关 */ }
+  }
+  throw err('NO_TAB', '还没有受控标签页——先 tabs(action:"new", url:…) 开一个');
+}
+const setActiveTabId = (id) => chrome.storage.local.set({ activeTabId: id });
+
+async function resolveTab(tabId) {
+  if (tabId) {
+    try { await chrome.tabs.get(tabId); return tabId; } catch { throw err('NO_TAB', `标签页 ${tabId} 不存在`); }
+  }
+  return getActiveTabId();
+}
+
+// content script 按需注入，注入前先探活，避免重复注入把 refMap 清空
+async function pingContent(tabId, frameId = 0) {
+  try {
+    const r = await chrome.tabs.sendMessage(tabId, { __hc: 'ping' }, { frameId });
+    return !!r?.pong;
+  } catch {
+    return false;
+  }
+}
+
+async function inject(tabId) {
+  try {
+    // allFrames：iframe 里的东西不注入就等于不存在。支付、验证码、OAuth、
+    // 嵌入式编辑器几乎全在 iframe 里，少了它们，快照看着「正常」却少半张表。
+    await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ['content.js'] });
+  } catch (e) {
+    throw err('NOT_INTERACTABLE', `无法在此页面注入脚本（${e.message}）。chrome:// 和商店页面受浏览器保护，注入不了。`);
+  }
+}
+
+async function ensureContent(tabId, frameId = 0) {
+  if (await pingContent(tabId, frameId)) return;
+  await inject(tabId);
+  if (await pingContent(tabId, frameId)) return;
+  if (frameId !== 0) throw err('NOT_INTERACTABLE', `框架 f${frameId} 无法注入脚本（可能已导航走或被沙箱限制）`);
+  // 走到这儿基本只有一种情况：扩展刚重载，页面里留着一个失效的旧 content script，
+  // 它的守卫标记还在、监听器却已经死了，新脚本注进去立刻 return。刷一下页面是唯一解。
+  await chrome.tabs.reload(tabId);
+  await waitForLoad(tabId);
+  await sleep(300);
+  await inject(tabId);
+  if (!(await pingContent(tabId))) throw err('NOT_INTERACTABLE', '页面脚本注入后仍无响应');
+}
+
+// ---------- 框架 ----------
+//
+// 设计上最要紧的一条：**agent 面对的协议一点都不变。**
+// 子框架里的元素在快照里写成 e5@f2，桥接层看到 @f2 就把命令路由到那个框架，
+// 并把 ref 还原成 e5。content script 完全不知道有框架这回事，
+// 于是 click / type / fill / key 这些工具一行都不用改。
+//
+// 快照 id 也一样：agent 只看到顶层那个 sN，各框架自己的 id 记在这儿。
+const frameSnaps = new Map();   // tabId -> { [frameId]: snapshotId }
+
+async function listFrames(tabId) {
+  try {
+    const res = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: () => ({ url: location.href, title: document.title }),
+    });
+    return res
+      .filter((r) => r.result?.url && !/^about:/.test(r.result.url))
+      .map((r) => ({ frameId: r.frameId, ...r.result }));
+  } catch {
+    return [{ frameId: 0, url: '', title: '' }];
+  }
+}
+
+// "e5@f2" → { ref:"e5", frameId:2 }
+function splitRef(ref) {
+  const m = /^(.*)@f(\d+)$/.exec(String(ref || ''));
+  return m ? { ref: m[1], frameId: Number(m[2]) } : { ref, frameId: 0 };
+}
+
+// 一条命令带的所有 ref 必须落在同一个框架里——跨框架的一次操作没有意义，
+// 与其让它悄悄打到顶层框架去，不如明确拒绝。
+function routeOf(p) {
+  const refs = [p.ref, p.submitRef, ...(Array.isArray(p.fields) ? p.fields.map((f) => f.ref) : [])]
+    .filter(Boolean).map(splitRef);
+  const frames = [...new Set(refs.map((r) => r.frameId))];
+  if (frames.length > 1) throw err('REF_NOT_FOUND', `一次操作里混了不同框架的 ref（${frames.map((f) => 'f' + f).join('、')}）。分开调用。`);
+  const frameId = frames[0] ?? 0;
+  const out = { ...p };
+  if (p.ref) out.ref = splitRef(p.ref).ref;
+  if (p.submitRef) out.submitRef = splitRef(p.submitRef).ref;
+  if (Array.isArray(p.fields)) out.fields = p.fields.map((f) => ({ ...f, ref: f.ref ? splitRef(f.ref).ref : f.ref }));
+  return { frameId, params: out };
+}
+
+async function toContent(tabId, payload, frameId = 0) {
+  await ensureContent(tabId, frameId);
+  let r;
+  try {
+    r = await chrome.tabs.sendMessage(tabId, payload, { frameId });
+  } catch (e) {
+    throw err('TIMEOUT', `页面无响应（${e.message}）`);
+  }
+  if (!r) throw err('INTERNAL', '页面脚本没有返回');
+  if (r.error) throw err(r.error.code, r.error.message);
+  return r.data;
+}
+
+function waitForLoad(tabId, timeout = 15000) {
+  return new Promise((resolve) => {
+    const done = () => { chrome.tabs.onUpdated.removeListener(h); clearTimeout(t); resolve(); };
+    const t = setTimeout(done, timeout);
+    const h = (id, info) => { if (id === tabId && info.status === 'complete') done(); };
+    chrome.tabs.onUpdated.addListener(h);
+    chrome.tabs.get(tabId).then((tab) => { if (tab.status === 'complete') done(); }).catch(done);
+  });
+}
+
+// ---------- 数据层：网络 ----------
+//
+// 这一层的存在理由：DOM 是给人看的，网络是给机器看的。
+// 页面上「362223585554365」这种拼在一起的数字，在接口响应里是
+// {view_count: 36222, liked_count: 35, ...}——字段语义明确、分页参数可改、
+// 不随改版崩。抓数据应该先看这里，DOM 是退路不是首选。
+//
+// 注入用 world:'MAIN' + 固定函数。CSP 挡的是「字符串变代码」，
+// 挡不住 executeScript 注入的编译好的函数——这也是 eval 挂掉而 query 没事的原因。
+
+const NET_SCRIPT_ID = 'hc-net-hook';
+
+// hook 必须赶在页面自己的 JS 之前，否则首屏那批请求全漏掉——而列表数据恰恰在首屏那批里。
+// 所以走 registerContentScripts + document_start，事后 executeScript 只能算补救。
+async function ensureNetHook() {
+  const existing = await chrome.scripting.getRegisteredContentScripts({ ids: [NET_SCRIPT_ID] }).catch(() => []);
+  if (existing.length) return false;
+  await chrome.scripting.registerContentScripts([{
+    id: NET_SCRIPT_ID,
+    matches: ['<all_urls>'],
+    js: ['net-hook.js'],
+    runAt: 'document_start',
+    world: 'MAIN',
+    allFrames: false,
+  }]);
+  return true; // 刚注册，当前这个页面还没被 hook 到，得刷一次
+}
+
+// 顶层框架的快照 + 各子框架的快照，拼成一份。子框架的 ref 打上 @fN。
+async function snapshotAll(tabId, p = {}) {
+  const top = await toContent(tabId, { __hc: 'snapshot', ...p });
+  const snaps = { 0: top.snapshotId };
+
+  const frames = (await listFrames(tabId)).filter((f) => f.frameId !== 0);
+  const parts = [];
+  for (const f of frames.slice(0, 8)) {   // 广告位常有十几个 iframe，全抓会把快照撑爆
+    try {
+      const sub = await toContent(tabId, { __hc: 'snapshot' }, f.frameId);
+      snaps[f.frameId] = sub.snapshotId;
+      // 只把 ref 编号加后缀，别的原样保留
+      const body = String(sub.text || '').replace(/^\[(e\d+)\]/gm, `[$1@f${f.frameId}]`);
+      const rows = (body.match(/^\[e\d+@f\d+\]/gm) || []).length;
+      if (rows) parts.push(`\n--- iframe f${f.frameId} · ${f.url} ---\n${body.split('\n--- 正文节选')[0].split('\n').slice(2).join('\n')}`);
+    } catch {
+      parts.push(`\n--- iframe f${f.frameId} · ${f.url} ---\n  （注入不了，多半是 sandbox 或已跳走）`);
+    }
+  }
+  frameSnaps.set(tabId, snaps);
+  return parts.length ? { ...top, text: top.text + '\n' + parts.join('\n') } : top;
+}
+
+// 拆框架号、还原 ref、换上那个框架自己的 snapshotId。
+function prepare(tabId, p) {
+  const { frameId, params } = routeOf(p);
+  if (frameId !== 0) {
+    const known = frameSnaps.get(tabId)?.[frameId];
+    if (!known) throw err('STALE_SNAPSHOT', `没有框架 f${frameId} 的快照，重新 snapshot 一次`);
+    params.snapshotId = known;   // agent 只认顶层那个 id，框架内部的 id 由这里补
+  }
+  return { frameId, params };
+}
+
+// 带 ref 的命令统一从这里走。
+async function toFrame(tabId, cmd, p) {
+  const { frameId, params } = prepare(tabId, p);
+  const data = await toContent(tabId, { __hc: cmd, ...params }, frameId);
+  // 回执里把框架后缀补回去，否则 agent 传的是 e1@f602、收到的却是「已点击 [e1]」，
+  // 看着像操作到了顶层框架的另一个元素上
+  if (frameId !== 0 && data?.note) data.note = data.note.replace(/\[(e\d+)\]/g, `[$1@f${frameId}]`);
+  return { frameId, data };
+}
+
+// ---------- 写操作的统一路径 ----------
+//
+// L1 执行 → 采效果证据 → 零证据就升级 L2 重试 → 再采一次 → 组装返回。
+// 三个 P0 在这里汇合：效果证据是 L2 的触发信号，L2 是效果证据的兜底手段。
+//
+// 取代了原来每个 handler 里各写一遍的「sleep 固定时长 + 比对 URL + 重拍快照」。
+
+const L2_CMDS = new Set(['click', 'type', 'key']);
+const IS_MAC = navigator.userAgent.includes('Mac');
+const SETTLE_MS = 1200;
+
+async function execL2(id, cmd, params, loc) {
+  const label = params.ref || params.selector || '';
+  if (cmd === 'click') {
+    await cdp.click(id, loc.x, loc.y);
+    return `已点击 [${label}]（真实事件）`;
+  }
+  if (cmd === 'type') {
+    await cdp.click(id, loc.x, loc.y);          // 先真实点击聚焦，和人的顺序一致
+    await sleep(80);
+    if (params.clear !== false) {
+      await cdp.key(id, 'a', { mods: IS_MAC ? ['meta'] : ['ctrl'] });
+      await cdp.key(id, 'Delete');
+    }
+    if (params.text) await cdp.insertText(id, String(params.text));
+    if (params.submit) await cdp.key(id, 'Enter');
+    return `已在 [${label}] 输入${params.submit ? '并回车' : ''}（真实事件）`;
+  }
+  if (cmd === 'key') {
+    if (loc) { await cdp.click(id, loc.x, loc.y); await sleep(80); }
+    const specs = Array.isArray(params.key) ? params.key : [params.key];
+    for (const s of specs) await cdp.key(id, s, { mods: params.mods || [], repeat: params.repeat || 1 });
+    return `${specs.join(' → ')}（真实事件）`;
+  }
+  throw err('INTERNAL', `${cmd} 没有 L2 实现`);
+}
+
+// 轮询等页面反应。有变化就早停——快页面比原来固定的 400ms 更快，
+// 慢页面比它更稳，「更可靠」和「更快」在这里是同一个改动的两面。
+async function settle(id, frameId, params, baseline, beforeUrl) {
+  const deadline = Date.now() + SETTLE_MS;
+  let last = { changed: false, parts: [] };
+  while (Date.now() < deadline) {
+    await sleep(100);
+    const url = (await chrome.tabs.get(id)).url;
+    // 跳转是最强的证据，而且此时旧 baseline 已经没有意义，立刻返回
+    if (url !== beforeUrl) return { changed: true, navigated: true, parts: [`已跳转到 ${url}`] };
+    try {
+      last = await toContent(id, { __hc: 'effect', baseline, ref: params.ref, selector: params.selector }, frameId);
+    } catch {
+      /* 页面正在换页时 content script 会短暂不在，下一轮再问 */
+    }
+    if (last.changed) return last;
+  }
+  return last;
+}
+
+async function perform(id, cmd, p) {
+  const { frameId, params } = prepare(id, p);
+  const before = (await chrome.tabs.get(id)).url;
+
+  // 定位：resolve、滚动、遮挡检测全在 content script 里做（一行没改），
+  // 顺带把效果基线采回来。没有 ref 的操作（fill、无 ref 的 key）只采基线。
+  const hasTarget = !!(params.ref || params.selector);
+  const loc = await toContent(id,
+    hasTarget ? { __hc: 'locate', ...params } : { __hc: 'locate', baselineOnly: true },
+    frameId);
+
+  // iframe 内元素的坐标是相对该框架视口的，而 CDP 打的是顶层视口坐标；
+  // 换算要知道 iframe 元素在顶层的位置，跨源时子框架自己也不知道。
+  // 所以 v0.3 的 L2 只覆盖顶层框架——iframe 里主要是支付、验证码、OAuth，
+  // 而验证码本来就该交给 ask 让用户来。
+  const l2ok = frameId === 0 && L2_CMDS.has(cmd) && hasTarget && !loc?.outside;
+  let layer = (l2ok && (params.real || loc?.prefer === 'L2')) ? 'L2' : 'L1';
+
+  const runL1 = async () => {
+    const d = await toContent(id, { __hc: cmd, ...params }, frameId);
+    let n = d?.note || d?.text || '';
+    if (frameId !== 0 && n) n = n.replace(/\[(e\d+)\]/g, `[$1@f${frameId}]`);
+    return n;
+  };
+
+  let note = '', usedL2 = layer === 'L2', l2note = '';
+  try {
+    note = usedL2 ? await execL2(id, cmd, params, loc) : await runL1();
+  } catch (e) {
+    // L2 不可用不该让整条链路失败——降级回 L1，把原因带在返回里说清楚
+    if (usedL2 && (e.code === 'NEEDS_L2' || e.code === 'L2_BUSY')) {
+      usedL2 = false;
+      l2note = `（本想用真实事件，但${e.message}）`;
+      note = await runL1();
+    } else throw e;
+  }
+
+  let ev = await settle(id, frameId, params, loc?.baseline, before);
+
+  // 零证据 → 自动升级。敏感目标除外：L1 可能其实已经生效只是没留下痕迹，
+  // 对「提交/支付/删除」重试一次就是下第二笔单，这个闸门是确定性的，不问模型。
+  let upgraded = false;
+  if (!ev.changed && !usedL2 && l2ok && !params.real) {
+    if (loc?.sensitive) {
+      l2note = '（没有自动用真实事件重试：这是提交/支付/删除一类的动作，'
+             + '重试可能造成重复执行。确认需要请显式传 real:true）';
+    } else {
+      try {
+        note = await execL2(id, cmd, params, loc);
+        usedL2 = true;
+        upgraded = true;
+        ev = await settle(id, frameId, params, loc?.baseline, before);
+      } catch (e) {
+        l2note = `（普通事件无效，真实事件也没能用上：${e.message}）`;
+      }
+    }
+  }
+
+  const after = (await chrome.tabs.get(id)).url;
+  const navigated = before !== after;
+  if (navigated) await waitForLoad(id);
+  const snap = await snapshotAll(id);
+
+  const head = [
+    note + (upgraded ? '　←　普通事件无效，已自动改用真实事件' : ''),
+    l2note,
+    ev.changed
+      ? `效果：${ev.parts.join('；')}`
+      : `⚠️ 操作已发出，但页面完全没有反应（DOM、正文、焦点、目标状态、页面提示都没变）。`
+        + `可能是：① 这个元素只是容器，真正的按钮在它内部或旁边；`
+        + `② 操作确实发生了但只有异步副作用（请求已发出、页面稍后才变）；`
+        + `③ 站点忽略了这次输入。别原样重试——换个目标，或先 wait 再看。`,
+  ].filter(Boolean).join('\n');
+
+  return { ...snap, text: `${head}\n\n${snap.text}`, navigated };
+}
+
+const HANDLERS = {
+  async snapshot(p, tabId) {
+    const id = await resolveTab(tabId);
+    return snapshotAll(id, p);
+  },
+
+  async navigate(p, tabId) {
+    const id = await resolveTab(tabId);
+    if (p.url) await chrome.tabs.update(id, { url: p.url });
+    else await toContent(id, { __hc: 'history', action: p.action || 'reload' });
+    await waitForLoad(id);
+    await sleep(300); // 给 SPA 的首屏渲染一点时间，否则快照经常空
+    return snapshotAll(id);
+  },
+
+  // 五个写操作走同一条路径：定位 → 执行（L1 或 L2）→ 采效果证据 → 必要时升级重试。
+  // select 和 fill 不进 L2：原生 <select> 的下拉是浏览器进程的 UI，CDP 打不到，
+  // 点了反而卡住；fill 是多字段批量，逐字段定位的收益等 act 批处理一起做。
+  async click(p, tabId) { return perform(await resolveTab(tabId), 'click', p); },
+  async type(p, tabId) { return perform(await resolveTab(tabId), 'type', p); },
+  async key(p, tabId) { return perform(await resolveTab(tabId), 'key', p); },
+  async fill(p, tabId) { return perform(await resolveTab(tabId), 'fill', p); },
+  async select(p, tabId) { return perform(await resolveTab(tabId), 'select', p); },
+
+  async read_text(p, tabId) {
+    const id = await resolveTab(tabId);
+    return toContent(id, { __hc: 'read_text', ...p });
+  },
+
+  async wait(p, tabId) {
+    const id = await resolveTab(tabId);
+    return toContent(id, { __hc: 'wait', ...p });
+  },
+
+  async query(p, tabId) {
+    const id = await resolveTab(tabId);
+    return toContent(id, { __hc: 'query', ...p });
+  },
+
+  // 让浏览器自己下载。fetch+binary 走的是 base64 over WebSocket，几十 MB 的视频
+  // 会在转码和传输上双重爆掉——三个 4K 视频就是这么丢的。
+  // 这条路由浏览器原生下载，不进内存、不进 context，还自带断点和大文件支持。
+  // saveAs:false 是关键：不弹系统保存对话框（那是扩展够不着的东西）。
+  async download(p) {
+    const filename = p.filename || `huashu-chrome/${Date.now()}-${(p.url.split('/').pop() || 'file').split('?')[0].slice(0, 60)}`;
+    const dlId = await chrome.downloads.download({ url: p.url, filename, conflictAction: 'uniquify', saveAs: false });
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        chrome.downloads.onChanged.removeListener(onChanged);
+        reject(err('TIMEOUT', `下载超过 ${(p.timeout || 120000) / 1000}s 未完成`));
+      }, p.timeout || 120000);
+      const onChanged = (d) => {
+        if (d.id !== dlId) return;
+        if (d.state?.current === 'complete') {
+          clearTimeout(timer);
+          chrome.downloads.onChanged.removeListener(onChanged);
+          chrome.downloads.search({ id: dlId }).then(([item]) =>
+            resolve({ text: `已下载 ${Math.round((item?.fileSize || 0) / 1024)}KB → ${item?.filename}`, path: item?.filename, bytes: item?.fileSize }));
+        } else if (d.state?.current === 'interrupted') {
+          clearTimeout(timer);
+          chrome.downloads.onChanged.removeListener(onChanged);
+          reject(err('INTERNAL', `下载中断：${d.error?.current || '未知原因'}`));
+        }
+      };
+      chrome.downloads.onChanged.addListener(onChanged);
+    });
+  },
+
+  async upload(p, tabId) {
+    const id = await resolveTab(tabId);
+    return (await toFrame(id, 'upload', p)).data;
+  },
+
+  async scroll(p, tabId) {
+    const id = await resolveTab(tabId);
+    return toContent(id, { __hc: 'scroll', ...p });
+  },
+
+  // 看这个页面调了哪些接口、返回了什么。抓数据的首选入口。
+  async network(p, tabId) {
+    const id = await resolveTab(tabId);
+    const justRegistered = await ensureNetHook();
+    // 当前页面若在注册之前就加载了，补一针（只能抓到此刻之后的请求）
+    await chrome.scripting.executeScript({ target: { tabId: id }, world: 'MAIN', files: ['net-hook.js'] }).catch(() => {});
+
+    // 只有在这个页面确实没有记录时才刷新。
+    // 曾经这里写的是「刚注册就刷」——而扩展每次重载都会清掉 registerContentScripts，
+    // 于是重载扩展后的第一次 network 调用会把页面刷掉，连同已经辛苦滚出来的几百 KB
+    // 记录一起销毁。自动修复动作不能先斩后奏地毁掉已有状态。
+    let hasData = false;
+    try {
+      const [probe] = await chrome.scripting.executeScript({
+        target: { tabId: id }, world: 'MAIN',
+        func: () => (window.__hcNet || []).length,
+      });
+      hasData = (probe?.result || 0) > 0;
+    } catch { /* 注入不了就当没有 */ }
+
+    if (p.reload || !hasData) {
+      await chrome.tabs.reload(id);
+      await waitForLoad(id);
+      await sleep(p.settle || 2000); // 等首屏那批 XHR 落地
+    }
+
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId: id },
+      world: 'MAIN',
+      func: (match, want, maxBody, index) => {
+        const all = window.__hcNet || [];
+        const hit = match ? all.filter((r) => (r.url || '').includes(match)) : all;
+        if (want) {
+          // 翻页时同一个接口会被调多次，URL 只差一个 cursor——光取最后一条会漏掉前面几批。
+          // index 从后往前数：0=最后一条，1=倒数第二条。
+          const matches = hit.filter((x) => (x.url || '').includes(want));
+          const r = matches[matches.length - 1 - (index || 0)];
+          return r
+            ? { one: true, url: r.url, status: r.status, total: matches.length, body: String(r.body || '').slice(0, maxBody) }
+            : { one: true, missing: true, total: matches.length };
+        }
+        // 默认只给目录，不给正文——响应体动辄几百 KB，一次性倒进 context 是灾难
+        return {
+          list: hit.map((r) => ({ m: r.method, s: r.status, url: String(r.url).slice(0, 180), kb: Math.round((r.body || '').length / 1024) })),
+        };
+      },
+      args: [p.match || '', p.body || '', p.maxBody || 120000, p.index || 0],
+    });
+
+    if (!result) throw err('INTERNAL', '读不到网络记录——页面可能禁止了脚本注入');
+    if (result.one) {
+      if (result.missing) throw err('REF_NOT_FOUND', `没有匹配 "${p.body}" 的第 ${p.index || 0} 条请求（共 ${result.total} 条）。先不带 body 参数调一次看看有哪些接口。`);
+      return { untrusted: true, meta: `url="${result.url}"`, text: `${result.status} ${result.url}\n\n${result.body}` };
+    }
+    const rows = result.list;
+    if (!rows.length) return { text: '这个页面没有记录到网络请求。加 reload:true 刷新后重试。' };
+    return {
+      text: `${rows.length} 条请求（带响应体大小）。用 body:"<url片段>" 取某一条的完整响应：\n\n`
+        + rows.map((r) => `${String(r.s).padEnd(4)} ${String(r.m).padEnd(5)} ${String(r.kb).padStart(4)}KB  ${r.url}`).join('\n'),
+    };
+  },
+
+  // 在页面上下文里发请求——自动带用户的 cookie。
+  // 拿到接口地址后，翻页/改参数直接在这里做，不用滚动几十次去凑数据。
+  //
+  // 二进制（图片、文件）走另一条路：从扩展自己发。图片几乎总是在另一个域
+  // （公众号正文在 mp.weixin.qq.com，图在 mmbiz.qpic.cn），页面里 fetch 会被 CORS 挡死；
+  // 而扩展有 host_permissions，跨域不受限。
+  async fetch(p, tabId) {
+    if (p.binary && p.via !== 'page') {
+      try {
+        const res = await fetch(p.url, { credentials: 'include' });
+        const bytes = new Uint8Array(await res.arrayBuffer());
+        if (bytes.length > 12 * 1024 * 1024) {
+          throw err('INTERNAL', `文件 ${Math.round(bytes.length / 1048576)}MB，超过 base64 通道的 12MB 上限。改用 download 工具，它走浏览器原生下载，不限大小。`);
+        }
+        let s = '';
+        for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+        return { base64: btoa(s), ct: res.headers.get('content-type') || '', bytes: bytes.length, status: res.status };
+      } catch (e) {
+        throw err('INTERNAL', `扩展侧下载失败：${e.message}。若是防盗链，改用 via:"page" 从页面上下文请求。`);
+      }
+    }
+    const id = await resolveTab(tabId);
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId: id },
+      world: 'MAIN',
+      func: async (url, init, maxBody, binary) => {
+        try {
+          const res = await fetch(url, { credentials: 'include', ...(init || {}) });
+          if (!binary) return { status: res.status, body: (await res.text()).slice(0, maxBody) };
+          // 图片走这里。在页面上下文请求，Referer 自然是本站——防盗链（公众号 mmbiz、
+          // 微博、小红书图床）拦的就是缺 Referer 的外部请求。
+          // ArrayBuffer 没法跨 world 传，转成 base64 字符串。
+          const bytes = new Uint8Array(await res.arrayBuffer());
+          let s = '';
+          for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+          return { status: res.status, base64: btoa(s), ct: res.headers.get('content-type') || '', bytes: bytes.length };
+        } catch (e) {
+          return { error: String(e && e.message || e) };
+        }
+      },
+      args: [p.url, p.init || null, p.maxBody || 200000, !!p.binary],
+    });
+    if (result?.error) throw err('INTERNAL', `请求失败：${result.error}`);
+    if (p.binary) return { base64: result.base64, ct: result.ct, bytes: result.bytes, status: result.status };
+    return { untrusted: true, meta: `url="${p.url}"`, text: `${result.status}\n\n${result.body}` };
+  },
+
+  // 在页面自己的世界里求值。
+  //
+  // 原来这条路走 content script 的 new Function()，结果是**在任何网站上都必然失败**——
+  // MV3 的 content script 跑在隔离世界里，继承的是扩展的 CSP，而扩展 CSP 一律禁
+  // unsafe-eval。报错信息里那句 script-src 看着像页面的，其实末尾是
+  // chrome-extension://<uuid>，是扩展自己的。一个连本地无 CSP 页面都跑不通的工具，
+  // 等于不存在。
+  //
+  // 换到 MAIN world 之后受页面 CSP 管：没设 CSP 的站点能用了，大站仍然拦——
+  // 但那是真实且可解释的边界，不再是「哪儿都不能用」。
+  async eval(p, tabId) {
+    const id = await resolveTab(tabId);
+    const [{ result } = {}] = await chrome.scripting.executeScript({
+      target: { tabId: id },
+      world: 'MAIN',
+      func: (src, max) => {
+        try {
+          // eslint-disable-next-line no-eval
+          const v = (0, eval)(`"use strict"; (${src})`);
+          let s;
+          try { s = JSON.stringify(v, null, 2); } catch { s = String(v); }
+          if (s === undefined) s = 'undefined';
+          return { ok: true, text: s.length > max ? s.slice(0, max) + '\n…（已截断）' : s };
+        } catch (e) {
+          return { ok: false, message: String((e && e.message) || e) };
+        }
+      },
+      args: [String(p.expr || ''), p.maxLength || 20000],
+    });
+    if (!result) throw err('NOT_INTERACTABLE', '无法在此页面注入脚本');
+    if (!result.ok) {
+      const csp = /Content Security Policy|unsafe-eval/i.test(result.message);
+      throw err('INTERNAL', csp
+        ? `页面的 CSP 禁止 eval：${result.message}\n改用 query（按 selector 提取）或 network（读接口），它们不受 CSP 限制。`
+        : `表达式执行失败：${result.message}`);
+    }
+    return { untrusted: true, text: result.text };
+  },
+
+  // captureVisibleTab 截的是「那个窗口当前可见的标签页」，不是我们的受控标签页。
+  // 用户切走后直接截，截到的就是他自己正在看的页面——把私人内容送进了 agent 的
+  // 上下文。真实发生过一次。所以这里先核对，对不上宁可失败。
+  async screenshot(p, tabId) {
+    const id = await resolveTab(tabId);
+    const tab = await chrome.tabs.get(id);
+    if (!tab.active) {
+      if (!p.focus) {
+        throw err('NOT_INTERACTABLE',
+          `标签页 ${id} 不在前台，截图会截到用户当前正在看的别的页面。` +
+          `要截它必须把它切到前台——传 focus:true 显式同意打断用户，或者先用 snapshot / read_text 读内容（不需要前台）。`);
+      }
+      await chrome.tabs.update(id, { active: true });
+      await sleep(250);
+    }
+    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+    return { dataUrl };
+  },
+
+  async tabs(p) {
+    if (p.action === 'list') {
+      const all = await chrome.tabs.query({});
+      const { activeTabId } = await chrome.storage.local.get('activeTabId');
+      const lines = all.map((t) => `[${t.id}]${t.id === activeTabId ? ' *' : '  '} ${t.title || '(无标题)'} — ${t.url}`);
+      return { text: `共 ${all.length} 个标签页（* = 受控）\n` + lines.join('\n') };
+    }
+    // active:false —— agent 在后台干活，不把用户从他正在看的页面上拽走。
+    // 需要抢焦点的场合（截图、让用户看着操作）由调用方显式传 focus:true。
+    if (p.action === 'new') {
+      const tab = await chrome.tabs.create({ url: p.url || 'about:blank', active: !!p.focus });
+      await setActiveTabId(tab.id);
+      if (p.url) { await waitForLoad(tab.id); await sleep(300); }
+      return { text: `已在后台打开标签页 ${tab.id}`, tabId: tab.id };
+    }
+    // 「受控」和「前台」是两件事：这里只改受控目标，不动用户的视线
+    if (p.action === 'select') {
+      const id = await resolveTab(p.tabId);
+      await setActiveTabId(id);
+      if (p.focus) await chrome.tabs.update(id, { active: true });
+      return { text: `受控标签页切到 ${id}` };
+    }
+    if (p.action === 'close') {
+      const id = await resolveTab(p.tabId);
+      await chrome.tabs.remove(id);
+      return { text: `已关闭标签页 ${id}` };
+    }
+    throw err('INTERNAL', `未知 tabs 动作 ${p.action}`);
+  },
+
+  // 【临时】attach 分步诊断
+  async __attach(p, tabId) {
+    const id = await resolveTab(tabId);
+    const out = [];
+    let rect;
+    const step = async (label, fn) => {
+      try { out.push(`✅ ${label}: ${JSON.stringify(await fn()).slice(0, 200)}`); }
+      catch (e) { out.push(`❌ ${label}: ${e.message}`); }
+    };
+    await step('targets(before)', async () => (await chrome.debugger.getTargets()).filter((t) => t.attached).map((t) => `${t.tabId}:${t.type}`));
+    await step('perm', () => cdp.hasPermission());
+    await step('cdp.evaluate-1', () => cdp.evaluate(id, '1+1'));
+    await step('isAttached', async () => cdp.isAttached(id));
+    if (p.focusEmu) {
+      await step('focusEmulation', () => cdp.withL2(id, (cmd) =>
+        cmd('Emulation.setFocusEmulationEnabled', { enabled: true })));
+    }
+    await step('rect', async () => (rect = JSON.parse(await cdp.evaluate(id,
+      `(() => { const el = document.querySelector('#probe'); const r = el.getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`))));
+    await step('reset-events', () => cdp.evaluate(id, 'window.__events = []; "ok"'));
+    await step('cdp.click', () => cdp.click(id, rect.x, rect.y));
+    await step('sleep', () => sleep(400));
+    await step('read-events', () => cdp.evaluate(id, 'JSON.stringify((window.__events||[]).map(e => e.type + ":" + e.trusted))'));
+    await step('cdp.detach', async () => { await cdp.detach(id); return 'done'; });
+    return { text: out.join('\n') };
+  },
+
+  // 【临时】L2 后台有效性验证。验证完删除。
+  async __probe(p, tabId) {
+    const id = await resolveTab(tabId);
+    const tab = await chrome.tabs.get(id);
+    const out = [`标签页 ${id} active=${tab.active}（false = 后台）`];
+
+    if (p.reset) await cdp.evaluate(id, 'window.__events = []; "ok"');
+
+    const rect = JSON.parse(await cdp.evaluate(id,
+      `(() => { const el = document.querySelector(${JSON.stringify(p.selector)});
+         if (!el) return null;
+         el.scrollIntoView({block:'center'});
+         const r = el.getBoundingClientRect();
+         return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`));
+    if (!rect) throw err('REF_NOT_FOUND', `没找到 ${p.selector}`);
+    out.push(`坐标 ${Math.round(rect.x)},${Math.round(rect.y)}`);
+
+    if (p.key || p.text) {
+      await cdp.click(id, rect.x, rect.y);   // 先真实点击聚焦，再发键——和人的操作顺序一致
+      await sleep(150);
+      if (p.key) await cdp.key(id, p.key, { repeat: p.repeat || 1 });
+      else await cdp.insertText(id, p.text);
+    } else {
+      await cdp.click(id, rect.x, rect.y);
+    }
+
+    await sleep(p.settle || 400);
+    if (p.read) out.push(`${p.read} = ` + await cdp.evaluate(id, p.read));
+    return { text: out.join('\n') };
+  },
+
+  // 开发期用：改完扩展代码不必再手动去 chrome://extensions 点重载。
+  // 先把响应发出去，再重载——重载会当场掐断 WS。
+  async reload() {
+    setTimeout(() => chrome.runtime.reload(), 150);
+    return { text: '扩展重载中，约 2 秒后自动重连' };
+  },
+};
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ---------- 生命周期 ----------
+
+chrome.runtime.onStartup.addListener(connect);
+chrome.runtime.onInstalled.addListener(() => {
+  connect();
+  chrome.alarms.create('hc-keepalive', { periodInMinutes: 0.5 });
+});
+chrome.alarms?.onAlarm.addListener(() => connect());   // SW 被回收后靠这个复活
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  const { activeTabId } = await chrome.storage.local.get('activeTabId');
+  if (tabId === activeTabId) await chrome.storage.local.remove('activeTabId');
+  emit('tab_closed', { tabId });
+});
+
+// popup 点「立即连接」时用
+chrome.runtime.onMessage.addListener((m, _s, sendResponse) => {
+  if (m.__hcPopup === 'status') {
+    sendResponse({ connected: ws?.readyState === 1 });
+    return true;
+  }
+  if (m.__hcPopup === 'connect') {
+    connect().then(() => sendResponse({ connected: ws?.readyState === 1 }));
+    return true;
+  }
+});
+
+connect();

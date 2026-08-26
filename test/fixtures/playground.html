@@ -1,0 +1,248 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>huashu-chrome 靶场</title>
+<style>
+  body { font: 14px/1.6 system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
+  section { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin: 1rem 0; }
+  h2 { font-size: 15px; margin: 0 0 .6rem; }
+  #log { background: #111; color: #0f0; font-family: ui-monospace, monospace; font-size: 12px;
+         padding: .6rem; height: 200px; overflow: auto; white-space: pre-wrap; }
+  .ctl { border: 1px solid #999; border-radius: 4px; padding: .4rem .6rem; cursor: pointer;
+         display: inline-block; min-width: 200px; }
+  .menu { border: 1px solid #999; border-radius: 4px; margin-top: 2px; }
+  .opt { padding: .3rem .6rem; cursor: pointer; }
+  .opt:hover { background: #eef; }
+  .hidden { display: none; }
+</style>
+
+<h1>huashu-chrome 靶场</h1>
+<p>本地固定页面，用来验证交互原语。不联网、无 CSP，所以 <code>eval</code> 在这里可用，
+方便定位「事件到底有没有到」这类问题。</p>
+
+<!-- 1. 事件记录仪：把真实到达的事件原样记下来，包括 isTrusted / target / defaultPrevented -->
+<section>
+  <h2>1. 事件记录仪</h2>
+  <button id="probe">在我身上点一下</button>
+  <button id="clearlog">清空</button>
+  <div id="log"></div>
+</section>
+
+<!-- 2. 只认 mousedown 的下拉：react-select / MUI / Element UI 的通用形态 -->
+<section>
+  <h2>2. 只认 mousedown 的自定义下拉</h2>
+  <div id="ctl" class="ctl" role="combobox" aria-expanded="false" aria-controls="menu">
+    <span id="ctlLabel">请选择城市</span>
+  </div>
+  <div id="menu" class="menu hidden" role="listbox">
+    <div class="opt" role="option" data-v="km">昆明</div>
+    <div class="opt" role="option" data-v="sz">深圳</div>
+    <div class="opt" role="option" data-v="bj">北京</div>
+  </div>
+  <p>已选：<b id="ctlOut">（无）</b></p>
+</section>
+
+<!-- 3. 只认 click 的按钮：对照组 -->
+<section>
+  <h2>3. 只认 click 的按钮（对照组）</h2>
+  <button id="clickOnly">点我</button> <b id="clickOut">未点击</b>
+</section>
+
+<!-- 4. 焦点归属：mousedown 里 preventDefault + 自己 focus，最容易被工具抢走 -->
+<section>
+  <h2>4. 自管焦点的控件</h2>
+  <div id="selfFocus" class="ctl">点我（我会 preventDefault 并把焦点交给右边的输入框）</div>
+  <input id="selfFocusInput" placeholder="焦点应当落在这里">
+  <p>焦点检测：<b id="focusOut">—</b></p>
+</section>
+
+<!-- 5. Shadow DOM -->
+<section>
+  <h2>5. Shadow DOM</h2>
+  <div id="shadowHost"></div>
+</section>
+
+<!-- 6. iframe -->
+<section>
+  <h2>6. iframe（同源）</h2>
+  <iframe id="frame" src="frame-inner.html" style="width:100%;height:110px;border:1px solid #ccc"></iframe>
+  <h2>6b. iframe（跨源）</h2>
+  <p>localhost 和 127.0.0.1 是不同的源，用它构造一个真实的跨源 iframe。</p>
+  <iframe id="xframe" style="width:100%;height:110px;border:1px solid #ccc"></iframe>
+</section>
+
+<!-- 7. 原生控件 -->
+<section>
+  <h2>7. 原生控件</h2>
+  <form id="natform" onsubmit="return false">
+    <label for="nat-name">姓名</label>
+    <input id="nat-name" name="name" required>
+    <label>邮箱 <input type="email" name="email" placeholder="you@example.com"></label>
+    <select id="nat-city" name="city">
+      <option value="">请选择</option>
+      <option value="km">昆明</option>
+      <option value="sz">深圳</option>
+    </select>
+    <input type="file" id="nat-file" accept="image/*">
+    <label><input type="checkbox" id="nat-agree"> 我同意条款</label>
+    <button type="submit">提交</button>
+  </form>
+  <p id="natOut">—</p>
+</section>
+
+<!-- 8. 懒加载列表：滚动能力 -->
+<section>
+  <h2>8. 懒加载列表</h2>
+  <div id="feed" style="height:150px;overflow:auto;border:1px solid #ccc"></div>
+  <p>已加载 <b id="feedCount">0</b> 条</p>
+</section>
+
+<!-- 8b. 只认拖放的上传区：页面上根本没有 input[type=file] -->
+<section>
+  <h2>8b. 只认拖放的上传区</h2>
+  <div id="dropzone" style="border:2px dashed #999;padding:1.2rem;text-align:center">
+    把文件拖到这里（本区没有 file input）
+  </div>
+  <p>收到：<b id="dropOut">无</b></p>
+</section>
+
+<!-- 9. 校验错误：提示藏在页面很下面，考察 alerts 采集 -->
+<section>
+  <h2>9. 迟到的校验错误</h2>
+  <button id="triggerErr">触发一个校验错误</button>
+  <div id="errBox" role="alert" class="hidden">手机号格式不正确，请填写 11 位数字</div>
+</section>
+
+<!-- 10. 原生弹窗：硬边界，工具应当明确报错而不是卡死 -->
+<section>
+  <h2>10. 原生 confirm（硬边界）</h2>
+  <button id="popAlert">弹一个 confirm</button>
+</section>
+
+<!-- 11. 只认 isTrusted 的按钮：风控站点的最小模型。
+     合成事件（L1）在它身上必然静默失效，真实事件（L2）必然成功。
+     这一节是「零证据 → 自动升级」整条链路的回归测试。 -->
+<section>
+  <h2>11. 只认真实事件（风控站点模型）</h2>
+  <button id="trustedOnly">普通按钮（只认 isTrusted）</button>
+  <b id="trustedOut">未触发</b>
+  <p>
+    <button id="paySim">立即支付（敏感文案 + 只认 isTrusted）</button>
+    <b id="payOut">未触发</b>
+    <br><small>敏感文案命中闸门，即使零证据也不该自动重试</small>
+  </p>
+  <p>
+    <button id="deadBtn">点了什么都不做</button>
+    <small>用来验证「页面完全没有反应」是否被如实报出</small>
+  </p>
+</section>
+
+<script>
+// 跨源 iframe：localhost 和 127.0.0.1 是不同的源，端口跟随当前页面，换端口也能跑
+document.getElementById('xframe').src =
+  `http://localhost:${location.port}/frame-inner.html`;
+
+// ---- 1. 事件记录仪 ----
+const log = document.getElementById('log');
+window.__events = [];
+function note(e) {
+  const rec = { type: e.type, trusted: e.isTrusted, target: e.target.id || e.target.tagName,
+                prevented: e.defaultPrevented, btn: e.button };
+  window.__events.push(rec);
+  log.textContent += JSON.stringify(rec) + '\n';
+  log.scrollTop = log.scrollHeight;
+}
+for (const t of ['pointerover','mouseover','mousemove','pointerdown','mousedown','pointerup','mouseup','click','focus','blur','keydown','keyup','input','change']) {
+  document.getElementById('probe').addEventListener(t, note);
+}
+document.getElementById('clearlog').onclick = () => { log.textContent = ''; window.__events = []; };
+
+// ---- 2. 只认 mousedown 的下拉 ----
+const ctl = document.getElementById('ctl'), menu = document.getElementById('menu');
+ctl.addEventListener('mousedown', (e) => {
+  e.preventDefault();                       // 和 react-select 一样：自己管焦点
+  const open = menu.classList.toggle('hidden');
+  ctl.setAttribute('aria-expanded', String(!open));
+});
+menu.addEventListener('mousedown', (e) => {
+  const opt = e.target.closest('.opt');
+  if (!opt) return;
+  document.getElementById('ctlOut').textContent = opt.textContent;
+  document.getElementById('ctlLabel').textContent = opt.textContent;
+  menu.classList.add('hidden');
+  ctl.setAttribute('aria-expanded', 'false');
+});
+
+// ---- 3. 只认 click ----
+document.getElementById('clickOnly').addEventListener('click',
+  () => document.getElementById('clickOut').textContent = '已点击');
+
+// ---- 4. 自管焦点 ----
+document.getElementById('selfFocus').addEventListener('mousedown', (e) => {
+  e.preventDefault();
+  document.getElementById('selfFocusInput').focus();
+});
+setInterval(() => {
+  const a = document.activeElement;
+  document.getElementById('focusOut').textContent = a ? (a.id || a.tagName) : '无';
+}, 200);
+
+// ---- 5. Shadow DOM ----
+const sh = document.getElementById('shadowHost').attachShadow({ mode: 'open' });
+sh.innerHTML = `<label>影子里的输入框 <input id="shadowInput" placeholder="shadow input"></label>
+                <button id="shadowBtn">影子按钮</button> <b id="shadowOut">未点击</b>`;
+sh.getElementById('shadowBtn').onclick = () => sh.getElementById('shadowOut').textContent = '已点击';
+
+// ---- 7. 原生表单 ----
+document.getElementById('natform').addEventListener('submit', () => {
+  const f = new FormData(document.getElementById('natform'));
+  document.getElementById('natOut').textContent =
+    `name=${f.get('name')} email=${f.get('email')} city=${f.get('city')} ` +
+    `agree=${document.getElementById('nat-agree').checked} ` +
+    `file=${document.getElementById('nat-file').files[0]?.name || '无'}`;
+});
+
+// ---- 8. 懒加载 ----
+const feed = document.getElementById('feed');
+let loaded = 0;
+function more() {
+  for (let i = 0; i < 20; i++) {
+    const d = document.createElement('div');
+    d.textContent = `第 ${++loaded} 条内容`;
+    feed.appendChild(d);
+  }
+  document.getElementById('feedCount').textContent = loaded;
+}
+more();
+feed.addEventListener('scroll', () => {
+  if (feed.scrollTop + feed.clientHeight > feed.scrollHeight - 20 && loaded < 100) more();
+});
+
+// ---- 8b. 拖放上传：dragover 里 preventDefault 才算「认领」这次拖放 ----
+const dz = document.getElementById('dropzone');
+dz.addEventListener('dragover', (e) => e.preventDefault());
+dz.addEventListener('drop', (e) => {
+  e.preventDefault();
+  const f = e.dataTransfer.files[0];
+  document.getElementById('dropOut').textContent = f ? `${f.name} (${f.size} 字节)` : '空';
+});
+
+// ---- 9. 迟到的校验错误 ----
+document.getElementById('triggerErr').onclick =
+  () => document.getElementById('errBox').classList.remove('hidden');
+
+// ---- 10. 原生 confirm ----
+document.getElementById('popAlert').onclick = () => { window.confirm('这会挡住一切'); };
+
+// ---- 11. 只认 isTrusted ----
+// 风控站点的最小模型：合成事件一律忽略，且**不留任何痕迹**——
+// 这正是这类失败最难查的原因，工具返回成功，页面其实没动。
+function trustedOnly(btnId, outId, text) {
+  document.getElementById(btnId).addEventListener('click', (e) => {
+    if (!e.isTrusted) return;                 // 合成事件到此为止，静默
+    document.getElementById(outId).textContent = text;
+  });
+}
+trustedOnly('trustedOnly', 'trustedOut', '已触发（真实事件）');
+trustedOnly('paySim', 'payOut', '已支付（真实事件）');
+// deadBtn 故意不绑任何东西
+</script>

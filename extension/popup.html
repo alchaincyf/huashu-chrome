@@ -1,0 +1,30 @@
+<!doctype html>
+<meta charset="utf-8" />
+<style>
+  :root { color-scheme: light dark; }
+  body { width: 268px; margin: 0; padding: 16px; font: 13px/1.6 -apple-system, "PingFang SC", system-ui, sans-serif; }
+  h1 { margin: 0 0 2px; font-size: 14px; font-weight: 600; letter-spacing: .2px; }
+  .sub { color: #8a8f98; font-size: 11px; margin-bottom: 14px; }
+  .row { display: flex; align-items: center; gap: 8px; padding: 9px 11px; border-radius: 8px; background: color-mix(in srgb, currentColor 6%, transparent); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #94a3b8; flex: none; }
+  .dot.on { background: #22c55e; }
+  .state { font-weight: 500; }
+  button { margin-top: 12px; width: 100%; padding: 8px; font: inherit; font-weight: 500; border: 0; border-radius: 8px; background: #2563eb; color: #fff; cursor: pointer; }
+  button:disabled { opacity: .45; cursor: default; }
+  .tip { margin-top: 12px; font-size: 11px; color: #8a8f98; }
+  code { font-size: 10.5px; background: color-mix(in srgb, currentColor 9%, transparent); padding: 1px 4px; border-radius: 4px; }
+</style>
+
+<h1>huashu-chrome</h1>
+<div class="sub">让 AI agent 用你自己的浏览器</div>
+
+<div class="row">
+  <span class="dot" id="dot"></span>
+  <span class="state" id="state">检查中…</span>
+</div>
+
+<button id="btn">立即连接</button>
+
+<div class="tip" id="tip">连不上时终端跑 <code>huashu-chrome doctor</code></div>
+
+<script src="popup.js"></script>

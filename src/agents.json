@@ -1,0 +1,42 @@
+{
+  "_comment": [
+    "已知 agent 的 MCP 配置位置。这张表不是穷举——install 还会自动扫描发现没列在这里的 agent，",
+    "所以新出的产品即使没人来加，也能被认出来。",
+    "加一个 agent 只要往 agents 数组里加一行，不用改代码。欢迎 PR。",
+    "",
+    "字段说明：",
+    "  name    显示名",
+    "  client  传给 MCP server 的 --client，用于审计日志区分是谁在调",
+    "  kind    json（{mcpServers:{}}，绝大多数）或 toml（[mcp_servers.x]，目前只有 Codex）",
+    "  paths   候选路径，按顺序取第一个存在的。~ 是 home，$APPDATA 按平台展开",
+    "          （Windows→%APPDATA%，macOS→~/Library/Application Support，Linux→~/.config）"
+  ],
+  "agents": [
+    { "name": "Claude Code", "client": "claude-code", "kind": "json", "paths": ["~/.claude.json", "~/.claude/mcp.json"] },
+    { "name": "Codex CLI", "client": "codex", "kind": "toml", "paths": ["~/.codex/config.toml"] },
+    { "name": "Cursor", "client": "cursor", "kind": "json", "paths": ["~/.cursor/mcp.json"] },
+    { "name": "Gemini CLI", "client": "gemini", "kind": "json", "paths": ["~/.gemini/settings.json"] },
+    { "name": "Claude Desktop", "client": "claude-desktop", "kind": "json", "paths": ["$APPDATA/Claude/claude_desktop_config.json", "~/.config/claude/claude_desktop_config.json"] },
+    { "name": "Windsurf", "client": "windsurf", "kind": "json", "paths": ["~/.codeium/windsurf/mcp_config.json"] },
+    { "name": "Cline (VS Code)", "client": "cline", "kind": "json", "paths": ["$APPDATA/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json"] },
+    { "name": "Roo Code", "client": "roo", "kind": "json", "paths": ["$APPDATA/Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/mcp_settings.json"] },
+
+    { "name": "WorkBuddy", "client": "workbuddy", "kind": "json", "paths": ["~/.workbuddy/.mcp.json"] },
+    { "name": "CodeBuddy", "client": "codebuddy", "kind": "json", "paths": ["~/.codebuddy/mcp.json"] },
+    { "name": "Kimi Code", "client": "kimi-code", "kind": "json", "paths": ["~/.kimi-code/mcp.json"] },
+    { "name": "通义灵码 Lingma", "client": "lingma", "kind": "json", "paths": ["~/.lingma/lingma_mcp.json", "~/.lingma/extension/local/mcp.json"] },
+    { "name": "MiniMax Mavis", "client": "mavis", "kind": "json", "paths": ["~/.mavis/mcp/mcp.json"] },
+    { "name": "Trae", "client": "trae", "kind": "json", "paths": ["~/.trae/mcp.json", "$APPDATA/Trae/User/mcp.json"] },
+    { "name": "豆包 / Doubao", "client": "doubao", "kind": "json", "paths": ["~/.doubao/mcp.json"] },
+    { "name": "千问 / Qwen Code", "client": "qwen", "kind": "json", "paths": ["~/.qwen/settings.json", "~/.qwen/mcp.json"] },
+    { "name": "Qoder", "client": "qoder", "kind": "json", "paths": ["~/.qoder/mcp.json"] },
+    { "name": "DeepSeek", "client": "deepseek", "kind": "json", "paths": ["~/.deepseek/mcp.json"] },
+    { "name": "iFlow", "client": "iflow", "kind": "json", "paths": ["~/.iflow/settings.json"] },
+    { "name": "OpenClaw", "client": "openclaw", "kind": "json", "paths": ["~/.qclaw/mcp.json", "~/.openclaw/mcp.json"] }
+  ],
+  "_discovery": {
+    "_comment": "自动发现：在 home 的点目录里按这些文件名找，内容含 mcpServers/mcp_servers 就算数。",
+    "filenames": ["mcp.json", ".mcp.json", "mcp_config.json", "mcp/mcp.json", "settings.json", "config.json"],
+    "skipDirs": [".git", ".npm", ".cache", ".Trash", ".vscode", ".docker", "node_modules"]
+  }
+}

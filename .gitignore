@@ -1,0 +1,8 @@
+node_modules/
+.DS_Store
+*.log
+dist/
+.extension-key.pem
+
+# 本机私人数据，不进仓库
+小红书数据分析-*.md
