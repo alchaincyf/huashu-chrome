@@ -377,6 +377,8 @@ function routeOf(p) {
 const contentBudget = (p) => {
   if (p?.__hc === 'wait') return (Number(p.timeout) || 10000) + 5000;
   if (p?.__hc === 'scroll') return Math.min(Number(p.times) || 1, 50) * (Number(p.wait) || 700) + 10000;
+  // ready 不单列：它自己的静默窗口只有 1.5 秒，外层 waitForReady 的 hardCap
+  // 是 12 秒，都在默认预算以内——写一条算出来等于 15000 的规则纯属噪音。
   return 15000;
 };
 
@@ -405,6 +407,9 @@ async function toContent(tabId, payload, frameId = 0) {
   return r.data;
 }
 
+// 等 load 事件。**只剩一个用途**：ensureContent 的兜底重载（下面 waitForReady
+// 依赖 ensureContent，那条路上再调 waitForReady 会无限递归）。
+// 别的地方一律用 waitForReady——理由见它的注释。
 function waitForLoad(tabId, timeout = 15000) {
   return new Promise((resolve) => {
     const done = () => { chrome.tabs.onUpdated.removeListener(h); clearTimeout(t); resolve(); };
@@ -413,6 +418,73 @@ function waitForLoad(tabId, timeout = 15000) {
     chrome.tabs.onUpdated.addListener(h);
     chrome.tabs.get(tabId).then((tab) => { if (tab.status === 'complete') done(); }).catch(done);
   });
+}
+
+// 浏览器保护的页面：注入不了，等它「就绪」永远等不到。必须在进循环前挡掉，
+// 否则 navigate 到 chrome://extensions 会白白空转满 hardCap——
+// 而原先的 waitForLoad 在这类页面上是立刻返回的，那会是一次实打实的退步。
+// about: 不在这张表里 —— about:blank 是可以注入的，而且新标签页在导航提交前
+// 恰恰长这样，误判成「注入不了」会让 tabs(new) 一次都不等。
+const UNINJECTABLE = /^(chrome|edge|devtools|view-source|chrome-extension|chrome-search|chrome-untrusted):/i;
+const isUninjectable = (url) => UNINJECTABLE.test(url || '') || /^https:\/\/chromewebstore\.google\.com/i.test(url || '');
+
+// 等导航**提交**（新文档上位），不等它加载完。
+//
+// 少了这一步，waitForReady 会把 content script 注到还没被替换掉的旧文档或
+// about:blank 上——那上面 readyState 早就是 complete、DOM 也早就安静了，
+// 于是「就绪」当场满足，等于根本没等。
+//
+// 两个方向都会出错，所以要靠调用方说明意图：
+// ① `tabs.update` / `tabs.create` 是**异步**的，调用返回时 status 往往还是
+//    上一页的 complete。这时候看 status 就会当场放行，撞的正是上面那个坑。
+//    所以明知自己触发了导航的调用方要传 expectNav，让这里只认事件。
+// ② 反过来，就地操作（SPA 路由、click 之后导航早已落定）压根没有导航在进行，
+//    死等事件只会白白挂满超时——那种情况看 status 才是对的。
+function waitForCommit(tabId, { expectNav = false } = {}) {
+  return new Promise((resolve) => {
+    const done = () => { chrome.tabs.onUpdated.removeListener(h); clearTimeout(t); resolve(); };
+    // 等不到也往下走：宁可早一点开始判就绪，也不要挂在这儿——
+    // 后面的 ready 循环本来就会重试，那条路比这里的干等有信息量。
+    const t = setTimeout(done, expectNav ? 3000 : 6000);
+    // 导航提交时 Chrome 会推一条带 url 的 changeInfo
+    const h = (id, info) => { if (id === tabId && (info.url || info.status === 'complete')) done(); };
+    chrome.tabs.onUpdated.addListener(h);
+    if (!expectNav) chrome.tabs.get(tabId).then((tab) => { if (tab.status !== 'loading') done(); }).catch(done);
+  });
+}
+
+// 等到「这一页能干活了」。
+//
+// 取代原先的 waitForLoad + sleep(300)。那套等的是 status === 'complete'，
+// 也就是 load 事件——连最后一张广告图、最后一个统计脚本都下完。实测：
+//   知乎  DOM 可交互 5.1 秒 · load 20.3 秒 → 白等 15.2 秒（那次 tabs 花了 15.4 秒）
+//   B 站  DOM 可交互 7.0 秒 · load 13.2 秒 → 白等 6.1 秒（那次花了 13.5 秒）
+// 而它同时又太早，接不住 SPA 的首屏渲染，所以后面才要补一句 sleep(300)——
+// 日志里 navigate → wait 出现 38 次，就是那 300ms 不够用留下的痕迹。
+//
+// 这里不需要 webNavigation 权限（给已装扩展加权限会触发 Chrome 重新授权、
+// 打断用户，那是这个产品明确不接受的代价）。靠的是一个已经成立的事实：
+// content script 是 executeScript 动态注入的，而它默认在 document_idle 执行——
+// **注入成功本身就是「DOM 已可交互」的信号**。剩下的交给 content 侧的
+// ready 命令去等 DOM 安静下来。
+async function waitForReady(tabId, { hardCap = 12000, quiet = 300, expectNav = false } = {}) {
+  await waitForCommit(tabId, { expectNav });
+  try {
+    if (isUninjectable((await chrome.tabs.get(tabId)).url)) return;
+  } catch {
+    return;   // 标签页没了，交给调用方后面的操作去报错
+  }
+  const deadline = Date.now() + hardCap;
+  while (Date.now() < deadline) {
+    try {
+      const r = await toContent(tabId, { __hc: 'ready', quiet, budget: deadline - Date.now() });
+      if (r?.ready) return;
+    } catch {
+      // 正在跳转、或 content script 还没起来。下一轮再问。
+      // 这里不抛错：调用方后面自己会撞上真正的错误，那个比这儿造一个有信息量。
+    }
+    await sleep(80);
+  }
 }
 
 // ---------- 数据层：网络 ----------
@@ -450,17 +522,25 @@ async function snapshotAll(tabId, p = {}) {
 
   const frames = (await listFrames(tabId)).filter((f) => f.frameId !== 0);
   const parts = [];
-  for (const f of frames.slice(0, 8)) {   // 广告位常有十几个 iframe，全抓会把快照撑爆
-    try {
-      const sub = await toContent(tabId, { __hc: 'snapshot' }, f.frameId);
-      snaps[f.frameId] = sub.snapshotId;
-      // 只把 ref 编号加后缀，别的原样保留
-      const body = String(sub.text || '').replace(/^\[(e\d+)\]/gm, `[$1@f${f.frameId}]`);
-      const rows = (body.match(/^\[e\d+@f\d+\]/gm) || []).length;
-      if (rows) parts.push(`\n--- iframe f${f.frameId} · ${f.url} ---\n${body.split('\n--- 正文节选')[0].split('\n').slice(2).join('\n')}`);
-    } catch {
+  // 并行拍。串行的时候每个框架都要付一次完整往返，而带广告的页面动辄七八个——
+  // 一次快照就变成八次的时间，全花在等，没有一次是必须排在另一次后面的。
+  // Promise.all 保序，所以输出跟串行版一模一样。
+  const subs = await Promise.all(
+    frames.slice(0, 8)   // 广告位常有十几个 iframe，全抓会把快照撑爆
+      .map((f) => toContent(tabId, { __hc: 'snapshot' }, f.frameId)
+        .then((sub) => ({ f, sub }))
+        .catch(() => ({ f, sub: null })))
+  );
+  for (const { f, sub } of subs) {
+    if (!sub) {
       parts.push(`\n--- iframe f${f.frameId} · ${f.url} ---\n  （注入不了，多半是 sandbox 或已跳走）`);
+      continue;
     }
+    snaps[f.frameId] = sub.snapshotId;
+    // 只把 ref 编号加后缀，别的原样保留
+    const body = String(sub.text || '').replace(/^\[(e\d+)\]/gm, `[$1@f${f.frameId}]`);
+    const rows = (body.match(/^\[e\d+@f\d+\]/gm) || []).length;
+    if (rows) parts.push(`\n--- iframe f${f.frameId} · ${f.url} ---\n${body.split('\n--- 正文节选')[0].split('\n').slice(2).join('\n')}`);
   }
   await setFrameSnaps(tabId, snaps);
   return parts.length ? { ...top, text: top.text + '\n' + parts.join('\n') } : top;
@@ -837,7 +917,7 @@ async function performCore(id, cmd, p, { blockSensitive = false } = {}, ctx) {
 
   const after = (await chrome.tabs.get(id)).url;
   const navigated = before !== after;
-  if (navigated) { await waitForLoad(id); await markNavigated(id, ctx?.sid); }
+  if (navigated) { await waitForReady(id); await markNavigated(id, ctx?.sid); }
 
   // 这次操作把内容开到了另一个标签页里（target=_blank / window.open）。
   // 受控槽跟过去——不跟的话，agent 会一直对着一个「什么都没变」的原页面
@@ -845,7 +925,7 @@ async function performCore(id, cmd, p, { blockSensitive = false } = {}, ctx) {
   // 想回原页面 tabs(action:"select") 一句话的事。
   const child = await childOpenedSince(id, startedAt);
   if (child) {
-    await waitForLoad(child.id);
+    await waitForReady(child.id);
     await setActiveTabId(child.id);
     await claimTab(ctx?.sid, child.id, ctx);
     await markNavigated(child.id, ctx?.sid);
@@ -926,8 +1006,9 @@ const HANDLERS = {
     const id = await resolveTab(tabId);
     if (p.url) await chrome.tabs.update(id, { url: p.url });
     else await toContent(id, { __hc: 'history', action: p.action || 'reload' });
-    await waitForLoad(id);
-    await sleep(300); // 给 SPA 的首屏渲染一点时间，否则快照经常空
+    // 「DOM 可交互 + 安静下来」，比 load + sleep(300) 又快又准。
+    // expectNav：上面那句 tabs.update / history 刚发出去，导航还没提交
+    await waitForReady(id, { expectNav: true });
     await markNavigated(id, ctx?.sid);
     return snapshotAll(id);
   },
@@ -1134,8 +1215,8 @@ const HANDLERS = {
 
     if (p.reload || !hasData) {
       await chrome.tabs.reload(id);
-      await waitForLoad(id);
-      await sleep(p.settle || 2000); // 等首屏那批 XHR 落地
+      await waitForReady(id, { expectNav: true });
+      await sleep(p.settle || 2000); // 等首屏那批 XHR 落地——DOM 就绪不代表数据回来了
     }
 
     const [{ result }] = await chrome.scripting.executeScript({
@@ -1369,7 +1450,7 @@ const HANDLERS = {
       const tab = await chrome.tabs.create({ url: p.url || 'about:blank', active: !!p.focus });
       await setActiveTabId(tab.id);   // 全局槽照旧更新：它是「最近受控 tab」的继承源
       await claimTab(sid, tab.id, ctx);
-      if (p.url) { await waitForLoad(tab.id); await sleep(300); }
+      if (p.url) await waitForReady(tab.id, { expectNav: true });
       return { text: `已在后台打开标签页 ${tab.id}`, tabId: tab.id };
     }
     // 「受控」和「前台」是两件事：这里只改受控目标，不动用户的视线

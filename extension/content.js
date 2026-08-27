@@ -1398,6 +1398,56 @@
     `${el.tagName.toLowerCase()}${el.name ? `[name=${el.name}]` : ''}` +
     `${el.placeholder ? ` "${el.placeholder}"` : ''}`;
 
+  // 等到「能干活」，而不是「连最后一张广告图都下完」。
+  //
+  // background 原先等的是 chrome.tabs 的 status === 'complete'，而 Chrome 对这个
+  // 状态的定义是 **load 事件**：所有子资源下载完毕。实测知乎 domInteractive 5.1 秒、
+  // loadEventEnd 20.3 秒——中间那 15 秒白等，而 agent 要的东西 5 秒时就能点了。
+  //
+  // 更麻烦的是它**同时又太早**：SPA 的首屏是 DOMContentLoaded 之后才渲染的，
+  // 所以原先还要跟一句 sleep(300) 去糊。300ms 对 SPA 不够、对静态页纯属浪费，
+  // 于是日志里 navigate → wait 这个组合出现了 38 次——等了三秒半，
+  // agent 还得自己再等一次。
+  //
+  // 换成两段，各自对着一个真问题：先等 DOM 能用，再等它安静下来。
+  async function doReady(p) {
+    if (document.readyState === 'loading') {
+      await new Promise((r) => document.addEventListener('DOMContentLoaded', r, { once: true }));
+    }
+    const quiet = Math.max(Number(p.quiet) || 300, 50);
+    // 硬上限必须卡死：直播弹幕、行情页永远等不到「完全没有 DOM 变化」，
+    // 不设上限的话它们会一路跑满预算，反而比原来的等法更慢。
+    const budget = Math.min(Math.max(Number(p.budget) || 1500, quiet), 1500);
+    const quieted = await new Promise((resolve) => {
+      let quietTimer = null;
+      const hard = setTimeout(() => done(false), budget);
+      const mo = new MutationObserver((records) => {
+        // 只有**成规模**的 DOM 增长才说明首屏还在渲染。
+        //
+        // 判「完全静默」的那版在两类页面上一起垮掉：靶场自带事件记录仪、
+        // 真实站点有时钟和弹幕——它们每几十毫秒往 DOM 里追加一两个节点，
+        // 于是计时器永远被重置，每次都跑满预算。实测把本地靶场的用例
+        // 从 1.8 秒拖到 10.5 秒，比它取代掉的那套还慢。
+        //
+        // 而这两件事的区别是规模：自娱自乐是一两个节点，首屏渲染是几十上百个。
+        let added = 0;
+        for (const r of records) added += r.addedNodes.length;
+        if (added < 5) return;
+        clearTimeout(quietTimer);
+        quietTimer = setTimeout(() => done(true), quiet);
+      });
+      mo.observe(document.documentElement, { childList: true, subtree: true });
+      quietTimer = setTimeout(() => done(true), quiet);
+      function done(ok) {
+        clearTimeout(quietTimer);
+        clearTimeout(hard);
+        mo.disconnect();
+        resolve(ok);
+      }
+    });
+    return { data: { ready: true, quieted } };
+  }
+
   async function doWait(p) {
     const timeout = p.timeout || 10000;
     const deadline = Date.now() + timeout;
@@ -1647,6 +1697,7 @@
           case 'select': return sendResponse(doSelect(msg));
           case 'fill': return sendResponse(doFill(msg));
           case 'key': return sendResponse(doKey(msg));
+          case 'ready': return sendResponse(await doReady(msg));
           case 'wait': return sendResponse(await doWait(msg));
           case 'query': return sendResponse(doQuery(msg));
           case 'upload': return sendResponse(doUpload(msg));
