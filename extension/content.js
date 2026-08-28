@@ -311,6 +311,36 @@
     '[class*="error" i]', '[class*="invalid" i]', '[class*="warning" i]', '[class*="toast" i]',
   ].join(',');
 
+  // 风控挑战的**原始证据**。判定不在这里做——content script 是注入脚本不能 import，
+  // 判定规则放 extension/risk.js 由 background 调用，那样 `npm test` 能直接跑到。
+  // 这里只负责采：可见 iframe 的 src，加顶层浮层的文本。
+  //
+  // 只扫顶层浮层不扫全文：「验证」这两个字在正文里太常见，
+  // 全文匹配会把「实名验证入口」这类静态文案当成挑战。
+  function challengeEvidence() {
+    const frames = [], overlays = [];
+    try {
+      for (const f of document.querySelectorAll('iframe[src]')) {
+        if (frames.length >= 8) break;
+        if (isVisible(f)) frames.push(f.src);
+      }
+      const tops = new Set([
+        ...document.querySelectorAll('[role="dialog"],[role="alertdialog"],dialog[open]'),
+        ...Array.from(document.body?.children || []).filter((e) => {
+          const cs = getComputedStyle(e);
+          return cs.position === 'fixed' && cs.display !== 'none' && +cs.zIndex >= 100;
+        }),
+      ]);
+      for (const el of tops) {
+        if (overlays.length >= 5) break;
+        if (!isVisible(el)) continue;
+        const t = (el.innerText || '').replace(/\s+/g, ' ').trim();
+        if (t) overlays.push(t.slice(0, 300));
+      }
+    } catch { /* 跨源 iframe / 页面正在换页 */ }
+    return { frames, overlays };
+  }
+
   function collectAlerts() {
     const out = new Set();
     let nodes;
@@ -1006,6 +1036,10 @@
       // 页面在动、但没有一条能归到这次操作头上——必须说出来，
       // 不能让 agent 把别人的动静当成自己的战果
       unattributable: !strong.length && weak.length > 0,
+      // 这次操作之后页面上有哪些浮层/iframe。background 用 risk.js 判断是不是
+      // 风控挑战——是的话记住这个 origin，之后一律从 L2 起步，
+      // 不再拿 isTrusted:false 的事件去撞风控。
+      challengeEv: challengeEvidence(),
     };
   }
 

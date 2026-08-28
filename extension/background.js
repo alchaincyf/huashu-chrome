@@ -9,6 +9,7 @@
 // 漂移记录和 iframe 快照在 storage.session，连接状态由 offscreen 维护。
 
 import * as cdp from './cdp.js';
+import { matchChallenge, hostOf, hostMatches, L2_ORIGINS_SEED } from './risk.js';
 import { CRED_URL, redactCreds } from './redact.js';
 
 // ---------- 连接层 ----------
@@ -578,6 +579,46 @@ const L2_CMDS = new Set(['click', 'type', 'key']);
 const IS_MAC = navigator.userAgent.includes('Mac');
 const SETTLE_MS = 1200;
 
+// ---------- 风控站点记忆 ----------
+//
+// 「零证据 → 升级 L2」挡不住风控站点：在那些站上 L1 是**生效的**（消息发出去了、
+// DOM 也变了），只是同时被风控记了一笔 isTrusted:false。等攒够分数弹出验证码，
+// 这一轮已经废了，而且是人工才能解的废法。
+//
+// 所以换个信号：一旦某个 origin 弹过验证挑战，就记住它，之后一律从 L2 起步。
+// 代价是这些站点上会常驻黄条——但比每隔几条消息就要人来点一次验证码划算得多。
+//
+// 判定规则在 ./risk.js —— 纯函数，抽出去是为了让 `npm test` 跑得到，不必开真 Chrome。
+// 这里只剩需要 chrome API 的那一层：读 URL、存学到的站点。
+const L2_ORIGINS_KEY = 'l2Origins';
+let l2OriginsCache = null;
+
+async function learnedL2Origins() {
+  if (l2OriginsCache) return l2OriginsCache;
+  let stored = {};
+  try { ({ [L2_ORIGINS_KEY]: stored = {} } = await chrome.storage.local.get(L2_ORIGINS_KEY)); } catch { /* 存储不可用就只用种子 */ }
+  l2OriginsCache = stored;
+  return stored;
+}
+
+async function prefersL2(url) {
+  const h = hostOf(url);
+  if (!h) return false;
+  if (hostMatches(h, L2_ORIGINS_SEED)) return true;
+  return hostMatches(h, Object.keys(await learnedL2Origins()));
+}
+
+async function rememberL2Origin(url, why) {
+  const h = hostOf(url);
+  if (!h || hostMatches(h, L2_ORIGINS_SEED)) return false;
+  const m = await learnedL2Origins();
+  if (m[h]) return false;
+  m[h] = { at: Date.now(), why: String(why).slice(0, 60) };
+  l2OriginsCache = m;
+  try { await chrome.storage.local.set({ [L2_ORIGINS_KEY]: m }); } catch { /* 记不住就下次再记 */ }
+  return true;
+}
+
 async function execL2(id, cmd, params, loc) {
   const label = params.ref || params.selector || '';
   if (cmd === 'click') {
@@ -873,7 +914,10 @@ async function performCore(id, cmd, p, { blockSensitive = false } = {}, ctx) {
   }
 
   const l2ok = frameId === 0 && L2_CMDS.has(cmd) && hasTarget && !loc?.outside;
-  let layer = (l2ok && (params.real || loc?.prefer === 'L2')) ? 'L2' : 'L1';
+  // 风控站点从 L2 起步。这里不能等「零证据」再升级——在这类站上 L1 恰恰是有效果的，
+  // 那条升级路永远不会触发，而每一次 isTrusted:false 都在给验证码攒分。
+  const riskyOrigin = l2ok && await prefersL2(before);
+  let layer = (l2ok && (params.real || loc?.prefer === 'L2' || riskyOrigin)) ? 'L2' : 'L1';
 
   const runL1 = async () => {
     const d = await toContent(id, { __hc: cmd, ...params }, frameId);
@@ -913,6 +957,22 @@ async function performCore(id, cmd, p, { blockSensitive = false } = {}, ctx) {
         l2note = `（普通事件无效，真实事件也没能用上：${e.message}）`;
       }
     }
+  }
+
+  // 弹了验证挑战 → 记住这个站点，之后从 L2 起步。
+  // 这一轮救不回来了（挑战只能人来解），但要把原因说清楚：
+  // 不说的话 agent 会以为是自己点错了，然后换着花样重试，每试一次风控多记一笔。
+  const challenge = matchChallenge(ev.challengeEv);
+  if (challenge) {
+    const learned = await rememberL2Origin(before, challenge);
+    l2note = (l2note ? `${l2note} ` : '')
+      + `（⚠️ 页面弹出了风控验证：「${challenge}」。这只能由用户手动完成——不要重试，也不要想办法绕。`
+      + (usedL2
+        ? '本次用的已经是真实事件，说明该站的风控不只看事件可信度，接下来的操作最好交给用户。'
+        : learned
+          ? `已记住 ${hostOf(before)}，之后在这个站点一律用真实事件操作。`
+          : '')
+      + '）';
   }
 
   const after = (await chrome.tabs.get(id)).url;
