@@ -71,6 +71,7 @@
   let logs = {};        // sid -> [{ t, text }] 新的在前（background 的环形缓冲）
   let intents = {};     // sid -> { text, t }   agent 用 status 声明的「准备做什么」
   let plan = [];        // 正在跑的批处理还剩哪些步（扩展生成的描述，不是 agent 的话）
+  let tabLabel = '';    // agent 开页时声明的「这页是哪条线」（属于 tab，不属于某个主）
   let expanded = false; // 驾驶舱展开还是收成胶囊。偏好落在 chrome.storage.local
   let host = null, wrap = null;
   let watchdog = null, flashTimer = null, tickTimer = null;
@@ -372,7 +373,8 @@
     const who = document.createElement('span'); who.className = 'who'; who.textContent = o.label;
     const sep = document.createElement('span'); sep.className = 'sep'; sep.textContent = '·';
     const what = document.createElement('span'); what.className = 'what';
-    what.textContent = act ? act.text : o.code;
+    // 空闲时 label 比进程短码有信息量得多：「陈云飞-签证表」 vs 「p48291」
+    what.textContent = act ? act.text : (tabLabel || o.code);
     chip.append(av, who, sep, what);
     chip.addEventListener('click', () => setExpanded(true));
     return chip;
@@ -404,6 +406,14 @@
       card.appendChild(s);
       return s;
     };
+
+    // 本页：agent 开页时声明的这条工作线。也是 agent 写的（铁律2：textContent）。
+    if (tabLabel) {
+      const s = sec('本页');
+      const p2 = document.createElement('div'); p2.className = 'plan';
+      p2.textContent = tabLabel;
+      s.appendChild(p2);
+    }
 
     // 准备做：agent 自己声明的计划。它是 agent 写的（可能源自被注入的页面），
     // 所以带引用边、标时间，和下面扩展观察到的事实在视觉上分开。
@@ -699,6 +709,7 @@
         logs = msg.logs || {};
         intents = msg.intents || {};
         plan = Array.isArray(msg.plan) ? msg.plan : [];
+        tabLabel = typeof msg.tabLabel === 'string' ? msg.tabLabel : '';
         owners = Array.isArray(msg.owners) ? msg.owners.filter((o) => o && o.sid) : [];
         // 先记动作再画：act 的高亮状态要出现在这一次渲染里，分开就是两次渲染
         if (msg.act && msg.sid) recordAct(msg.sid, msg.act);

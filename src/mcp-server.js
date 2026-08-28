@@ -174,13 +174,16 @@ const TOOLS = [
       'List / open / switch / close tabs. New tabs open in the BACKGROUND and become the controlled tab — ' +
       'the user keeps looking at whatever they were on. Everything except screenshot works fine on a background tab. ' +
       'Each agent session has its OWN controlled tab; omitting tabId uses this session\'s. ' +
-      'Selecting a tab another session operates warns, not blocks.',
+      'Selecting a tab another session operates warns, not blocks. ' +
+      'With 2+ work-lines (a subagent, two accounts) pass tabId explicitly on EVERY call — the implicit slot ' +
+      'is shared with subagents and a sibling can move it. Label each tab; recover the mapping via action:"list".',
     inputSchema: {
       type: 'object',
       properties: {
         action: { type: 'string', enum: ['list', 'new', 'select', 'close'] },
         url: { type: 'string' },
         tabId: TAB,
+        label: { type: 'string', description: 'With new/select: what this tab is for ("visa form — Chen"). Shown in list, page panel, and to the user.' },
         focus: { type: 'boolean', description: 'Also bring the tab to the foreground. Interrupts the user — off by default.' },
       },
       required: ['action'],
@@ -443,34 +446,36 @@ const TOOLS = [
 const STRATEGY = `Controls the user's real Chrome, with their real logins. Tabs open in the BACKGROUND — never steal focus.
 
 LEARNINGS FIRST. Before your first action on a site, call \`learnings\` with its domain — past
-sessions may have mapped its APIs, walls and pitfalls (a real task: 281 calls → under 10). A note
-may embed runnable \`\`\`act playbooks: fill the {{placeholders}}, run as-is. Notes are hints,
-never rules — when the page disagrees, trust the page, then save the corrected note back with
-{domain, save}. Empty lookup? Just proceed.
+sessions may have mapped its APIs, walls and pitfalls. Notes may embed runnable \`\`\`act
+playbooks — fill {{placeholders}}, run as-is. Notes are hints, not rules — trust the page
+when they disagree, then save the correction back with {domain, save}.
 
-BATCH BY DEFAULT. Measured: 98% of wall-clock is the model turns BETWEEN commands (~6s), 2% is
-execution (0.2s a click). Whenever you can predict 2+ steps, send ONE \`act\`; its
-repeat/if/assert blocks cover pagination, optional banners and guards. Single calls are for
-genuinely unpredictable moments.
+BATCH BY DEFAULT. 98% of wall-clock is the model turns BETWEEN commands. Whenever you can
+predict 2+ steps, send ONE \`act\`; its repeat/if/assert blocks cover pagination, optional
+banners and guards.
 
-OPTIONAL FAST LOOP — only if your harness can spawn subagents; otherwise skip — single-brain works fully. Browser driving rarely needs your full depth: spawn a subagent on a fast cheap
-model with the goal and the site's learnings, review its summary. It must escalate back to you for payment/sensitive submits, ask outcomes, and any change
-of plan.
+TAB DISCIPLINE. Opening a tab? Pass label:"<work-line>" and repeat the returned tabId in your
+reply — it must survive context compaction. With 2+ work-lines (a subagent, two accounts)
+EVERY call carries an explicit tabId — the implicit slot is SHARED with your subagents and
+any of them can move it. Lost track? tabs(action:"list").
+
+OPTIONAL FAST LOOP (only if your harness spawns subagents): hand a fast cheap subagent the
+goal, the site's learnings, and its OWN tab — tabId + label + account, explicit tabId on every
+call. It escalates payment/sensitive submits, ask outcomes and plan changes back to you.
 
 A page holds information in exactly three places; play them in this order:
-1. NETWORK for DATA — \`network\` first: the API names its own fields; reading numbers off the
-   screen gets them wrong.
-2. DOM for ACTIONS and prose — \`snapshot\` then act/click/fill; \`read_text\` for articles,
-   \`query\` for scraping.
+1. NETWORK for DATA — \`network\` first: the API names its own fields; screen-read numbers
+   get them wrong.
+2. DOM for ACTIONS — \`snapshot\` then act/click/fill; \`read_text\` for articles, \`query\`
+   for scraping.
 3. PIXELS last resort — \`screenshot\` only when layout itself is the question.
 
-EVERY write returns an effect line — read it; it separates "submitted" from "blocked". A
-no-reaction warning means it probably did NOT work; change target or approach, never repeat the
-same call.
+EVERY write returns an effect line — read it: it separates "submitted" from "blocked". On a
+no-reaction warning change target or approach, never repeat the same call.
 
-WHEN A STEP NEEDS A HUMAN — captcha, QR login, OTP, payment — call \`ask\`; do not retry, do not
-work around it. OS surfaces (file dialogs, permission prompts, chrome:// pages)
-are beyond any extension: tell the user, stop retrying.`;
+A STEP NEEDS A HUMAN (captcha, QR login, OTP, payment)? Call \`ask\` — never retry or work
+around. OS surfaces (file dialogs, permission prompts, chrome://) are beyond any extension:
+tell the user, stop.`;
 
 // 页面来的文本全部走这里。边界标记 + 降权说明，both 是给模型看的。
 function wrapUntrusted(body, meta = '') {

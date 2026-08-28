@@ -172,6 +172,9 @@ async function onMessage(msg) {
     // ctx 只在本函数内现场传——SW 里两条命令的 await 会交错，绝不能用模块级变量存「当前消息」
     const ctx = { sid: msg.sid, live: msg.live, adopted: false };
     const tabId = NO_SLOT_CMDS.has(msg.cmd) ? msg.tabId : await resolveTab(msg.tabId, msg.sid, ctx);
+    // 显式 tabId 也进户口簿——await 而不是 void：命令完成后的 syncMark 从
+    // 户口簿反推归属，登记必须先落盘，否则第一条命令刷不出标记（又一个落盘竞态）
+    if (tabId && msg.sid && !NO_SLOT_CMDS.has(msg.cmd)) await registerTab(msg.sid, tabId);
     let data = await handler(msg.params || {}, tabId, ctx);
     // 命令跑完才刷标记，不是跑之前：导航会把页面里的 mark.js 冲掉，
     // 提前贴的那一次多半活不到用户看见。act 顺路带上，一次消息两件事。
@@ -183,7 +186,7 @@ async function onMessage(msg) {
     if (marked) void syncMark(marked, { sid: msg.sid, act: actText(msg.cmd, msg.params) });
     // 教练搭在回执尾部。await 的代价是一次 storage 读写（约 1ms），
     // 相比它要省下的 6 秒模型回合可以忽略
-    const tip = await coachNote(msg.sid, msg.cmd);
+    const tip = (await coachNote(msg.sid, msg.cmd)) + (await multiLineNote(msg.sid, msg.tabId, msg.cmd, tabId));
     if (tip) {
       if (typeof data === 'string') data += tip;
       else if (data && typeof data.text === 'string') data.text += tip;
@@ -236,6 +239,30 @@ async function coachNote(sid, cmd) {
   return '';
 }
 
+// 多线检测：本会话的户口簿上已有 ≥2 个还开着的标签页，这条命令却没带 tabId。
+// 缺省槽是**每会话一个**，而 Claude Code 的主 agent 和它派的 subagent 共用同一个
+// MCP 连接——扩展眼里是同一个会话，槽也是同一个。任何一方 tabs/navigate 都会
+// 把槽改写，另一方下一条缺省命令就落进别人的页面（VFS 那晚的事故路径）。
+// 这在扩展侧无解（工具调用不携带 caller 身份），唯一的防线是让 agent 切到
+// 显式 tabId——在回执里当面说，比任何文档都有效（同 coachNote 的教训）。
+// 10 分钟冷却：多线是持续状态，每条命令都唠叨的提醒很快会被当背景噪音。
+async function multiLineNote(sid, explicitTab, cmd, resolved) {
+  if (!sid || explicitTab || NO_SLOT_CMDS.has(cmd)) return '';
+  try {
+    const { [regKey(sid)]: mine = [] } = await chrome.storage.local.get(regKey(sid));
+    if (mine.length < 2) return '';
+    const key = `multiWarn:${sid}`;
+    const { [key]: last = 0 } = await chrome.storage.session.get(key);
+    if (Date.now() - last < 600000) return '';
+    const open = (await Promise.all(mine.map((t) => chrome.tabs.get(t).catch(() => null)))).filter(Boolean);
+    if (open.length < 2) return '';
+    await chrome.storage.session.set({ [key]: Date.now() });
+    return `\n\n⚠️ 本会话正在 ${open.length} 个标签页上干活，这条命令却没带 tabId——它落在了缺省槽`
+      + `当前指向的 [${resolved}]。缺省槽整个会话（含你派的 subagent）共用一个，任何一方`
+      + ` tabs/navigate 都会改写它。多线并行时每条命令显式带 tabId；tabs(action:"list") 看各页归属。`;
+  } catch { return ''; }
+}
+
 // 桥主动推过来的事件。目前只有一件：会话名单变了。
 //
 // 它必须由桥来推，扩展自己推不出来——`live` 平时是搭着每条命令过来的，
@@ -281,10 +308,7 @@ const liveOf = (ctx) => new Set(Array.isArray(ctx?.live) ? ctx.live : []);
 // 否则关掉一个 Claude Code 窗口之后，它的标签页就再没人能接手了。
 async function liveOwnersOf(tabId, exceptSid, live) {
   const all = await chrome.storage.local.get(null);
-  return Object.entries(all)
-    .filter(([k, v]) => k.startsWith('agentTab:') && v === tabId)
-    .map(([k]) => k.slice('agentTab:'.length))
-    .filter((sid) => sid !== exceptSid && live.has(sid));
+  return sidsOnTab(all, tabId).filter((sid) => sid !== exceptSid && live.has(sid));
 }
 
 // 记下这个会话的受控 tab，并顺手把最老的槽挤掉
@@ -293,6 +317,7 @@ async function claimTab(sid, tabId, ctx) {
   const key = agentTabKey(sid);
   const { [key]: prev } = await chrome.storage.local.get(key);
   await chrome.storage.local.set({ [key]: tabId, [`slotTouch:${sid}`]: Date.now() });
+  await registerTab(sid, tabId);   // 槽页也进户口簿：标记和冲突检测只从户口簿+槽反推
   // 认领的同时就在页面上留痕。不 await：贴标记是给人看的辅助信息，
   // 不该挤进命令的关键路径，慢一拍也没人受损。
   void syncMark(tabId);
@@ -309,8 +334,49 @@ async function claimTab(sid, tabId, ctx) {
     .filter((s) => !live.has(s))
     .sort((a, b) => (all[`slotTouch:${a}`] || 0) - (all[`slotTouch:${b}`] || 0))
     .slice(0, slots.length - SLOT_CAP);
-  if (victims.length) await chrome.storage.local.remove(victims.flatMap((s) => [agentTabKey(s), `slotTouch:${s}`, `agentGroup:${s}`]));
+  if (victims.length) await chrome.storage.local.remove(victims.flatMap((s) => [agentTabKey(s), `slotTouch:${s}`, `agentGroup:${s}`, regKey(s)]));
 }
+
+// ---------- 户口簿 ----------
+//
+// 槽只回答「缺省 tabId 落到哪」，回答不了「这个会话都在哪些页面上」。
+// 多线并行（一个会话开几个页、或父子 agent 显式分页干活）时，显式 tabId
+// 驱动的页面从不进槽——而标记、冲突检测以前都从槽反推，于是这些页面全部
+// 裸奔：没有光标、没有驾驶舱、没有标签组，别的会话还能把它们「继承」走。
+// VFS 那晚的两个症状（subagent 抢槽、显式分页后标记消失）就是这么来的。
+//
+// 户口簿按会话记「它操作过的所有标签页」。存 local，理由同槽：跨扩展重载
+// 不丢，读时靠 live 名单 + onRemoved 清理兜住陈旧条目。
+//
+// 前缀不能叫 agentTabs:——'agentTabs:x'.startsWith('agentTab:') 为真，
+// 会混进所有按 SLOT_PREFIX 扫描的地方。
+const REG_PREFIX = 'ownTabs:';
+const regKey = (sid) => `${REG_PREFIX}${sid}`;
+const REG_CAP = 16;
+
+async function registerTab(sid, tabId) {
+  if (!sid || !tabId) return;
+  const key = regKey(sid);
+  const { [key]: list = [] } = await chrome.storage.local.get(key);
+  if (list.includes(tabId)) return;
+  await chrome.storage.local.set({ [key]: [...list, tabId].slice(-REG_CAP), [`slotTouch:${sid}`]: Date.now() });
+}
+
+// 槽 + 户口簿，站在这个 tab 上的所有会话。调用方自己拿 live 名单过滤。
+function sidsOnTab(all, tabId) {
+  const out = new Set();
+  for (const [k, v] of Object.entries(all)) {
+    if (k.startsWith(SLOT_PREFIX) && v === tabId) out.add(k.slice(SLOT_PREFIX.length));
+    else if (k.startsWith(REG_PREFIX) && Array.isArray(v) && v.includes(tabId)) out.add(k.slice(REG_PREFIX.length));
+  }
+  return [...out];
+}
+
+// 标签页的 label——agent 开页时声明的「这页是哪条线」（如「陈云飞-签证表」）。
+// 按 tab 记不按会话记：页面的用途属于页面，谁来看都该是同一个答案。
+// 它同时是 agent 的工作记忆兜底：上下文被压缩后，tabs(action:"list") 一眼重建。
+const labelKey = (tabId) => `tabLabel:${tabId}`;
+const getLabel = async (tabId) => (await chrome.storage.local.get(labelKey(tabId)))[labelKey(tabId)] || '';
 
 async function getActiveTabId(sid, ctx) {
   if (sid !== undefined) {
@@ -403,10 +469,7 @@ async function ownersOfTab(tabId) {
   const lives = new Set(await liveList());
   if (!lives.size) return [];
   const all = await chrome.storage.local.get(null);
-  const sids = Object.entries(all)
-    .filter(([k, v]) => k.startsWith(SLOT_PREFIX) && v === tabId)
-    .map(([k]) => k.slice(SLOT_PREFIX.length))
-    .filter((sid) => lives.has(sid));
+  const sids = sidsOnTab(all, tabId).filter((sid) => lives.has(sid));
   if (!sids.length) return [];
   const clients = await chrome.storage.session.get(sids.map(sidClientKey));
   return sids.map((sid) => identityOf(sid, clients[sidClientKey(sid)]));
@@ -434,7 +497,7 @@ async function syncMark(tabId, { act, sid, plan } = {}) {
     if (act && sid) await pushActLog(sid, act);
     // plan 不落盘、每次 set 都覆盖：批处理一结束它就该消失，
     // 「接下来」栏里挂着永远不会跑的步骤是在骗用户
-    const msg = { __hcMark: 'set', owners, act: act || null, sid, plan: plan || null, ...(await panelData(owners)) };
+    const msg = { __hcMark: 'set', owners, act: act || null, sid, plan: plan || null, tabLabel: await getLabel(tabId), ...(await panelData(owners)) };
     await noteMarked(tabId, owners.length > 0);
     if (await postMark(tabId, msg)) return;
     // 没人接消息 = 页面里没有 mark.js。既然这页也没有主，就别为了摘一个
@@ -562,6 +625,9 @@ async function resyncMarks() {
       chrome.storage.session.get(MARKED_TABS),
     ]);
     const tabs = new Set(Object.entries(all).filter(([k]) => k.startsWith(SLOT_PREFIX)).map(([, v]) => v));
+    for (const [k, v] of Object.entries(all)) {
+      if (k.startsWith(REG_PREFIX) && Array.isArray(v)) for (const t of v) tabs.add(t);
+    }
     for (const t of sess[MARKED_TABS] || []) tabs.add(t);
     for (const tabId of tabs) await syncMark(tabId);
   } catch { /* 同上 */ }
@@ -1932,35 +1998,50 @@ const HANDLERS = {
       // 别的会话占着哪些 tab 也标出来——agent 要挑一个安全的页面接手时，
       // 「哪些不能碰」和「哪个是我的」一样重要
       const slots = await chrome.storage.local.get(null);
-      const takenBy = new Map();
-      for (const [k, v] of Object.entries(slots)) {
-        if (!k.startsWith('agentTab:')) continue;
-        const owner = k.slice('agentTab:'.length);
-        if (owner !== sid && live.has(owner)) takenBy.set(v, owner);
+      const taken = new Set();       // 别的在线会话（槽或户口簿）站着的页
+      const mineToo = new Set();     // 本会话户口簿里的页（缺省槽之外的工作线）
+      for (const t of all) {
+        for (const owner of sidsOnTab(slots, t.id)) {
+          if (owner === sid) mineToo.add(t.id);
+          else if (live.has(owner)) taken.add(t.id);
+        }
       }
       const lines = all.map((t) => {
-        const mark = t.id === mine ? ' *' : takenBy.has(t.id) ? ' ×' : '  ';
-        return `[${t.id}]${mark} ${t.title || '(无标题)'} — ${t.url}`;
+        const mark = t.id === mine ? ' *' : taken.has(t.id) ? ' ×' : mineToo.has(t.id) ? ' +' : '  ';
+        const lb = slots[labelKey(t.id)];
+        return `[${t.id}]${mark}${lb ? `「${lb}」` : ''} ${t.title || '(无标题)'} — ${t.url}`;
       });
-      return { text: `共 ${all.length} 个标签页（* = 你的受控页，× = 别的会话占着）\n` + lines.join('\n') };
+      return { text: `共 ${all.length} 个标签页（* = 你的缺省槽，+ = 你的另一条工作线，× = 别的会话在用；「」= 开页时声明的 label）\n` + lines.join('\n') };
     }
     // active:false —— agent 在后台干活，不把用户从他正在看的页面上拽走。
     // 需要抢焦点的场合（截图、让用户看着操作）由调用方显式传 focus:true。
     if (p.action === 'new') {
       const tab = await chrome.tabs.create({ url: p.url || 'about:blank', active: !!p.focus });
+      const label = String(p.label || '').slice(0, 40);
+      if (label) await chrome.storage.local.set({ [labelKey(tab.id)]: label });
       await setActiveTabId(tab.id);   // 全局槽照旧更新：它是「最近受控 tab」的继承源
       await claimTab(sid, tab.id, ctx);
       if (p.url) await waitForReady(tab.id, { expectNav: true });
-      return { text: `已在后台打开标签页 ${tab.id}`, tabId: tab.id };
+      // 出生证：tabId 必须被 agent 转述进对话才能活过上下文压缩，
+      // 回执里把「该记什么、怎么找回」一次说全
+      return {
+        text: `已在后台打开标签页 [${tab.id}]${label ? `「${label}」` : ''}。多线并行（含 subagent）时，`
+          + `后续命令显式带 tabId:${tab.id}`
+          + (label ? '' : '；建议开页时带 label:"这页是哪条线"，忘了哪页是哪线时 tabs(action:"list") 能找回')
+          + '。',
+        tabId: tab.id,
+      };
     }
     // 「受控」和「前台」是两件事：这里只改受控目标，不动用户的视线
     if (p.action === 'select') {
       const id = await resolveTab(p.tabId, sid, ctx);
       const warn = await conflictNote(id, sid, ctx);
+      const label = String(p.label || '').slice(0, 40);
+      if (label) await chrome.storage.local.set({ [labelKey(id)]: label });
       await setActiveTabId(id);
       await claimTab(sid, id, ctx);
       if (p.focus) await chrome.tabs.update(id, { active: true });
-      return { text: warn + `受控标签页切到 ${id}` };
+      return { text: warn + `受控标签页切到 [${id}]${label ? `「${label}」` : ''}` };
     }
     if (p.action === 'close') {
       const id = await resolveTab(p.tabId, sid, ctx);
@@ -2116,7 +2197,14 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   // 全局槽 + 所有会话级槽一次扫清，别留指向死 tab 的槽
   const all = await chrome.storage.local.get(null);
   const dead = Object.keys(all).filter((k) => (k === 'activeTabId' || k.startsWith('agentTab:')) && all[k] === tabId);
+  if (all[labelKey(tabId)] !== undefined) dead.push(labelKey(tabId));
   if (dead.length) await chrome.storage.local.remove(dead);
+  // 户口簿是数组，摘条目而不是删键
+  const shrunk = {};
+  for (const [k, v] of Object.entries(all)) {
+    if (k.startsWith(REG_PREFIX) && Array.isArray(v) && v.includes(tabId)) shrunk[k] = v.filter((t) => t !== tabId);
+  }
+  if (Object.keys(shrunk).length) await chrome.storage.local.set(shrunk);
   const sess = await chrome.storage.session.get(null);
   const gone = Object.keys(sess).filter((k) =>
     (k.startsWith('seen:') && k.endsWith(':' + tabId)) || k === frameSnapKey(tabId) || k === childKey(tabId));

@@ -1,6 +1,6 @@
 {
   "name": "huashu-chrome",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "让任何 AI agent 操控你自己的 Chrome——带着全部登录态。MCP + Chrome 扩展，Claude Code / Codex / Cursor / Gemini CLI 通用。",
   "type": "module",
   "bin": {

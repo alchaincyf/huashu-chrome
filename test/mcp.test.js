@@ -38,9 +38,12 @@ test('agent 能通过 stdio 挂上 MCP server 并拿到工具表', async () => {
   //   agent 只认 schema 不读源码，这部分省不得；描述已压缩过一轮）
   //   17600 → 18500：Claude Code 把 MCP instructions 截断在约 2000 字符（实测），
   //   STRATEGY 从 4087 压到 2000 内，被砍段落的关键细节迁入工具描述——描述实测
-  //   不截断，是唯一可靠通道。合计 context 反而净省约 1300 字符）
+  //   不截断，是唯一可靠通道。合计 context 反而净省约 1300 字符
+  //   18500 → 18800：标签页纪律（户口簿/label/多线显式 tabId）。tabs 工具的
+  //   label 参数和多线规则必须住在不被截断的通道里——它防的正是「subagent
+  //   抢槽、显式分页后标记消失」那类真实事故）
   const total = tools.reduce((n, t) => n + t.description.length + JSON.stringify(t.inputSchema).length, 0);
-  assert.ok(total < 18500, `工具表膨胀到 ${total} 字符了，压回 18500 以内`);
+  assert.ok(total < 18800, `工具表膨胀到 ${total} 字符了，压回 18800 以内`);
 
   // click 必须强制要 snapshotId，否则 ref 防呆整套失效
   assert.deepEqual(tools.find((t) => t.name === 'type').inputSchema.required, ['text']);

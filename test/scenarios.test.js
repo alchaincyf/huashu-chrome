@@ -963,3 +963,71 @@ test('window.open 开的新标签页同样跟得上，而没开新页时不误�
     c2.close();
   }
 });
+
+// ---------- v0.9.1：标签页纪律（户口簿 + label + 多线警告） ----------
+//
+// 2026-08-29 的真实事故：Claude Code 的主 agent 和 subagent 共用一个 MCP 连接，
+// 扩展眼里是同一个会话——subagent 一句 navigate 就把共享的缺省槽改写，主 agent
+// 的下一条缺省命令落进别人的页面。多线自救（显式 tabId 分页）以前反而让标记
+// 消失：归属只从槽反推，显式 tabId 驱动的页面从不进槽。现在归属从
+// 「槽 + 户口簿」反推，户口簿在每条带 tabId 的命令上登记。
+//
+// sid 不能复用 mkClient 的自增序号：multiWarn 冷却记在 storage.session（跨测试
+// 进程存活），同一个 sid 第二次跑测试会撞上上一轮的冷却，绿一次红一次。
+const mkUnique = async (name) => {
+  const cc = new BridgeClient({ client: name, sessionId: `${name}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}` });
+  await cc.connect();
+  return cc;
+};
+
+test('显式 tabId 驱动的页面也有归属：自己看是 +，别人看是 ×', async () => {
+  const c2 = await mkUnique('test-lines');
+  try {
+    const { tabId: t1 } = await c2.call('tabs', { action: 'new', url: PAGE + '?line=1' });
+    const { tabId: t2 } = await c2.call('tabs', { action: 'new', url: PAGE + '?line=2' });
+    // 槽已随第二次 new 移到 t2；对 t1 的显式操作要把 t1 记进户口簿
+    await c2.call('read_text', { tabId: t1 });
+    const list = await c2.call('tabs', { action: 'list' });
+    assert.match(list.text, new RegExp(`\\[${t2}\\]\\*`.replace('\\*', ' \\*')), 't2 该标成缺省槽 *');
+    assert.match(list.text, new RegExp(`\\[${t1}\\] \\+`), '显式操作过的 t1 该标 +');
+    // 另一个会话看过来，两页都得是「别人在用」
+    const other = await c.call('tabs', { action: 'list' });
+    assert.match(other.text, new RegExp(`\\[${t1}\\] ×`), '别的会话必须看得见 t1 有主');
+    assert.match(other.text, new RegExp(`\\[${t2}\\] ×`), '别的会话必须看得见 t2 有主');
+    await c2.call('tabs', { action: 'close', tabId: t1 });
+    await c2.call('tabs', { action: 'close', tabId: t2 });
+  } finally {
+    c2.close();
+  }
+});
+
+test('label 进出生证、进 list，出生证报 tabId', async () => {
+  const c2 = await mkUnique('test-label');
+  try {
+    const r = await c2.call('tabs', { action: 'new', url: PAGE + '?labeled=1', label: '陈云飞-签证表' });
+    assert.match(r.text, /「陈云飞-签证表」/, '出生证要带 label');
+    assert.match(r.text, new RegExp(`tabId:${r.tabId}`), '出生证要报显式 tabId 的用法');
+    const list = await c2.call('tabs', { action: 'list' });
+    assert.match(list.text, new RegExp(`\\[${r.tabId}\\][^\\n]*「陈云飞-签证表」`), 'list 里要能按 label 找回这页');
+    await c2.call('tabs', { action: 'close', tabId: r.tabId });
+  } finally {
+    c2.close();
+  }
+});
+
+test('多线并行时的缺省槽调用被当面提醒，且有冷却', async () => {
+  const c2 = await mkUnique('test-multiline');
+  try {
+    const { tabId: t1 } = await c2.call('tabs', { action: 'new', url: PAGE + '?ml=1' });
+    const { tabId: t2 } = await c2.call('tabs', { action: 'new', url: PAGE + '?ml=2' });
+    const r = await c2.call('read_text', {});   // 户口簿已有两页，却走缺省槽
+    assert.match(r.text, /没带 tabId/, '要提醒显式 tabId');
+    assert.match(r.text, /tabs\(action:"list"\)/, '要给出找回归属的路');
+    const r2 = await c2.call('read_text', {});  // 冷却期内不该再唠叨
+    assert.doesNotMatch(r2.text, /没带 tabId/, '多线是持续状态，每条都唠叨会变背景噪音');
+    await c2.call('tabs', { action: 'close', tabId: t1 });
+    await c2.call('tabs', { action: 'close', tabId: t2 });
+  } finally {
+    c2.close();
+  }
+});

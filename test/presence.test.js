@@ -53,6 +53,23 @@ test('幕帘协议两侧都在', () => {
   assert.ok(background.includes("__hcMark: 'stealth'"), 'background 没有在截图前拉幕帘');
 });
 
+test('标签页 label 的协议两侧一致', () => {
+  // background 在 set 消息里发 tabLabel，mark.js 接住并渲染（胶囊空闲态 + 卡片「本页」）。
+  // 单方面改名不报错，label 只是永远不显示。
+  assert.ok(background.includes('tabLabel: await getLabel(tabId)'), 'background 的 set 消息里没带 tabLabel');
+  assert.ok(mark.includes('msg.tabLabel'), 'mark.js 没有读 tabLabel');
+});
+
+test('户口簿前缀和槽前缀不能互为前缀', () => {
+  // 'agentTabs:x'.startsWith('agentTab:') 为真——户口簿当初差点就叫这个名字。
+  // 互为前缀的话，所有按 SLOT_PREFIX 扫描 storage 的地方都会把户口簿键
+  // 混进槽名单，静默产生幽灵会话。
+  const slot = background.match(/SLOT_PREFIX = '([^']+)'/)?.[1];
+  const reg = background.match(/REG_PREFIX = '([^']+)'/)?.[1];
+  assert.ok(slot && reg, '找不到 SLOT_PREFIX / REG_PREFIX');
+  assert.ok(!reg.startsWith(slot) && !slot.startsWith(reg), `前缀互撞：${slot} vs ${reg}`);
+});
+
 test('标签组所需的权限已在 manifest 里', () => {
   // 少了它，chrome.tabGroups 是 undefined，syncGroup 静默早退，
   // 彩色组永远画不出来且无任何报错。
