@@ -8,6 +8,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { BridgeClient } from './lib/rpc.js';
+import { getLearnings, saveLearnings } from './lib/learnings.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { VERSION } from './lib/version.js';
@@ -386,11 +387,33 @@ const TOOLS = [
       required: ['expr'],
     },
   },
+  {
+    name: 'learnings',
+    description:
+      'Site playbooks: APIs, walls, pitfalls from past sessions. Call {domain} before first acting on a site ' +
+      '(no args = list sites). Learned something non-obvious? Save the full updated note via {domain, save}. ' +
+      'Hints, never rules.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        domain: { type: 'string', description: 'Domain or URL' },
+        save: { type: 'string', description: 'Full note markdown; replaces the local note, merge with get() first' },
+      },
+    },
+  },
 ];
 
 // 发给 agent 一次的策略，代替它靠试错自己摸索出这套顺序。
 // 每一条都来自真实撞墙，展开版见 docs/能力模型.md。
 const STRATEGY = `Controls the user's real Chrome, with their real logins. Tabs open in the BACKGROUND — never steal focus.
+
+LEARNINGS FIRST. Before your first action on a site, call \`learnings\` with its domain — past
+sessions may already have mapped its APIs, walls and pitfalls, turning an hour of trial-and-error
+into a few calls (a real bitable task went from 281 calls to under 10 this way). When you finish a
+task having learned something non-obvious — a new site, or reality contradicting a stored note —
+save the updated note back with {domain, save}. Notes are hints, never rules: sites change and
+environments differ, so when the page disagrees with a note, trust the page, then rewrite the note.
+An empty lookup is not a blocker — just proceed with the strategy below.
 
 A web page holds information in exactly three places, so play them in this order:
 
@@ -488,6 +511,12 @@ export async function startMcpServer({ client = 'unknown' } = {}) {
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const { name, arguments: args = {} } = req.params;
     try {
+      // learnings 是纯本地读写，不需要浏览器在线
+      if (name === 'learnings') {
+        const text = args.save != null ? saveLearnings(args.domain, args.save) : getLearnings(args.domain);
+        return { content: [{ type: 'text', text }] };
+      }
+
       if (!bridge.ws) await bridge.connect();
 
       // upload 的文件由这一侧读，agent 只传路径——base64 不该经过它的 context

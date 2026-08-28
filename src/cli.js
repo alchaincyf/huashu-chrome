@@ -34,6 +34,13 @@ switch (cmd) {
   //   huashu-chrome call snapshot
   //   huashu-chrome call tabs '{"action":"new","url":"https://example.com"}'
   case 'call': {
+    // learnings 是纯本地读写，不需要桥和浏览器
+    if (argv[1] === 'learnings') {
+      const { getLearnings, saveLearnings } = await import('./lib/learnings.js');
+      const p = argv[2] ? JSON.parse(argv[2]) : {};
+      console.log(p.save != null ? saveLearnings(p.domain, p.save) : getLearnings(p.domain));
+      break;
+    }
     const { BridgeClient } = await import('./lib/rpc.js');
     const c = new BridgeClient({ client: 'cli' });
     await c.connect();

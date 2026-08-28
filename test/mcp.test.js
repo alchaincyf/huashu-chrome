@@ -24,14 +24,20 @@ test('agent 能通过 stdio 挂上 MCP server 并拿到工具表', async () => {
   const { tools } = await client.listTools();
   const names = tools.map((t) => t.name).sort();
 
-  assert.deepEqual(names, ['act', 'ask', 'click', 'download', 'eval', 'fetch', 'fill', 'key', 'navigate', 'network', 'query', 'read_text', 'screenshot', 'scroll', 'select', 'snapshot', 'tabs', 'type', 'upload', 'wait']);
+  assert.deepEqual(names, ['act', 'ask', 'click', 'download', 'eval', 'fetch', 'fill', 'key', 'learnings', 'navigate', 'network', 'query', 'read_text', 'screenshot', 'scroll', 'select', 'snapshot', 'tabs', 'type', 'upload', 'wait']);
 
   // 工具描述是每轮都在付的 context 成本，别让它悄悄膨胀
+  // （16000 → 16500：v0.8 有意识地加了 learnings 工具，它自身已压到最短）
   const total = tools.reduce((n, t) => n + t.description.length + JSON.stringify(t.inputSchema).length, 0);
-  assert.ok(total < 16000, `工具表膨胀到 ${total} 字符了，压回 16000 以内`);
+  assert.ok(total < 16500, `工具表膨胀到 ${total} 字符了，压回 16500 以内`);
 
   // click 必须强制要 snapshotId，否则 ref 防呆整套失效
   assert.deepEqual(tools.find((t) => t.name === 'type').inputSchema.required, ['text']);
+
+  // learnings 是纯本地读写，桥不在线也必须能用——这正是它短路在 connect 之前的理由
+  const r = await client.callTool({ name: 'learnings', arguments: { domain: 'feishu.cn' } });
+  assert.match(r.content[0].text, /多维表格/);
+  assert.match(r.content[0].text, /经验仅供参考/);
 
   } finally {
     await client.close();
