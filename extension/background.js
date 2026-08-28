@@ -493,6 +493,12 @@ async function noteMarked(tabId, on) {
 //    但那种碰撞的后果只是多染一个组，比拆错用户的组轻得多。
 const groupKey = (sid) => `agentGroup:${sid}`;
 
+// 组名是品牌字不是彩色圆点 emoji（花叔定的：色块图标丑）。它同时是「这个组
+// 是我们建的」的指纹。旧版组名用过身份 emoji，验指纹时兼容一阵子——
+// 不兼容的话，升级前建的组会因为指纹对不上而永远摘不掉。
+const GROUP_TITLE = '花叔';
+const groupTitleOk = (title, sid) => title === GROUP_TITLE || title === identityOf(sid).emoji;
+
 async function syncGroup(tabId, owners) {
   try {
     if (!chrome.tabGroups) return;   // 旧 Chrome 没有这个 API
@@ -508,7 +514,7 @@ async function syncGroup(tabId, owners) {
       for (const [sid, gid] of ours) {
         if (gid !== tab.groupId) continue;
         const g = await chrome.tabGroups.get(gid).catch(() => null);
-        if (g && g.title === identityOf(sid).emoji) await chrome.tabs.ungroup(tabId);
+        if (g && groupTitleOk(g.title, sid)) await chrome.tabs.ungroup(tabId);
         return;
       }
       return;
@@ -526,13 +532,13 @@ async function syncGroup(tabId, owners) {
     let gid = null;
     if (stored !== undefined) {
       const g = await chrome.tabGroups.get(stored).catch(() => null);
-      if (g && g.windowId === tab.windowId && g.title === o.emoji) gid = stored;
+      if (g && g.windowId === tab.windowId && groupTitleOk(g.title, o.sid)) gid = stored;
     }
     if (gid !== null) {
       await chrome.tabs.group({ tabIds: tabId, groupId: gid });
     } else {
       gid = await chrome.tabs.group({ tabIds: tabId });
-      await chrome.tabGroups.update(gid, { title: o.emoji, color: o.group });
+      await chrome.tabGroups.update(gid, { title: GROUP_TITLE, color: o.group });
       await chrome.storage.local.set({ [groupKey(o.sid)]: gid });
     }
   } catch { /* 标签页正被拖动/已关、API 不可用——都不是命令的错 */ }

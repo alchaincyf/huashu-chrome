@@ -79,15 +79,15 @@ test('时间线和动作文案不带用户输入的内容', () => {
   assert.ok(!/act: `[^`]*describeStep/.test(loop), 'act 上屏文案不许用 describeStep');
 });
 
-test('标题前缀已退役，favicon 接棒且能还原', () => {
-  // 品牌化后 mark.js 完全不碰 document.title——那条「污染分享标题」的
-  // 副作用是刻意消掉的，谁把它加回来都该在这里被拦下。
-  // 盯代码不盯注释：写标题（document.title =）才是那个要消掉的副作用
-  assert.ok(!mark.includes('document.title ='), 'mark.js 不许再写 document.title');
-  // favicon 三件套：贴（data-hc-fav）、守（MutationObserver）、还（restoreFavicon）
-  assert.ok(mark.includes('data-hc-fav'), '找不到 favicon 标记属性');
-  assert.ok(mark.includes('function restoreFavicon'), '缺还原逻辑——会话结束页面图标必须放回去');
-  assert.ok(mark.includes('function guardFavicon'), '缺守护逻辑——SPA 换 favicon 会把头像顶掉');
+test('页面的门牌我们都不碰：标题和 favicon', () => {
+  // 花叔定的品牌边界：头像只出现在我们自己的标识位（驾驶舱/ask/扩展图标/
+  // 标签组），favicon 是网站的门牌、标题是网站的名字，谁把「替换它们」的
+  // 逻辑加回来都该在这里被拦下。盯代码不盯注释。
+  assert.ok(!mark.includes('document.title ='), 'mark.js 不许写 document.title');
+  assert.ok(!mark.includes('data-hc-fav') && !/rel~="icon"/.test(mark), 'mark.js 不许动 favicon link');
+  // 指针是指针：光标必须是 svg 箭头，不是头像 canvas
+  assert.ok(/<svg[^>]*viewBox="0 0 26 26"/.test(mark), '光标的箭头 svg 不见了');
+  assert.ok(!mark.includes("avatarCanvas(30, 'face')"), '光标不许用头像替代箭头');
 });
 
 test('头像资产已内嵌且不走会被 CSP 拦的路', () => {

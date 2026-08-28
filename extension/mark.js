@@ -5,14 +5,15 @@
 // 早就有了，但它只对 agent 说话，从来没对人说过。这个文件补上人的那一侧，
 // 按三个递进层次回答三个问题：
 //
-//   存在感 —— 它在哪：favicon 换成花叔头像+会话色环（标签组在 background 侧）+ 页内四边描边
-//   动作感 —— 它此刻在做什么：呼吸泛光的头像光标，滑到哪就是在动哪
+//   存在感 —— 它在哪：彩色标签组（background 侧）+ 页内四边描边
+//   动作感 —— 它此刻在做什么：呼吸泛光的箭头光标，滑到哪就是在动哪
 //   意图感 —— 它在想什么：右下角驾驶舱（正在做 / 准备做 / 时间线 / 需要确认）
 //
-// v0.9.1 起品牌化：标签栏的信号从「标题 emoji 前缀」换成「favicon 头像」。
-// 标题只能放文字，favicon 才放得下真图标，而且标签挤到最窄时 favicon 仍可见、
-// 标题前缀早被压没了；顺手消掉「污染 document.title」的已知副作用
-// （少数站点拿它做分享标题）。identity.js 里的 stripMarkPrefix 留作过渡清理。
+// 品牌的边界（花叔定的）：头像只出现在**我们自己的标识位**——驾驶舱、ask 浮条、
+// 扩展图标、标签组。favicon 是网站的门牌，不动；指针是指针，不拿头像替。
+// 标题 emoji 前缀已退役（丑），标签栏的存在感交给彩色标签组；
+// 顺手消掉「污染 document.title」的已知副作用（少数站点拿它做分享标题），
+// identity.js 里的 stripMarkPrefix 留作过渡清理。
 //
 // ask（人工介入浮条）也并进来了：页面上只该有一套我们的 UI，两个文件各画
 // 各的迟早叠在一起。合并还白捡一个修复——ask 从此也在 context 看门狗的
@@ -108,16 +109,12 @@
       0%, 100% { transform: scale(1); opacity: .38; }
       50%      { transform: scale(1.35); opacity: .68; }
     }
-    /* 头像徽：花叔分身。色环=会话色（CSS 边框，换主不用重画位图） */
-    .cursor .face {
-      position: absolute; left: -16px; top: -16px;
-      border-radius: 50%; border: 2.5px solid var(--c);
-      background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.3);
-    }
+    /* 箭头就是箭头（花叔定的）：白箭头+会话色描边，品牌感交给色环和泛光 */
+    .cursor svg { position: absolute; left: -2px; top: -2px; filter: drop-shadow(0 1px 2px rgba(0,0,0,.35)); }
     /* 休眠：呼吸是「正在干活」的承诺，空闲 30 秒就得收起来，不能骗人 */
     .cursor.doze { opacity: .45; }
     .cursor.doze .glow { animation: none; opacity: .15; transform: scale(.55); }
-    .cursor.doze .face { opacity: .6; }
+    .cursor.doze svg { opacity: .6; }
     .cursor .ring {
       position: absolute; left: -18px; top: -18px; width: 36px; height: 36px;
       border: 2.5px solid var(--c); border-radius: 50%;
@@ -132,10 +129,10 @@
       0%, 100% { transform: scale(.9); opacity: .5; }
       50%      { transform: scale(1.1); opacity: .8; }
     }
-    .cursor.pressed .face { transform: scale(.85); transition: transform .12s; }
-    /* bob 动画挂在 .face 上而不是 .cursor 上：.cursor 的 transform 是定位用的
+    .cursor.pressed svg { transform: scale(.85); transition: transform .12s; }
+    /* bob 动画挂在 svg 上而不是 .cursor 上：.cursor 的 transform 是定位用的
        内联样式，keyframe 一接管它，光标会瞬移回 (0,0) */
-    .cursor.bob .face { animation: hcBob .5s ease-in-out; }
+    .cursor.bob svg { animation: hcBob .5s ease-in-out; }
     @keyframes hcBob {
       0%, 100% { transform: none; }
       50%      { transform: translateY(26px); }
@@ -275,11 +272,13 @@
     // 骨架是静态模板，动态内容全走 textContent（铁律 2）
     wrap.innerHTML = '<div class="edge t"></div><div class="edge b"></div>'
       + '<div class="edge l"></div><div class="edge r"></div>'
-      + '<div class="cursor"><div class="glow"></div></div>'
+      + '<div class="cursor"><div class="glow"></div>'
+      + '<svg width="26" height="26" viewBox="0 0 26 26">'
+      + '<path d="M4 2 L4 21 L9 16.5 L12.5 24 L16 22.3 L12.5 15 L19 15 Z" fill="#fff" stroke="var(--c)" stroke-width="1.6" stroke-linejoin="round"/>'
+      + '</svg></div>'
       // own 装会话胶囊/卡片，ask 直接挂在 dock 下。分开是为了重画会话区时
       // 不动 ask 节点——它有输入框，挪一下用户打了一半的字就丢焦点
       + '<div class="dock"><div class="own"></div></div>';
-    wrap.querySelector('.cursor').appendChild(avatarCanvas(30, 'face'));
     root.append(style, wrap);
     document.documentElement.appendChild(host);
     if (stealthed) host.style.visibility = 'hidden';
@@ -297,7 +296,6 @@
     if (dozeTimer) { clearTimeout(dozeTimer); dozeTimer = null; }
     cursorShown = false;
     if (watchdog) { clearInterval(watchdog); watchdog = null; }
-    restoreFavicon();
   }
 
   // 扩展一旦被重载、更新或停用，这个页面里的脚本就永远收不到消息了
@@ -348,7 +346,6 @@
       e.style.background = paint;
       e.style.display = owners.length ? '' : 'none';
     });
-    void applyFavicon();   // 异步画标签栏头像，不挡本次渲染
 
     // 会话区每条 set 消息整个重画。频率是「每条命令一次」，量级远够不着
     // 性能问题，换来的是状态永远和消息一致——增量更新才是这类 UI 历史 bug
@@ -547,68 +544,6 @@
       moveCursor(p.x, p.y);
     }, 30000);
   };
-
-  // ---------- favicon ----------
-  //
-  // 标签栏的品牌位。把受控页的站点图标换成花叔头像+会话色环，会话一结束
-  // 原样放回。站点归属信息不丢：标题文字和标签组还在说明这是哪个站。
-  //
-  // SPA 会动态换 favicon（未读数角标、加载动画），所以要守护：盯 head 的
-  // childList 和 href/rel 变化，谁把我们的 link 顶掉就再贴回去。自己写 href
-  // 之前先比对，观察器回调是幂等的，稳态下一次写都不发生，不会自触发循环。
-
-  let favLinks = [];       // 被摘下的站点原 link，teardown 时放回
-  let favObserver = null;
-  const favCache = {};     // 会话色 -> dataURL，位图每种颜色只画一次
-
-  async function drawFav(color) {
-    const bmp = await avatarBitmap();
-    const c = document.createElement('canvas');
-    c.width = c.height = 64;
-    const g = c.getContext('2d');
-    g.drawImage(bmp, 0, 0, 64, 64);
-    g.lineWidth = 6;
-    g.strokeStyle = color;
-    g.beginPath(); g.arc(32, 32, 29, 0, Math.PI * 2); g.stroke();
-    return c.toDataURL('image/png');
-  }
-
-  async function applyFavicon() {
-    if (!owners.length) return restoreFavicon();
-    try {
-      const color = owners[0].color;   // 多主跟第一个，和标签组同一条规则
-      const url = favCache[color] || (favCache[color] = await drawFav(color));
-      for (const l of document.querySelectorAll('link[rel~="icon" i]')) {
-        if (l.dataset.hcFav) continue;
-        l.remove();
-        favLinks.push(l);
-      }
-      let mine = document.querySelector('link[data-hc-fav]');
-      if (!mine) {
-        mine = document.createElement('link');
-        mine.rel = 'icon';
-        mine.dataset.hcFav = '1';
-        (document.head || document.documentElement).appendChild(mine);
-      }
-      if (mine.href !== url) mine.href = url;
-      guardFavicon();
-    } catch { /* 位图构建失败——没有品牌图标而已，其余照常 */ }
-  }
-
-  function restoreFavicon() {
-    if (favObserver) { favObserver.disconnect(); favObserver = null; }
-    document.querySelector('link[data-hc-fav]')?.remove();
-    const head = document.head || document.documentElement;
-    for (const l of favLinks) { try { head.appendChild(l); } catch { /* 页面正在拆 */ } }
-    favLinks = [];
-    // 站点原本就没有 icon link 的话，浏览器会自己退回 /favicon.ico
-  }
-
-  function guardFavicon() {
-    if (favObserver || !document.head) return;
-    favObserver = new MutationObserver(() => { if (owners.length) void applyFavicon(); });
-    favObserver.observe(document.head, { childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'rel'] });
-  }
 
   // ---------- ask：人工介入 ----------
   //
