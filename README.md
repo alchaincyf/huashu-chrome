@@ -15,6 +15,8 @@ agent：（打开你已登录的 CRM，逐条填表提交）
 
 「npm 包？插件？CLI？还是 MCP？」——都是。它们是同一个产品的五个器官：npm 包是分发载体，CLI 是入口（install / mcp / doctor），MCP server 是 agent 的接口，本地桥是 127.0.0.1 上的常驻路由器，Chrome 扩展是手。上图就是一条命令穿过它们的全程。
 
+**图解版完整说明书 → [huasheng.ai/huashu-chrome](https://huasheng.ai/huashu-chrome/)**（一页仪器说明书讲清运行逻辑、可视化、并发隔离与安全设计）
+
 ## 为什么需要它
 
 浏览器控制这件事，现在的格局是：
