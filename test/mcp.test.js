@@ -21,6 +21,11 @@ test('agent 能通过 stdio 挂上 MCP server 并拿到工具表', async () => {
   // node --test 于是永远不退出——症状是「测试卡住」而不是「测试失败」，
   // 排查成本天差地别。
   try {
+  // STRATEGY 有硬预算：Claude Code 把 MCP instructions 截断在约 2000 字符
+  // （2026-08-29 实测），超出的部分对最大的一批用户等于没写
+  const instr = client.getInstructions();
+  assert.ok(instr && instr.length <= 2000, `STRATEGY ${instr?.length} 字符——超 2000 会被 Claude Code 截断`);
+
   const { tools } = await client.listTools();
   const names = tools.map((t) => t.name).sort();
 
@@ -31,8 +36,11 @@ test('agent 能通过 stdio 挂上 MCP server 并拿到工具表', async () => {
   //   16500 → 16800：v0.9 有意识地加了 status 工具（驾驶舱的「准备做」）；
   //   16800 → 17600：v1.0 act 升级剧本执行器（repeat/if/assert 进 schema——
   //   agent 只认 schema 不读源码，这部分省不得；描述已压缩过一轮）
+  //   17600 → 18500：Claude Code 把 MCP instructions 截断在约 2000 字符（实测），
+  //   STRATEGY 从 4087 压到 2000 内，被砍段落的关键细节迁入工具描述——描述实测
+  //   不截断，是唯一可靠通道。合计 context 反而净省约 1300 字符）
   const total = tools.reduce((n, t) => n + t.description.length + JSON.stringify(t.inputSchema).length, 0);
-  assert.ok(total < 17600, `工具表膨胀到 ${total} 字符了，压回 17600 以内`);
+  assert.ok(total < 18500, `工具表膨胀到 ${total} 字符了，压回 18500 以内`);
 
   // click 必须强制要 snapshotId，否则 ref 防呆整套失效
   assert.deepEqual(tools.find((t) => t.name === 'type').inputSchema.required, ['text']);

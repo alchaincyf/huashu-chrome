@@ -208,6 +208,9 @@ async function onMessage(msg) {
 // 模型回合（中位 5.8s），浏览器执行只占 2%（click 中位 0.2s）。批处理工具
 // 一直都在，但 agent 不用——在回执里当面提醒，比任何文档都有效。
 // 只提醒、不阻塞、不改变任何结果；agent 用了一次 act 就闭嘴重数。
+// 两档：第 3 条提 act；act 提示被无视、单发滚到第 8 条，升级提双脑（能起
+// subagent 的宿主才用得上，起不了的忽略——回执是唯一不被 instructions
+// 截断的通道，见 test/mcp.test.js 的 STRATEGY 预算注释）。之后归零重数。
 const BATCHABLE = new Set(['click', 'type', 'select', 'fill', 'key', 'navigate']);
 
 async function coachNote(sid, cmd) {
@@ -217,13 +220,18 @@ async function coachNote(sid, cmd) {
     if (cmd === 'act') { await chrome.storage.session.remove(key); return ''; }
     if (!BATCHABLE.has(cmd)) return '';   // 读页面不算——观察和行动的节奏不同
     const { [key]: n = 0 } = await chrome.storage.session.get(key);
-    if (n + 1 >= 3) {
-      await chrome.storage.session.remove(key);   // 归零重数，别每条都唠叨
+    await chrome.storage.session.set({ [key]: n + 1 });
+    if (n + 1 === 3) {
       return '\n\n💡 已连续 3 条单发操作。下一步若已可预判，用 act(steps:[…]) 一次跑完：'
         + '每合并一步省一个完整模型回合（实测回合中位约 6 秒，浏览器执行仅 0.2 秒）。'
         + '翻页循环用 repeat、可选弹窗用 if、状态检查用 assert。';
     }
-    await chrome.storage.session.set({ [key]: n + 1 });
+    if (n + 1 === 8) {
+      await chrome.storage.session.remove(key);   // 归零重数，别每条都唠叨
+      return '\n\n💡 已连续 8 条单发操作。若你的宿主能起 subagent：把这段循环交给一个'
+        + '快模型驱动手（带上任务目标和本站 learnings），你只审计划和结果——支付/敏感'
+        + '提交、ask 结果、计划变更必须回你裁决。起不了 subagent 就忽略这条。';
+    }
   } catch { /* 教练缺席不影响干活 */ }
   return '';
 }

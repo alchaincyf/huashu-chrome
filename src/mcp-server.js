@@ -41,7 +41,8 @@ const TOOLS = [
     name: 'snapshot',
     description:
       'Capture the current page as a compact list of interactive elements with refs, plus a text excerpt. ' +
-      'Call this before any click/type. Cheap — prefer it over screenshots.',
+      'Call this before any click/type. Cheap — prefer it over screenshots. Refs ending in @fN live in ' +
+      'an iframe: pass them through unchanged, they route themselves.',
     inputSchema: { type: 'object', properties: { tabId: TAB } },
   },
   {
@@ -83,7 +84,9 @@ const TOOLS = [
   },
   {
     name: 'select',
-    description: 'Choose an option in a <select> by ref. `value` matches the option value or its visible label.',
+    description: 'Choose an option in a <select> by ref. `value` matches the option value or its visible label. ' +
+      'Custom dropdowns (react-select, MUI, Element UI) are NOT <select>: click to expand, read the options ' +
+      'from the snapshot, click one.',
     inputSchema: {
       type: 'object',
       properties: { ref: REF, find: FIND, snapshotId: SNAP, tabId: TAB, value: { type: 'string' } },
@@ -202,7 +205,8 @@ const TOOLS = [
     description:
       'START HERE when you need DATA rather than an action. Lists the XHR/fetch calls the page made, then returns ' +
       'one response body via `body:"<url fragment>"`. Real field names, real numbers, paging as a parameter. ' +
-      'Add reload:true if nothing was captured yet.',
+      'Add reload:true if nothing was captured yet. Never guess an endpoint name from memory — list first, ' +
+      'pick by response size. One page\'s API messy? Another page on the same site often exposes the same data cleanly.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -219,7 +223,9 @@ const TOOLS = [
     name: 'fetch',
     description:
       'Call a URL from inside the page, carrying the user\'s cookies. Use after `network` reveals an API: ' +
-      'change paging params to pull a whole dataset at once. Same-origin rules apply.',
+      'change paging params to pull a whole dataset at once — but ALWAYS check the paging object in the ' +
+      'response, servers silently cap page size. 403/406 means the site signs its requests: do NOT forge ' +
+      'them; drive the site\'s own pagination UI and read via `network`. Same-origin rules apply.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -238,7 +244,8 @@ const TOOLS = [
     name: 'scroll',
     description:
       'Scroll to load more of a lazy list. Auto-detects inner scroll containers, stops early once height ' +
-      'stops growing. Prefer network/fetch for bulk data.',
+      'stops growing. Prefer network/fetch for bulk data. Background tabs render no frames, so an ' +
+      'IntersectionObserver-driven list may refuse to grow — the tool says so when it happens.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -356,7 +363,8 @@ const TOOLS = [
       'Hand control back to the user for one step, then continue. For captcha, QR login, SMS/OTP, or any '
       + 'confirmation that should be a human decision. Brings the tab forward, shows a panel, highlights your '
       + 'targets, sends a desktop notification, and blocks until the user acts. Use it instead of retrying '
-      + 'a step that needs a human.',
+      + 'a step that needs a human. A "cancelled" result means the user said no: stop that task, do not '
+      + 'look for another way to do the same thing.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -427,107 +435,42 @@ const TOOLS = [
   },
 ];
 
-// 发给 agent 一次的策略，代替它靠试错自己摸索出这套顺序。
-// 每一条都来自真实撞墙，展开版见 docs/能力模型.md。
+// 发给 agent 一次的策略。渐进式披露的第一层：只放「宪法」，细节住在工具描述里。
+// 【硬预算 2000 字符】Claude Code 会把 MCP instructions 截断在约 2000 字符
+// （2026-08-29 实测：2806 字符的旧版在第 2090 字符处被切成 [truncated]）——
+// 超预算的部分对最大的一批用户等于没写。细节的可靠通道是工具描述（实测不截断），
+// 展开版见 docs/能力模型.md，双脑见 docs/双脑.md。改这段先量长度，护栏在 test/mcp.test.js。
 const STRATEGY = `Controls the user's real Chrome, with their real logins. Tabs open in the BACKGROUND — never steal focus.
 
 LEARNINGS FIRST. Before your first action on a site, call \`learnings\` with its domain — past
-sessions may already have mapped its APIs, walls and pitfalls, turning an hour of trial-and-error
-into a few calls (a real bitable task went from 281 calls to under 10 this way). When you finish a
-task having learned something non-obvious — a new site, or reality contradicting a stored note —
-save the updated note back with {domain, save}. Notes are hints, never rules: sites change and
-environments differ, so when the page disagrees with a note, trust the page, then rewrite the note.
-An empty lookup is not a blocker — just proceed with the strategy below. A note may embed runnable
-\`\`\`act playbooks: fill the {{placeholders}} and run them as-is — a mapped flow costs one call
-instead of a rediscovery (assert/until inside will stop you if the site has changed; then do it
-live and save the corrected script back).
+sessions may have mapped its APIs, walls and pitfalls (a real task: 281 calls → under 10). A note
+may embed runnable \`\`\`act playbooks: fill the {{placeholders}}, run as-is. Notes are hints,
+never rules — when the page disagrees, trust the page, then save the corrected note back with
+{domain, save}. Empty lookup? Just proceed.
 
-BATCH BY DEFAULT. Measured on a real 219-command session: 98% of wall-clock went to the gaps
-BETWEEN commands (a model turn each, median ~6s) and 2% to executing them (~0.2s a click). The
-multiplier is \`act\`: whenever you can predict 2+ steps — on form wizards that is nearly always —
-send ONE act with the whole flow. Its repeat/if/assert blocks cover pagination, optional banners
-and mid-flow guards without coming back to you. Single click/type calls are for genuinely
-unpredictable moments, not for walking a form field by field.
+BATCH BY DEFAULT. Measured: 98% of wall-clock is the model turns BETWEEN commands (~6s), 2% is
+execution (0.2s a click). Whenever you can predict 2+ steps, send ONE \`act\`; its
+repeat/if/assert blocks cover pagination, optional banners and guards. Single calls are for
+genuinely unpredictable moments.
 
-OPTIONAL FAST LOOP — read this paragraph only if your harness can spawn subagents; if it cannot,
-ignore it entirely, everything works single-brain. Browser driving is many small decisions that
-rarely need your full depth: spawn a subagent on a fast cheap model, hand it the goal, the site's
-learnings and these tools, and review its structured summary at the end. It must escalate back to
-you (not decide alone) for: payment/sensitive submits, ask outcomes, and any change of plan.
+OPTIONAL FAST LOOP — only if your harness can spawn subagents; otherwise skip — single-brain works fully. Browser driving rarely needs your full depth: spawn a subagent on a fast cheap
+model with the goal and the site's learnings, review its summary. It must escalate back to you for payment/sensitive submits, ask outcomes, and any change
+of plan.
 
-A web page holds information in exactly three places, so play them in this order:
+A page holds information in exactly three places; play them in this order:
+1. NETWORK for DATA — \`network\` first: the API names its own fields; reading numbers off the
+   screen gets them wrong.
+2. DOM for ACTIONS and prose — \`snapshot\` then act/click/fill; \`read_text\` for articles,
+   \`query\` for scraping.
+3. PIXELS last resort — \`screenshot\` only when layout itself is the question.
 
-1. NETWORK — for DATA. Call \`network\` first whenever you need numbers, lists or tables.
-   Site APIs name their own fields, so you never guess which on-screen number is which metric.
-   (Real case: a page rendered five stats as "165.97万3496878363079912491"; the obvious reading of
-   that order was wrong on three of five fields. The API said view_count/comments_count/likes/... outright.)
-   To pull a whole dataset: try \`fetch\` with bigger paging params — but ALWAYS check the paging
-   object in the response, servers silently cap page size. If you get 403/406, the site signs its
-   requests: do NOT try to forge them. Click its own pagination UI and read the response via
-   \`network\`. If one section's API looks messy, look for another page in the same site that
-   exposes the same data more cleanly — switching entrances beats picking locks.
+EVERY write returns an effect line — read it; it separates "submitted" from "blocked". A
+no-reaction warning means it probably did NOT work; change target or approach, never repeat the
+same call.
 
-   Never guess an endpoint's name from memory — list requests first and pick by response size.
-   Paged endpoints differ only by a cursor, so walk \`index\` to collect every batch, not just the latest.
-
-2. DOM — for ACTIONS and for prose. \`snapshot\` then \`click\`/\`fill\`/\`key\`.
-
-   BATCH WHAT YOU ALREADY KNOW. The moment you can name the next 2+ actions, put them in one
-   \`act\` call. Logins, multi-step forms, wizards, "click the tab then filter then sort" —
-   all one call. Each step is effect-checked before the next runs, so a batch is not a blind
-   macro: it stops the instant something does not respond. You get one snapshot at the end
-   instead of one per action, which is where most of the token cost goes.
-
-   Targeting inside a batch: \`ref\` works until the page re-renders, then it is void — every
-   ref belongs to one snapshot. So use \`ref\` for steps that do not change page structure
-   (filling several fields), and \`find\` ({role, name} straight off the snapshot) for anything
-   after a step that navigates, opens a modal, or swaps the DOM. When in doubt use \`find\`;
-   it re-locates on the spot. If \`find\` matches several elements it stops and lists them
-   rather than guessing — pass \`nth\` or a longer name.
-
-   act stops on its own at submit/pay/delete controls. That is deliberate: do those with a
-   single \`click\` so you see their own effect evidence before moving on.
-   \`read_text\` for articles, \`query\` for scraping when a site has no usable API.
-
-   FORMS: use \`fill\` — one call, all fields, one snapshot back. Calling \`type\` per field
-   costs a full snapshot each time for information nobody reads.
-   Refs ending in \`@fN\` live in an iframe; pass them through unchanged, they route themselves.
-   A \`file\` role cannot be typed into — use \`upload\`.
-   \`key\` covers Escape / Tab / Enter / arrows and takes an array to send several at once.
-
-   Custom dropdowns (react-select, MUI, Element UI) are not \`select\` — click to expand,
-   read the options from the returned snapshot, then click one.
-
-   Lazy lists: \`scroll\` with an explicit \`times\` (default is a single nudge). Background tabs
-   render no frames, so an IntersectionObserver-driven list may refuse to grow no matter what;
-   the tool says so when it happens.
-
-   Files: images under 12MB via \`fetch binary\`+savePath; video and anything large via \`download\`.
-
-3. PIXELS — last resort. \`screenshot\` only when layout itself is the question; it needs the tab
-   in the foreground, which interrupts the user.
-
-EVERY write returns an effect line before the snapshot — read it, it is the cheapest signal you get:
-  · "效果：…" — the page reacted, and how. A change near the target, a new overlay, a new page
-    notice. This is what tells "submitted" apart from "blocked by validation".
-  · "⚠️ 操作已发出，但页面完全没有反应" — nothing moved anywhere. Do NOT repeat the same call;
-    the element was probably a wrapper, or the real control is elsewhere. Change target or approach.
-  · "⚠️ 没有可归因于这次操作的变化" — the page is busy on its own (a live feed), but nothing
-    near your target moved. Treat it as "probably did not work", not as success.
-Synthetic events are upgraded to real browser-level ones automatically when they produce no effect.
-The one exception is submit/pay/delete-style controls: auto-retry is held back there so nothing is
-done twice, and the tool says so — pass real:true yourself if you are sure.
-
-WHEN A STEP NEEDS A HUMAN — captcha, QR login, SMS code, a payment confirmation — call \`ask\`.
-Do not retry, do not try to solve it, do not give up on the whole task. \`ask\` brings the tab
-forward, shows the user what to do, highlights the element, and waits. A "cancelled" result means
-the user said no: stop that task, do not look for another way to do the same thing.
-
-Some things are outside any extension's reach: OS file dialogs, browser download bars, permission
-prompts, chrome:// pages. Recognise them, tell the user to click, and stop retrying.
-
-Tools report diagnostics on failure (which container was scrolled, what was occluding an element).
-Read them and change approach instead of retrying the same call.`;
+WHEN A STEP NEEDS A HUMAN — captcha, QR login, OTP, payment — call \`ask\`; do not retry, do not
+work around it. OS surfaces (file dialogs, permission prompts, chrome:// pages)
+are beyond any extension: tell the user, stop retrying.`;
 
 // 页面来的文本全部走这里。边界标记 + 降权说明，both 是给模型看的。
 function wrapUntrusted(body, meta = '') {
