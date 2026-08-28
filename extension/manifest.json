@@ -15,6 +15,7 @@
   },
   "permissions": [
     "tabs",
+    "tabGroups",
     "scripting",
     "storage",
     "alarms",

@@ -8,6 +8,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { BridgeClient } from './lib/rpc.js';
+import { flatCount } from '../extension/script.js';
 import { getLearnings, saveLearnings } from './lib/learnings.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -57,7 +58,7 @@ const TOOLS = [
   },
   {
     name: 'click',
-    description: 'Click an element by ref. Returns the resulting snapshot so you can see what changed.',
+    description: 'Click ONE element by ref. Know your next step already? Use `act` instead — each extra call costs a full model turn.',
     inputSchema: {
       type: 'object',
       // 没有 button 参数：右键弹出的是浏览器原生菜单，扩展够不着，
@@ -68,7 +69,7 @@ const TOOLS = [
   },
   {
     name: 'type',
-    description: 'Type text into an input/textarea/contenteditable by ref. Set submit:true to press Enter after.',
+    description: 'Type text into ONE input/textarea/contenteditable by ref. Set submit:true to press Enter after. More fields coming? Use `fill` or `act`.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -301,11 +302,13 @@ const TOOLS = [
   {
     name: 'act',
     description:
-      'Run several steps in ONE call — use it whenever you already know the next 2+ actions. '
-      + 'Each step is effect-checked before the next runs, and only ONE snapshot comes back at the end: '
-      + 'a 4-step flow costs 1 round trip and 1 snapshot instead of 4. Stops and reports as soon as a step '
-      + 'has no effect, fails, or is a submit/pay/delete control. Target with `ref` until the page '
-      + 're-renders, `find` after.',
+      'Your DEFAULT way to act — batch every step you can predict (on form wizards, nearly all). '
+      + 'Each step is effect-checked, ONE snapshot returns at the end; every call you merge saves a full '
+      + 'model turn. Stops early on no-effect / failure / submit-pay-delete controls. Blocks (one level): '
+      + '`repeat` {steps,until,max} for pagination/load-more; `if` {cond,then,else} for optional banners; '
+      + '`assert` {cond} stops unless the page matches. cond = {urlContains|selectorExists|textContains, '
+      + 'not} (OR-ed). Inside repeat use find/selector, never ref. Elsewhere: ref until the page '
+      + 're-renders, find after.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -315,7 +318,7 @@ const TOOLS = [
           items: {
             type: 'object',
             properties: {
-              do: { type: 'string', enum: ['click', 'type', 'select', 'fill', 'key', 'wait', 'scroll', 'navigate'] },
+              do: { type: 'string', enum: ['click', 'type', 'select', 'fill', 'key', 'wait', 'scroll', 'navigate', 'repeat', 'if', 'assert'] },
               ref: REF, find: FIND, selector: SEL,
               text: { type: 'string', description: 'for type' },
               value: { type: 'string', description: 'for select' },
@@ -326,6 +329,12 @@ const TOOLS = [
               timeout: { type: 'number' },
               times: { type: 'number', description: 'for scroll' },
               to: { type: 'string', enum: ['bottom', 'top'], description: 'for scroll' },
+              steps: { type: 'array', items: { type: 'object' }, description: 'for repeat: sub-steps, no ref/no nesting' },
+              until: { type: 'object', description: 'for repeat: stop condition, checked after each pass' },
+              max: { type: 'number', description: 'for repeat: pass cap, default 10 max 25' },
+              cond: { type: 'object', description: 'for if/assert' },
+              then: { type: 'array', items: { type: 'object' }, description: 'for if' },
+              else: { type: 'array', items: { type: 'object' }, description: 'for if, optional' },
             },
             required: ['do'],
           },
@@ -377,6 +386,20 @@ const TOOLS = [
     },
   },
   {
+    name: 'status',
+    description:
+      'One short sentence telling the user what you are about to do, shown on an on-page panel. '
+      + 'Call before a multi-step task and whenever the plan changes. Instant, never blocks. '
+      + 'Use the user\'s language.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: '≤80 chars, plain text' },
+      },
+      required: ['text'],
+    },
+  },
+  {
     name: 'eval',
     description:
       'Run a JS expression in the page. NOTE: fails on any site with a strict CSP (no unsafe-eval) — most large sites. ' +
@@ -390,9 +413,10 @@ const TOOLS = [
   {
     name: 'learnings',
     description:
-      'Site playbooks: APIs, walls, pitfalls from past sessions. Call {domain} before first acting on a site ' +
-      '(no args = list sites). Learned something non-obvious? Save the full updated note via {domain, save}. ' +
-      'Hints, never rules.',
+      'Site notes: APIs, walls, pitfalls from past sessions. Call {domain} before first acting on a site ' +
+      '(no args = list sites). Notes may embed runnable ```act scripts — fill {{placeholders}} and run them ' +
+      'instead of rediscovering. Learned something non-obvious or mapped a flow? Save the full note ' +
+      'back via {domain, save}. Hints, never rules.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -413,7 +437,23 @@ into a few calls (a real bitable task went from 281 calls to under 10 this way).
 task having learned something non-obvious — a new site, or reality contradicting a stored note —
 save the updated note back with {domain, save}. Notes are hints, never rules: sites change and
 environments differ, so when the page disagrees with a note, trust the page, then rewrite the note.
-An empty lookup is not a blocker — just proceed with the strategy below.
+An empty lookup is not a blocker — just proceed with the strategy below. A note may embed runnable
+\`\`\`act playbooks: fill the {{placeholders}} and run them as-is — a mapped flow costs one call
+instead of a rediscovery (assert/until inside will stop you if the site has changed; then do it
+live and save the corrected script back).
+
+BATCH BY DEFAULT. Measured on a real 219-command session: 98% of wall-clock went to the gaps
+BETWEEN commands (a model turn each, median ~6s) and 2% to executing them (~0.2s a click). The
+multiplier is \`act\`: whenever you can predict 2+ steps — on form wizards that is nearly always —
+send ONE act with the whole flow. Its repeat/if/assert blocks cover pagination, optional banners
+and mid-flow guards without coming back to you. Single click/type calls are for genuinely
+unpredictable moments, not for walking a form field by field.
+
+OPTIONAL FAST LOOP — read this paragraph only if your harness can spawn subagents; if it cannot,
+ignore it entirely, everything works single-brain. Browser driving is many small decisions that
+rarely need your full depth: spawn a subagent on a fast cheap model, hand it the goal, the site's
+learnings and these tools, and review its structured summary at the end. It must escalate back to
+you (not decide alone) for: payment/sensitive submits, ask outcomes, and any change of plan.
 
 A web page holds information in exactly three places, so play them in this order:
 
@@ -542,8 +582,11 @@ export async function startMcpServer({ client = 'unknown' } = {}) {
         if (n === 'ask') return ask;
         if (n === 'wait') return cap((Number(a.timeout) || 10000) + 15000);
         // act 一步步跑，每步都可能等 settle 和 L2 重试；实测最长的一次
-        // 已经跑到 30.8 秒，离 32 秒的墙只剩一秒多
-        if (n === 'act') return cap((Array.isArray(a.steps) ? a.steps.length : 1) * 8000 + 20000);
+        // 已经跑到 30.8 秒，离 32 秒的墙只剩一秒多。
+        // flatCount 把 repeat/if 展开成实际会执行的原子步数——这个数必须和
+        // 扩展侧的执行预算同源（extension/script.js），否则预算会判死一个
+        // 还在老实跑的剧本，「已经在做」被报成「没做，去重试」。
+        if (n === 'act') return cap(Math.min(flatCount(a.steps) || 1, 60) * 8000 + 20000);
         return undefined;   // 其余维持默认，它们的真实耗时离墙还很远
       };
 

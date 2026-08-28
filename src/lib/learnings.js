@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HOME } from './paths.js';
 import { VERSION } from './version.js';
+import { validateScript } from '../../extension/script.js';
 
 const SEED_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'docs', '经验');
 // 环境变量仅供测试隔离用
@@ -61,6 +62,42 @@ const HINT =
   '[经验仅供参考，不是规则。它记录的是过去某个时点的实况——站点会改版、环境各不相同。' +
   '与页面实际不符时，以你观察到的实际为准，并在收工时用 learnings(domain, save) 改写。]';
 
+// ---------- 可执行剧本 ----------
+//
+// 经验笔记里的 ```act 代码块 = 剧本：内容就是 act 工具的 steps 数组（JSON），
+// 摸清过的流程（登录、导出、翻页收集）下次一条 act 跑完，不用重新试错。
+// 刻意不做成新工具、不进协议：剧本没有任何特权，执行、敏感闸、效果核对
+// 全走 act 既有的那一套——它只是提前写好的 steps。
+// 占位符约定 {{参数名}}，只出现在字符串值里，agent 运行前填实值。
+//
+// 这里只做「形状体检」：存进去的剧本至少得是能跑的形状（合法 JSON、
+// 过 validateScript）。体检不合格也照存——经验不阻塞是硬约束——但要当面
+// 说清，否则坏剧本会安静地躺到下个会话才炸。
+const PLAYBOOK_RE = /```act\s*\n([\s\S]*?)```/g;
+
+export function lintPlaybooks(md) {
+  const warns = [];
+  let m, i = 0;
+  PLAYBOOK_RE.lastIndex = 0;
+  while ((m = PLAYBOOK_RE.exec(String(md || ''))) !== null) {
+    i++;
+    let steps;
+    try {
+      // 占位符在体检前换成假值——{{关键词}} 本身不是错误
+      steps = JSON.parse(m[1].replace(/\{\{[^{}]*\}\}/g, 'X'));
+    } catch (e) {
+      warns.push(`剧本块 ${i}：不是合法 JSON（${String(e.message).slice(0, 60)}）`);
+      continue;
+    }
+    if (!Array.isArray(steps) || !steps.length) { warns.push(`剧本块 ${i}：应是 act 的 steps 数组`); continue; }
+    const bad = validateScript(steps);
+    if (bad) warns.push(`剧本块 ${i}：${bad}`);
+  }
+  return warns;
+}
+
+const countPlaybooks = (md) => (String(md || '').match(PLAYBOOK_RE) || []).length;
+
 export function getLearnings(domain) {
   if (!domain) {
     const all = [...new Set([...mdFiles(SEED_DIR), ...mdFiles(LEARNINGS_DIR)])].sort();
@@ -82,6 +119,13 @@ export function getLearnings(domain) {
   const parts = [HINT];
   if (seed) parts.push(`## 出厂经验（huashu-chrome v${VERSION}）\n\n${seed}`);
   if (local) parts.push(`## 本机经验\n\n${local}`);
+  // 有剧本才多说一句——没有就零噪音（经验不阻塞，也不添乱）
+  const n = countPlaybooks(parts.join('\n'));
+  if (n) {
+    parts.push(`[上面有 ${n} 份可执行剧本（\`\`\`act 块）：内容就是 act 的 steps，`
+      + `把 {{占位符}} 填成实值后可直接运行——一条 act 顶过去几十轮试错。`
+      + `剧本可能过时：assert/until 会在页面不符时停下，停了就按现场重走，收工时把新流程写回来。]`);
+  }
   return parts.join('\n\n');
 }
 
@@ -92,5 +136,9 @@ export function saveLearnings(domain, content) {
   if (!body) return '内容为空，没存。要清掉本机经验请直接说明再人工删。';
   fs.mkdirSync(LEARNINGS_DIR, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(LEARNINGS_DIR, key + '.md'), body + '\n');
-  return `已存 → learnings/${key}.md（${body.length} 字）。本机经验整文件覆盖：下次保存前先 get 合并旧内容。`;
+  const warns = lintPlaybooks(body);
+  return `已存 → learnings/${key}.md（${body.length} 字）。本机经验整文件覆盖：下次保存前先 get 合并旧内容。`
+    + (warns.length
+      ? `\n⚠️ 剧本体检没过：${warns.join('；')}。照存了（经验不阻塞），但这样的剧本下个会话直接跑会失败——修好再 save 一次。`
+      : '');
 }

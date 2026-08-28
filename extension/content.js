@@ -754,6 +754,13 @@
     const x = r.left + r.width / 2;
     const y = r.top + r.height / 2;
 
+    // 虚拟光标（mark.js，和本文件同一个 isolated world）：坐标就地递过去，
+    // 零消息往返。L1 和 L2 都走 locate，所以两条路的光标一致。
+    // **必须在下面的 elementFromPoint 之前调**——坐标落在驾驶舱底下时它要
+    // 先让路（pointer-events:none 同步生效），否则遮挡检测会把我们自己的
+    // 面板当成遮挡物，L2 的真实点击更会直接点进面板里。
+    window.__hcCursor?.(x, y, ({ click: 'click', type: 'type', select: 'type', key: 'key' })[p.forCmd] || 'aim');
+
     // 遮挡检测和 doClick 保持同一套判断——L2 打的是坐标，遮挡时点中的是遮挡物，
     // 比 L1 更危险，更不能放过
     const top = document.elementFromPoint(x, y);
@@ -1155,6 +1162,10 @@
         // 前一个字段的输入可能触发重渲染，把后面的元素换掉。ref 指向的旧节点
         // 还在 refMap 里，但已经脱离文档——resolve 会报出来，这里如实归到失败里。
         el.scrollIntoView({ block: 'center', behavior: 'instant' });
+        // 填表是 locate 覆盖不到的多目标路径：光标逐个字段滑过去，
+        // 用户看到的正是「它在一格一格填」
+        const fr = el.getBoundingClientRect();
+        window.__hcCursor?.(fr.left + fr.width / 2, fr.top + fr.height / 2, 'type');
 
         if (f.check !== undefined) {
           const want = !!f.check;
@@ -1297,6 +1308,9 @@
     const specs = Array.isArray(p.key) ? p.key : [p.key];
     if (!specs.length || !specs[0]) throw fail('INTERNAL', 'key 参数不能为空');
 
+    // 指名目标的 key 在 locate 那一步已经给过光标坐标了；无目标的（Esc、
+    // 全局快捷键）光标原地按一下就行
+    if (!p.ref && !p.selector && !p.find) window.__hcCursor?.(null, null, 'key');
     const target0 = (p.ref || p.selector) ? resolve(p) : null;
     target0?.focus?.();
 
@@ -1513,6 +1527,7 @@
     `${e.tagName.toLowerCase()}${e.className ? '.' + String(e.className).trim().split(/\s+/)[0] : ''}(${e.scrollHeight})`;
 
   async function doScroll(p) {
+    window.__hcCursor?.(null, null, 'scroll');   // 光标原地顺势一沉，示意在滚
     const times = Math.min(p.times || 1, 50);
     if (p.ref) {
       resolve(p).scrollIntoView({ block: 'center' });

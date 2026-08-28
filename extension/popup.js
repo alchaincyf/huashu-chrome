@@ -43,6 +43,64 @@ function renderL2(on) {
 
 chrome.storage.local.get('l2Disabled', ({ l2Disabled }) => renderL2(!l2Disabled));
 
+// ---------- 控制标记 ----------
+//
+// 这是个安全信号，默认开：agent 在后台操控一个带着用户全部登录态的页面，
+// 而用户看不见——这件事本身就该有痕迹。给开关是因为有人会在录屏、演示，
+// 那时页面上多一圈彩色边框确实碍事。
+
+const markdot = document.getElementById('markdot');
+const markstate = document.getElementById('markstate');
+const markbtn = document.getElementById('markbtn');
+const sess = document.getElementById('sess');
+
+function renderMark(on) {
+  markdot.classList.toggle('on', on);
+  markstate.textContent = on ? '控制标记已开启' : '控制标记（已关闭）';
+  markbtn.textContent = on ? '关闭' : '开启';
+  markbtn.classList.toggle('on', on);
+}
+
+// 「现在有谁在控哪一页」。这一栏比开关本身有用：它是用户唯一能一眼看全
+// 所有会话的地方——页面上的标记只说得清用户正在看的那一页。
+function renderSessions(rows) {
+  sess.textContent = '';
+  for (const r of rows) {
+    const line = document.createElement('div');
+    line.className = 's';
+    const sw = document.createElement('span');
+    sw.className = 'swatch';
+    sw.style.background = r.color;
+    const who = document.createElement('span');
+    who.className = 'who';
+    who.textContent = r.label;
+    const page = document.createElement('span');
+    page.className = 'page';
+    // 全部 textContent：label 来自 agent 自己声明的 client 名，title 来自网页，
+    // 两个都是外部输入
+    page.textContent = r.title ? `· ${r.title}` : '· 还没认领标签页';
+    line.append(sw, who, page);
+    sess.appendChild(line);
+  }
+}
+
+function refreshMark() {
+  chrome.runtime.sendMessage({ __hcPopup: 'sessions' }, (r) => {
+    renderMark(r?.enabled !== false);
+    renderSessions(r?.sessions || []);
+  });
+}
+refreshMark();
+
+markbtn.onclick = () => {
+  chrome.storage.local.get('markDisabled', ({ markDisabled }) => {
+    chrome.storage.local.set({ markDisabled: !markDisabled }, () => {
+      // 先落盘再让 background 去贴/摘——它读的就是这个开关
+      chrome.runtime.sendMessage({ __hcPopup: 'markSync' }, () => refreshMark());
+    });
+  });
+};
+
 l2btn.onclick = () => {
   chrome.storage.local.get('l2Disabled', ({ l2Disabled }) => {
     const turningOff = !l2Disabled;

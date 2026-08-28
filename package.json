@@ -19,7 +19,7 @@
     "mcp": "node src/cli.js mcp",
     "bridge": "node src/cli.js bridge --foreground",
     "doctor": "node src/cli.js doctor",
-    "test": "node --test test/protocol.test.js test/mcp.test.js test/redact.test.js test/audit-redact.test.js test/learnings.test.js test/risk.test.js",
+    "test": "node --test test/protocol.test.js test/mcp.test.js test/redact.test.js test/audit-redact.test.js test/learnings.test.js test/risk.test.js test/identity.test.js test/presence.test.js test/act-script.test.js",
     "test:live": "node --test test/scenarios.test.js"
   },
   "dependencies": {

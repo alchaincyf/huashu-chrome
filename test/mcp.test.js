@@ -24,15 +24,22 @@ test('agent 能通过 stdio 挂上 MCP server 并拿到工具表', async () => {
   const { tools } = await client.listTools();
   const names = tools.map((t) => t.name).sort();
 
-  assert.deepEqual(names, ['act', 'ask', 'click', 'download', 'eval', 'fetch', 'fill', 'key', 'learnings', 'navigate', 'network', 'query', 'read_text', 'screenshot', 'scroll', 'select', 'snapshot', 'tabs', 'type', 'upload', 'wait']);
+  assert.deepEqual(names, ['act', 'ask', 'click', 'download', 'eval', 'fetch', 'fill', 'key', 'learnings', 'navigate', 'network', 'query', 'read_text', 'screenshot', 'scroll', 'select', 'snapshot', 'status', 'tabs', 'type', 'upload', 'wait']);
 
   // 工具描述是每轮都在付的 context 成本，别让它悄悄膨胀
-  // （16000 → 16500：v0.8 有意识地加了 learnings 工具，它自身已压到最短）
+  // （16000 → 16500：v0.8 有意识地加了 learnings 工具，它自身已压到最短；
+  //   16500 → 16800：v0.9 有意识地加了 status 工具（驾驶舱的「准备做」）；
+  //   16800 → 17600：v1.0 act 升级剧本执行器（repeat/if/assert 进 schema——
+  //   agent 只认 schema 不读源码，这部分省不得；描述已压缩过一轮）
   const total = tools.reduce((n, t) => n + t.description.length + JSON.stringify(t.inputSchema).length, 0);
-  assert.ok(total < 16500, `工具表膨胀到 ${total} 字符了，压回 16500 以内`);
+  assert.ok(total < 17600, `工具表膨胀到 ${total} 字符了，压回 17600 以内`);
 
   // click 必须强制要 snapshotId，否则 ref 防呆整套失效
   assert.deepEqual(tools.find((t) => t.name === 'type').inputSchema.required, ['text']);
+
+  // act 的剧本原语要在 schema 里可见——agent 只认 schema，不读源码
+  const actDo = tools.find((t) => t.name === 'act').inputSchema.properties.steps.items.properties.do.enum;
+  for (const d of ['repeat', 'if', 'assert']) assert.ok(actDo.includes(d), `act 的 do 枚举缺 ${d}`);
 
   // learnings 是纯本地读写，桥不在线也必须能用——这正是它短路在 connect 之前的理由
   const r = await client.callTool({ name: 'learnings', arguments: { domain: 'feishu.cn' } });

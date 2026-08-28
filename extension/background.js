@@ -11,6 +11,8 @@
 import * as cdp from './cdp.js';
 import { matchChallenge, hostOf, hostMatches, L2_ORIGINS_SEED } from './risk.js';
 import { CRED_URL, redactCreds } from './redact.js';
+import { identityOf, stripMarkPrefix } from './identity.js';
+import { validateScript, condText, repeatMax, EXEC_BUDGET } from './script.js';
 
 // ---------- 连接层 ----------
 //
@@ -152,19 +154,40 @@ const emit = (event, extra = {}) => toBridge({ type: 'event', event, ...extra })
 // ---------- 命令分发 ----------
 
 // 这些命令自己决定用不用受控 tab——tabs 的 new/select/close 各有各的槽语义，
-// download 整条链不碰 tab，reload 是扩展级动作
-const NO_SLOT_CMDS = new Set(['tabs', 'download', 'reload']);
+// download 整条链不碰 tab，reload 是扩展级动作，status 是会话级声明
+// （它常在第一个 tab 存在之前就被调，走槽解析会平白抛 NO_TAB）
+const NO_SLOT_CMDS = new Set(['tabs', 'download', 'reload', 'status']);
 
 async function onMessage(msg) {
+  if (msg.type === 'event') return onBridgeEvent(msg);
   if (msg.type !== 'cmd') return;
   try {
     const handler = HANDLERS[msg.cmd];
     if (!handler) throw err('INTERNAL', `未知命令 ${msg.cmd}`);
+    // await 而不是 void：标记那一侧只信 storage 里的名单（见 syncMark 上的说明），
+    // 这里必须保证「本命令携带的名单已落盘」先于命令完成后的刷新，否则新会话的
+    // 第一条命令刷标记时会读到没有自己的旧名单——正是当年那个落盘竞态
+    await noteSession(msg.sid, msg.client, msg.live);
     // 缺省 tabId 在这里统一解析成具体 tabId（会话级槽），handler 拿到的永远是实值。
     // ctx 只在本函数内现场传——SW 里两条命令的 await 会交错，绝不能用模块级变量存「当前消息」
     const ctx = { sid: msg.sid, live: msg.live, adopted: false };
     const tabId = NO_SLOT_CMDS.has(msg.cmd) ? msg.tabId : await resolveTab(msg.tabId, msg.sid, ctx);
-    const data = await handler(msg.params || {}, tabId, ctx);
+    let data = await handler(msg.params || {}, tabId, ctx);
+    // 命令跑完才刷标记，不是跑之前：导航会把页面里的 mark.js 冲掉，
+    // 提前贴的那一次多半活不到用户看见。act 顺路带上，一次消息两件事。
+    // 这里**不带 msg.live**：它是命令出发时的快照。命令在途时用户关掉终端，
+    // 桥的 sessions 事件已经摘了标记，快照却还写着「他活着」——用它刷新会把
+    // 死会话的标记贴回去，而且再没有任何事件来摘（sessions 只在名单变化时推，
+    // 变化已经发生过了）。storage 里的名单永远是最新写入，信它。
+    const marked = tabId || data?.tabId;
+    if (marked) void syncMark(marked, { sid: msg.sid, act: actText(msg.cmd, msg.params) });
+    // 教练搭在回执尾部。await 的代价是一次 storage 读写（约 1ms），
+    // 相比它要省下的 6 秒模型回合可以忽略
+    const tip = await coachNote(msg.sid, msg.cmd);
+    if (tip) {
+      if (typeof data === 'string') data += tip;
+      else if (data && typeof data.text === 'string') data.text += tip;
+    }
     if (ctx.adopted) {
       // 本会话还没定过自己的受控 tab，继承的是全局槽。多 agent 并发时这是最危险的时刻：
       // agent 不知道自己在哪个页面上。只提示一次（SW 重启后可能再来一次，无伤大雅）。
@@ -177,6 +200,44 @@ async function onMessage(msg) {
   } catch (e) {
     reply(msg.id, false, { code: e.code || 'INTERNAL', message: e.message || String(e) }, msg.__k);
   }
+}
+
+// ---------- 教练 ----------
+//
+// 审计实测：一个 219 条命令的真实会话 0 次用 act，98% 的墙钟耗在命令之间的
+// 模型回合（中位 5.8s），浏览器执行只占 2%（click 中位 0.2s）。批处理工具
+// 一直都在，但 agent 不用——在回执里当面提醒，比任何文档都有效。
+// 只提醒、不阻塞、不改变任何结果；agent 用了一次 act 就闭嘴重数。
+const BATCHABLE = new Set(['click', 'type', 'select', 'fill', 'key', 'navigate']);
+
+async function coachNote(sid, cmd) {
+  if (!sid) return '';
+  const key = `coach:${sid}`;
+  try {
+    if (cmd === 'act') { await chrome.storage.session.remove(key); return ''; }
+    if (!BATCHABLE.has(cmd)) return '';   // 读页面不算——观察和行动的节奏不同
+    const { [key]: n = 0 } = await chrome.storage.session.get(key);
+    if (n + 1 >= 3) {
+      await chrome.storage.session.remove(key);   // 归零重数，别每条都唠叨
+      return '\n\n💡 已连续 3 条单发操作。下一步若已可预判，用 act(steps:[…]) 一次跑完：'
+        + '每合并一步省一个完整模型回合（实测回合中位约 6 秒，浏览器执行仅 0.2 秒）。'
+        + '翻页循环用 repeat、可选弹窗用 if、状态检查用 assert。';
+    }
+    await chrome.storage.session.set({ [key]: n + 1 });
+  } catch { /* 教练缺席不影响干活 */ }
+  return '';
+}
+
+// 桥主动推过来的事件。目前只有一件：会话名单变了。
+//
+// 它必须由桥来推，扩展自己推不出来——`live` 平时是搭着每条命令过来的，
+// 而一个会话「结束」的特征恰恰是**再也没有命令过来**。没有这条推送，
+// 用户关掉终端窗口之后，那个页面上的标记会一直挂着，直到下一个会话碰巧
+// 操作同一个标签页。
+function onBridgeEvent(msg) {
+  if (msg.event !== 'sessions') return;
+  // 先落盘再重算：resyncMarks 里的 ownersOfTab 读的就是 storage 名单
+  return noteSession(null, null, msg.live).then(() => resyncMarks());
 }
 
 const err = (code, message) => Object.assign(new Error(message), { code });
@@ -199,7 +260,8 @@ const err = (code, message) => Object.assign(new Error(message), { code });
 // 于是每次桥换代都会让所有会话的槽同时失效、集体去继承同一个全局 tab。
 // 实测一晚上桥重启 38 次，症状就是「受控标签页莫名其妙换成了别人的页面」。
 
-const agentTabKey = (sid) => `agentTab:${sid}`;
+const SLOT_PREFIX = 'agentTab:';
+const agentTabKey = (sid) => `${SLOT_PREFIX}${sid}`;
 const SLOT_CAP = 32;   // 死会话的槽不主动删（它可能只是断线重连），按 LRU 收口
 
 // 在线会话名单跟着每条命令一起来（见 bridge.js 的 dispatch），不落盘。
@@ -220,7 +282,17 @@ async function liveOwnersOf(tabId, exceptSid, live) {
 // 记下这个会话的受控 tab，并顺手把最老的槽挤掉
 async function claimTab(sid, tabId, ctx) {
   if (!sid) return;
-  await chrome.storage.local.set({ [agentTabKey(sid)]: tabId, [`slotTouch:${sid}`]: Date.now() });
+  const key = agentTabKey(sid);
+  const { [key]: prev } = await chrome.storage.local.get(key);
+  await chrome.storage.local.set({ [key]: tabId, [`slotTouch:${sid}`]: Date.now() });
+  // 认领的同时就在页面上留痕。不 await：贴标记是给人看的辅助信息，
+  // 不该挤进命令的关键路径，慢一拍也没人受损。
+  void syncMark(tabId);
+  // 换页了就把旧页上的标记摘掉。少了这一句，那个标记会变成**孤儿**：
+  // 槽已经指向新页，而「哪些页面上有标记」是靠槽反推的，于是再没有任何
+  // 代码路径会找到它——用户看着一个早就没人管的页面，上面挂着别人的名字。
+  // 实测就是这么发现的：一个会话换了两次受控页，前两个页面的标记永久留着。
+  if (prev && prev !== tabId) void syncMark(prev);
   const all = await chrome.storage.local.get(null);
   const slots = Object.keys(all).filter((k) => k.startsWith('agentTab:')).map((k) => k.slice('agentTab:'.length));
   if (slots.length <= SLOT_CAP) return;
@@ -229,7 +301,7 @@ async function claimTab(sid, tabId, ctx) {
     .filter((s) => !live.has(s))
     .sort((a, b) => (all[`slotTouch:${a}`] || 0) - (all[`slotTouch:${b}`] || 0))
     .slice(0, slots.length - SLOT_CAP);
-  if (victims.length) await chrome.storage.local.remove(victims.flatMap((s) => [agentTabKey(s), `slotTouch:${s}`]));
+  if (victims.length) await chrome.storage.local.remove(victims.flatMap((s) => [agentTabKey(s), `slotTouch:${s}`, `agentGroup:${s}`]));
 }
 
 async function getActiveTabId(sid, ctx) {
@@ -279,6 +351,239 @@ async function resolveTab(tabId, sid, ctx) {
 async function conflictNote(tabId, sid, ctx) {
   const owners = await liveOwnersOf(tabId, sid, liveOf(ctx));
   return owners.length ? '⚠️ 这个标签页正被另一个还在线的会话操控，你们会在同一个页面上互相踩。\n' : '';
+}
+
+// ---------- 控制标记 ----------
+//
+// 上面那一整套隔离（谁占着哪个 tab、谁不许抢）只对 agent 说话，从来没对人说过。
+// 用户面前是一片安静的浏览器：页面上没痕迹、标签栏没痕迹，他随手一点就和
+// 某个正在后台干活的会话撞上了。这一节把那份已经算清楚的归属关系画到屏幕上。
+//
+// 外观是 sid 的纯函数（identity.js），所以它继承了 sid 的稳定性：桥重启、
+// 会话断线重连，颜色和 emoji 都不变——用户不会看见一个页面的标记莫名换了色。
+//
+// 全节唯一的硬规矩：**绝不能让贴标记这件事把命令本身搞失败。**
+// 它是辅助信息，页面注不进去、标签页已经关掉、用户把开关关了，
+// 都只意味着「这次没画上」，不意味着这条命令出了问题。
+
+const LIVE_SIDS = 'liveSids';                     // storage.session：此刻还连着的会话
+const MARKED_TABS = 'markedTabs';                 // storage.session：此刻贴着标记的页
+const sidClientKey = (sid) => `sidClient:${sid}`; // storage.session：sid → client 名
+
+const markEnabled = async () => !(await chrome.storage.local.get('markDisabled')).markDisabled;
+
+// 每条命令都带着 sid / client / live 过来，顺手记下来。
+// popup 要显示「谁在控哪一页」，而它自己够不着桥。
+async function noteSession(sid, client, live) {
+  const patch = {};
+  if (sid && client) patch[sidClientKey(sid)] = client;
+  if (Array.isArray(live)) patch[LIVE_SIDS] = live;
+  if (Object.keys(patch).length) await chrome.storage.session.set(patch).catch(() => {});
+}
+
+const liveList = async () => (await chrome.storage.session.get(LIVE_SIDS))[LIVE_SIDS] || [];
+
+// 这个标签页此刻的主人们。只算**还连着**的会话——判据和 liveOwnersOf 一致：
+// 已结束的会话留下的槽不算数，否则关掉一个终端窗口之后，它的标记会永远挂在那儿。
+//
+// 名单**只读 storage**，不收调用方传的快照。onMessage 在跑 handler 之前就把
+// 本命令携带的名单 await 落盘了，所以 storage 永远不比任何快照旧；反过来，
+// 快照可能比 storage 旧——命令在途时用户关终端，sessions 事件已把新名单写进
+// storage 并摘了标记，命令完成后的刷新若信快照，会把死会话的标记贴回去，
+// 而且再没有任何事件来摘。质控实测抓到的就是这条路。
+async function ownersOfTab(tabId) {
+  const lives = new Set(await liveList());
+  if (!lives.size) return [];
+  const all = await chrome.storage.local.get(null);
+  const sids = Object.entries(all)
+    .filter(([k, v]) => k.startsWith(SLOT_PREFIX) && v === tabId)
+    .map(([k]) => k.slice(SLOT_PREFIX.length))
+    .filter((sid) => lives.has(sid));
+  if (!sids.length) return [];
+  const clients = await chrome.storage.session.get(sids.map(sidClientKey));
+  return sids.map((sid) => identityOf(sid, clients[sidClientKey(sid)]));
+}
+
+// 判据必须是「收到了 mark.js 的回执」，不能是「sendMessage 没报错」：
+// 页面里通常已经有 content.js，它对 __hcMark 消息不作应答——这种情况下
+// sendMessage 是 resolve(undefined) 而不是 reject 的。按「没报错就算送到」
+// 来判，标记会在每一个已注入 content.js 的页面上永远贴不上，且一声不响。
+const postMark = (tabId, msg) => chrome.tabs.sendMessage(tabId, msg).then((r) => !!r?.ok).catch(() => false);
+
+// 把某个标签页的标记刷成「现在这个样子」。owners 为空就是摘掉。
+//
+// 先发后注：稳态下页面里的 mark.js 还在，一次消息往返（约 1ms）就完事；
+// 只有导航过、脚本被冲掉时才付一次 executeScript。反过来先探活再发是两次往返，
+// 而这个函数跟在每一条命令后面跑。
+async function syncMark(tabId, { act, sid, plan } = {}) {
+  if (!tabId) return;
+  try {
+    if (!(await markEnabled())) return;
+    const owners = await ownersOfTab(tabId);
+    // 标签组跟着同一份归属关系走，但不挤在这条 await 链上：
+    // 组画不上（用户正在拖标签页、旧 Chrome 没有 API）不该拖累页内标记。
+    void syncGroup(tabId, owners);
+    if (act && sid) await pushActLog(sid, act);
+    // plan 不落盘、每次 set 都覆盖：批处理一结束它就该消失，
+    // 「接下来」栏里挂着永远不会跑的步骤是在骗用户
+    const msg = { __hcMark: 'set', owners, act: act || null, sid, plan: plan || null, ...(await panelData(owners)) };
+    await noteMarked(tabId, owners.length > 0);
+    if (await postMark(tabId, msg)) return;
+    // 没人接消息 = 页面里没有 mark.js。既然这页也没有主，就别为了摘一个
+    // 不存在的标记去注入脚本——那是纯粹的浪费，而且会打在每一个普通网页上。
+    if (!owners.length) return;
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['mark.js'] });
+    await postMark(tabId, msg);
+  } catch { /* chrome:// 注不进、标签页已关、开关关了——都不是命令的错 */ }
+}
+
+// 驾驶舱时间线的原料。存这边而不是页面内存：导航会把页面里的一切冲掉，
+// 而「刚刚发生过什么」恰恰要跨导航活着。20 条封顶。内容是 actText 的输出——
+// 只有动词和目标，**绝不含用户输入的内容**（这些字会显示在可能正被录屏的页面上）。
+const actLogKey = (sid) => `actLog:${sid}`;
+const intentKey = (sid) => `intent:${sid}`;
+
+async function pushActLog(sid, text) {
+  const key = actLogKey(sid);
+  const { [key]: list = [] } = await chrome.storage.session.get(key);
+  list.unshift({ t: Date.now(), text: String(text).slice(0, 60) });
+  await chrome.storage.session.set({ [key]: list.slice(0, 20) });
+}
+
+// 驾驶舱要展示的两样：各会话的时间线，和 agent 用 status 声明的意图。
+// 都按 sid 键控——同一页有两个主时，各自的账各自记。
+async function panelData(owners) {
+  const logs = {}, intents = {};
+  if (owners.length) {
+    const got = await chrome.storage.session.get(owners.flatMap((o) => [actLogKey(o.sid), intentKey(o.sid)]));
+    for (const o of owners) {
+      if (got[actLogKey(o.sid)]) logs[o.sid] = got[actLogKey(o.sid)];
+      if (got[intentKey(o.sid)]) intents[o.sid] = got[intentKey(o.sid)];
+    }
+  }
+  return { logs, intents };
+}
+
+// 「此刻哪些页面上贴着标记」得自己记一笔账，不能靠槽反推。
+// 槽会被覆盖：一个会话换了受控页，槽指向新页，旧页上那块标记就再没有任何
+// 代码路径找得到它——用户看着一个早就没人管的页面，上面挂着别人的名字。
+// 实测撞到过，两个页面的标记永久留在那里。
+async function noteMarked(tabId, on) {
+  const { [MARKED_TABS]: list = [] } = await chrome.storage.session.get(MARKED_TABS);
+  const has = list.includes(tabId);
+  if (on === has) return;
+  await chrome.storage.session.set({
+    [MARKED_TABS]: on ? [...list, tabId].slice(-64) : list.filter((t) => t !== tabId),
+  });
+}
+
+// ---------- 标签组 ----------
+//
+// 标签栏是后台干活时用户唯一一直看得见的地方，而标题前缀有个盲区：
+// 标签页一多，Chrome 把标题压缩到只剩 favicon，前缀就没了——恰恰是
+// 开一堆标签页的重度用户最需要这个信号。标签组的彩色胶囊不受压缩影响，
+// 组色与页内标记同源（identity.js），两处信号互相印证。
+//
+// 两条铁律，都朝「宁可不画，绝不误伤」那一侧偏：
+// 1. **绝不碰用户自己的组。** tab 已经在组里而那个组不是我们建的，就当没看见。
+// 2. **只动确认还是我们的组。** groupId 记在 storage.local（跨扩展重载不丢），
+//    代价是浏览器重启后这个 id 可能被发给别的组。所以动手前先验指纹：
+//    组标题必须还是我们写上去的那个 emoji。用户改过组名？那它已经是
+//    用户的组了，按铁律 1 处理。指纹会放过「用户恰好建了个同 emoji 的组」，
+//    但那种碰撞的后果只是多染一个组，比拆错用户的组轻得多。
+const groupKey = (sid) => `agentGroup:${sid}`;
+
+async function syncGroup(tabId, owners) {
+  try {
+    if (!chrome.tabGroups) return;   // 旧 Chrome 没有这个 API
+    const tab = await chrome.tabs.get(tabId);
+    const all = await chrome.storage.local.get(null);
+    const ours = new Map(Object.entries(all)
+      .filter(([k]) => k.startsWith('agentGroup:'))
+      .map(([k, v]) => [k.slice('agentGroup:'.length), v]));
+
+    // 这一页没有主：还挂在我们的组里就摘出来。组空了 Chrome 会自己解散它。
+    if (!owners.length) {
+      if (tab.groupId === -1) return;
+      for (const [sid, gid] of ours) {
+        if (gid !== tab.groupId) continue;
+        const g = await chrome.tabGroups.get(gid).catch(() => null);
+        if (g && g.title === identityOf(sid).emoji) await chrome.tabs.ungroup(tabId);
+        return;
+      }
+      return;
+    }
+
+    // 多主时跟第一个——组只有一个，双色条纹画不进标签栏；页内边框负责说清「有两个主」
+    const o = owners[0];
+    const stored = ours.get(o.sid);
+    if (tab.groupId !== -1) {
+      if (tab.groupId === stored) return;                         // 已经在对的组里
+      if (![...ours.values()].includes(tab.groupId)) return;      // 用户的组，不碰
+    }
+    // 旧组还在、还像我们的、且在同一个窗口 → 归队；否则新建。
+    // 跨窗口不归队：group({groupId}) 会把标签页搬进另一个窗口，比不显著更糟。
+    let gid = null;
+    if (stored !== undefined) {
+      const g = await chrome.tabGroups.get(stored).catch(() => null);
+      if (g && g.windowId === tab.windowId && g.title === o.emoji) gid = stored;
+    }
+    if (gid !== null) {
+      await chrome.tabs.group({ tabIds: tabId, groupId: gid });
+    } else {
+      gid = await chrome.tabs.group({ tabIds: tabId });
+      await chrome.tabGroups.update(gid, { title: o.emoji, color: o.group });
+      await chrome.storage.local.set({ [groupKey(o.sid)]: gid });
+    }
+  } catch { /* 标签页正被拖动/已关、API 不可用——都不是命令的错 */ }
+}
+
+// 会话名单变了（有人下线），所有可能带着标记的标签页都得重算一遍。
+// 不能只看「还活着的会话占的页」——恰恰是**刚死掉那个**占的页需要被摘。
+// 两个来源取并集：槽（可能指向还没来得及贴标记的新页）和记账（可能有孤儿）。
+async function resyncMarks() {
+  try {
+    const [all, sess] = await Promise.all([
+      chrome.storage.local.get(null),
+      chrome.storage.session.get(MARKED_TABS),
+    ]);
+    const tabs = new Set(Object.entries(all).filter(([k]) => k.startsWith(SLOT_PREFIX)).map(([, v]) => v));
+    for (const t of sess[MARKED_TABS] || []) tabs.add(t);
+    for (const tabId of tabs) await syncMark(tabId);
+  } catch { /* 同上 */ }
+}
+
+// 胶囊上打出「它刚刚做了什么」。常驻的淡边框回答「有没有主」，这一行回答
+// 「此刻在动」——两个问题都要有答案，否则用户看着一个静止的页面无从判断。
+//
+// 只说动词和目标 ref，**绝不带用户输入的内容**：type / fill 的值可能是密码或
+// 私信正文，而这行字会显示在一个用户可能正在录屏或投屏的页面上。
+function actText(cmd, p = {}) {
+  const ref = p.ref || p.selector || '';
+  switch (cmd) {
+    case 'navigate': return `打开 ${hostOf(p.url) || '页面'}`;
+    case 'click': return `点击 ${ref}`;
+    case 'type': return `输入 ${ref}`;
+    case 'fill': return '填写表单';
+    case 'select': return `选择 ${ref}`;
+    case 'key': return `按键 ${p.key || ''}`;
+    case 'scroll': return '滚动';
+    case 'snapshot': return '读取页面';
+    case 'read_text': return '读取正文';
+    case 'query': return '查询元素';
+    case 'screenshot': return '截图';
+    case 'network': return '看网络请求';
+    case 'fetch': return '调接口';
+    case 'download': return '下载';
+    case 'upload': return '上传文件';
+    case 'eval': return '执行脚本';
+    case 'wait': return '等待';
+    case 'ask': return '请用户搭把手';
+    // act 的每一步在批处理循环里单独同步过了（带「第 i/n 步」），
+    // 批量结束后再记一条汇总只是时间线上的噪音
+    case 'act': return '';
+    default: return cmd;
+  }
 }
 
 // content script 按需注入，注入前先探活，避免重复注入把 refMap 清空
@@ -807,6 +1112,27 @@ function watchUntil(tabId, until, timeout) {
   return { promise, stop };
 }
 
+// act 剧本的单发条件判定。词汇和 watchUntil / ask 的 until 完全一致
+// （urlContains / selectorExists / textContains，多字段取或），外加 not 取反。
+// 页面正在跳转时按「未命中」处理——repeat 的下一轮会再问一次。
+async function evalCond(tabId, cond) {
+  if (!cond || typeof cond !== 'object') return true;
+  let hit = false;
+  try {
+    if (cond.urlContains) hit = ((await chrome.tabs.get(tabId)).url || '').includes(cond.urlContains);
+    if (!hit && (cond.selectorExists || cond.textContains)) {
+      const [{ result } = {}] = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: (sel, txt) => (sel ? !!document.querySelector(sel) : false)
+          || (txt ? (document.body?.innerText || '').includes(txt) : false),
+        args: [cond.selectorExists || '', cond.textContains || ''],
+      });
+      hit = !!result;
+    }
+  } catch { hit = false; }
+  return cond.not ? !hit : hit;
+}
+
 // 执行一个动作并采证据，**不出快照**。
 // act 逐步调它，只在最后出一份快照——省掉的那些中间快照正是批处理的全部收益。
 // 轮询取浮条的结果，而不是攥着一条长回调等几分钟。
@@ -851,7 +1177,7 @@ async function confirmPay(id, pay) {
   const tab = await chrome.tabs.get(id);
   await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
   await chrome.tabs.update(id, { active: true });
-  await chrome.scripting.executeScript({ target: { tabId: id }, files: ['ask-overlay.js'] });
+  await chrome.scripting.executeScript({ target: { tabId: id }, files: ['mark.js'] });
 
   chrome.notifications?.create(`hc-pay-${Date.now()}`, {
     type: 'basic',
@@ -887,8 +1213,9 @@ async function performCore(id, cmd, p, { blockSensitive = false } = {}, ctx) {
   const hasTarget = !!(params.ref || params.selector || params.find);
   const loc = await toContent(id,
     // fields 要带过去：fill 没有单一目标，它的效果证据靠逐个字段的状态，
-    // 不然填表这条最高频的路上永远报「页面没有反应」
-    hasTarget ? { __hc: 'locate', ...params } : { __hc: 'locate', baselineOnly: true, fields: params.fields },
+    // 不然填表这条最高频的路上永远报「页面没有反应」。
+    // forCmd 给虚拟光标定动画（点击是涟漪、输入是脉动），不参与定位本身
+    hasTarget ? { __hc: 'locate', forCmd: cmd, ...params } : { __hc: 'locate', baselineOnly: true, fields: params.fields },
     frameId);
 
   // iframe 内元素的坐标是相对该框架视口的，而 CDP 打的是顶层视口坐标；
@@ -998,6 +1325,9 @@ async function performCore(id, cmd, p, { blockSensitive = false } = {}, ctx) {
 // 每一步的人话描述。批处理最怕的是「跑了一半，不知道跑到哪了」——
 // 回执里必须能一眼看出每一步动了什么。
 function describeStep(st) {
+  if (st.do === 'repeat') return `repeat ×≤${repeatMax(st)}${st.until ? ` until ${condText(st.until)}` : ''}（${(st.steps || []).length} 子步）`;
+  if (st.do === 'if') return `if ${condText(st.cond)}`;
+  if (st.do === 'assert') return `assert ${condText(st.cond)}`;
   const t = st.find
     ? `${st.find.role ? st.find.role + ' ' : ''}「${st.find.name || st.find.selector || ''}」`
     : st.ref ? `[${st.ref}]`
@@ -1009,6 +1339,28 @@ function describeStep(st) {
     : st.key !== undefined ? ` ${[].concat(st.key).join('+')}`
     : st.url ? ` ${st.url}`
     : st.value === undefined && st.for ? ` ${st.for} ${st.value || ''}`
+    : '';
+  return `${st.do || '?'} ${t}${extra}`.trim();
+}
+
+// describeStep 的驾驶舱版本：只说动词和目标。value 原文换成「选项」、URL 只留
+// 域名——这些字会显示在页面上并进时间线，而页面可能正被录屏或投屏。
+// describeStep 本身不动：agent 的回执要的就是完整细节。
+function panelStep(st) {
+  // 控制块在驾驶舱上只报类型，不报条件细节——condText 可能引用页面文本
+  if (st.do === 'repeat') return `循环（≤${repeatMax(st)} 轮）`;
+  if (st.do === 'if') return '条件分支';
+  if (st.do === 'assert') return '检查页面状态';
+  const t = st.find
+    ? `「${st.find.name || st.find.selector || ''}」`
+    : st.ref ? `[${st.ref}]`
+    : st.selector ? `(${st.selector})`
+    : '';
+  const extra = st.text !== undefined ? ` ←${String(st.text).length}字`
+    : st.value !== undefined ? ' ←选项'
+    : st.check !== undefined ? (st.check ? ' 勾选' : ' 取消勾选')
+    : st.key !== undefined ? ` ${[].concat(st.key).join('+')}`
+    : st.url ? ` ${hostOf(st.url) || ''}`
     : '';
   return `${st.do || '?'} ${t}${extra}`.trim();
 }
@@ -1088,44 +1440,57 @@ const HANDLERS = {
     const steps = Array.isArray(p.steps) ? p.steps : [];
     if (!steps.length) throw err('INTERNAL', 'steps 不能为空');
     if (steps.length > 20) throw err('INTERNAL', `一次最多 20 步，收到 ${steps.length} 步。拆开调用。`);
+    // 剧本静态校验：嵌套控制块、repeat 里用 ref 这类注定失败的形状，
+    // 在动第一根手指之前拦下来——错误落在真实页面上的调试成本高得多
+    const bad = validateScript(steps);
+    if (bad) throw err('INTERNAL', bad);
 
     const drift = await driftNote(id, ctx?.sid);
     const done = [];
-    let stopped = null;
+    let stopped = null;       // { label, why, i? } 一旦置上，整个剧本停机
     // 页面结构一旦变过，之前那份快照里的 ref 全部作废——只有 find 还能用
     let structureChanged = false;
+    let executed = 0;         // 实际执行的原子步数。repeat 展开后可能远超 20，
+                              // EXEC_BUDGET 是防失控循环的硬闸
 
-    for (let i = 0; i < steps.length; i++) {
-      const { do: cmd, ...rest } = steps[i];
-      const label = describeStep(steps[i]);
-
-      if (!cmd) { stopped = { i, label, why: `第 ${i + 1} 步没写 do` }; break; }
-
+    // 执行一个原子步。结果全走闭包：done/out 收回执、stopped 收停机原因、
+    // id 跟着新开的标签页走、structureChanged 决定 ref 还能不能信。
+    // progress 是驾驶舱「正在做」的前缀，plan 是「接下来」（panelStep 版，
+    // 不带用户输入内容——可能正被录屏）。
+    const execStep = async (st, progress, plan, out = done) => {
+      const { do: cmd, ...rest } = st;
+      const label = describeStep(st);
+      if (!cmd) { stopped = { label, why: '这一步没写 do' }; return; }
+      if (++executed > EXEC_BUDGET) {
+        stopped = { label, why: `超出单次 act 的 ${EXEC_BUDGET} 步执行预算（repeat 展开后）。拆成多次调用。` };
+        return;
+      }
+      // 不 await：呈现是给人看的辅助信息，绝不挤进步与步之间的关键路径
+      void syncMark(id, { sid: ctx?.sid, act: `${progress} · ${panelStep(st)}`, plan });
       if (structureChanged && rest.ref && !rest.find) {
         stopped = {
-          i, label,
+          label,
           why: `页面结构在上一步之后变了，快照里的 ref 已经全部作废。`
             + `这一步用的是 ref="${rest.ref}"，换成 find（按 role + 名字定位）就能继续。`,
         };
-        break;
+        return;
       }
-
       try {
         if (cmd === 'wait') {
           const r = await toContent(id, { __hc: 'wait', ...rest });
-          done.push(`✅ ${label}　${r?.text || ''}`);
-          continue;
+          out.push(`✅ ${label}　${r?.text || ''}`);
+          return;
         }
         if (cmd === 'navigate') {
           await HANDLERS.navigate(rest, id, ctx);
           structureChanged = true;
-          done.push(`✅ ${label}`);
-          continue;
+          out.push(`✅ ${label}`);
+          return;
         }
         if (cmd === 'scroll') {
           const r = await toContent(id, { __hc: 'scroll', ...rest });
-          done.push(`✅ ${label}　${(r?.text || '').split('\n')[0]}`);
-          continue;
+          out.push(`✅ ${label}　${(r?.text || '').split('\n')[0]}`);
+          return;
         }
 
         const r = await performCore(id, cmd, { ...rest, snapshotId: p.snapshotId },
@@ -1133,49 +1498,97 @@ const HANDLERS = {
 
         if (r.blocked) {
           stopped = {
-            i, label,
+            label,
             why: '这是提交/支付/删除一类的动作，批处理不代做——一串动作里夹一个它，'
               + '跑完了中间没有任何人看得见。单独调用一次 click 把它做掉，'
               + '那样你会看到它自己的效果证据。',
           };
-          break;
+          return;
         }
-
         // 开出新标签页是比「页面有没有变」更强的证据，而且后面几步必须打到
         // 新页面上——不换的话，剩下的步骤会全部落在一个已经被丢在身后的页面里
         if (r.followed) {
           id = r.followed.to;
           structureChanged = true;
-          done.push(`✅ ${label}　↪️ 开了新标签页 [${r.followed.to}]，后面几步已改在新页面上执行`);
-          continue;
+          out.push(`✅ ${label}　↪️ 开了新标签页 [${r.followed.to}]，后面几步已改在新页面上执行`);
+          return;
         }
-
         if (!r.ev.changed) {
           stopped = {
-            i, label,
+            label,
             why: `这一步没有让页面产生任何可归因的变化，后面的步骤多半建立在错误的前提上，`
               + `所以停在这里。${r.l2note || ''}`,
           };
-          break;
+          return;
         }
-
-        done.push(`✅ ${label}　效果：${r.ev.parts.join('；')}`);
+        out.push(`✅ ${label}　效果：${r.ev.parts.join('；')}`);
         // 只有「结构性」变化才作废 ref：填个值、勾个框不影响编号，
         // 而连续填表正是批处理最常见的用法，不该逼它们全用 find
         if (r.navigated || r.ev.parts.some((s) => /节点|顶层|跳转|移除/.test(s))) {
           structureChanged = true;
         }
       } catch (e) {
-        stopped = { i, label, why: `[${e.code || 'INTERNAL'}] ${e.message}` };
-        break;
+        stopped = { label, why: `[${e.code || 'INTERNAL'}] ${e.message}` };
       }
+    };
+
+    const runLinear = async (list, progress, plan, out) => {
+      for (const st of list) {
+        if (stopped) return;
+        await execStep(st, progress, plan, out);
+      }
+    };
+
+    let doneTop = 0;   // 顶层完成到第几步，给「还剩 N 步」和 doneCount 用
+    for (let i = 0; i < steps.length && !stopped; i++) {
+      const st = steps[i] || {};
+      const progress = `第${i + 1}/${steps.length}步`;
+      const remaining = steps.slice(i + 1).map(panelStep);
+
+      if (st.do === 'assert') {
+        // 中途护栏：页面不在剧本预期的状态上，就不该在错误前提上继续跑
+        if (await evalCond(id, st.cond)) done.push(`✅ 断言成立：${condText(st.cond)}`);
+        else stopped = { label: describeStep(st), why: `断言不成立：${condText(st.cond)}。页面不在这个剧本预期的状态上，后面的步骤不该跑。` };
+      } else if (st.do === 'if') {
+        const hit = await evalCond(id, st.cond);
+        const branch = hit ? st.then : (st.else || []);
+        done.push(hit
+          ? `↳ 条件成立（${condText(st.cond)}），走 then ${st.then.length} 步`
+          : `↷ 条件不成立（${condText(st.cond)}），${st.else?.length ? `走 else ${st.else.length} 步` : '跳过'}`);
+        await runLinear(branch, progress, remaining, done);
+      } else if (st.do === 'repeat') {
+        const max = repeatMax(st);
+        let hit = false, k = 0;
+        while (k < max && !stopped) {
+          k++;
+          const round = [];
+          await runLinear(st.steps, `${progress}·第${k}轮`, remaining, round);
+          // 第一轮完整展开（agent 要看到模式跑通了），后面每轮压成一行——
+          // 25 轮 × 3 步全展开是 75 行回执，会把真正重要的信息淹掉。
+          // 中途停机的那一轮也完整展开：停在哪一步、前几步做了什么都要可见。
+          if (k === 1 || stopped) done.push(...round.map((l) => `　${k}轮 ${l}`));
+          else done.push(`　🔁 第${k}轮 ✅${round.length}步`);
+          if (stopped) break;
+          if (st.until) { hit = await evalCond(id, st.until); if (hit) break; }
+        }
+        if (!stopped) {
+          // until 声明的是「循环应该达到的状态」。跑满 max 仍未达到 = 剧本的
+          // 预期和页面不符，按停机处理——这和「零效果就停」是同一个哲学
+          if (st.until && !hit) stopped = { label: describeStep(st), why: `repeat 跑满 ${max} 轮，until 条件（${condText(st.until)}）仍未命中。剧本的预期和页面不符，停在这里。` };
+          else done.push(st.until ? `🔁 循环结束：第 ${k} 轮后命中 ${condText(st.until)}` : `🔁 已按 max 跑满 ${max} 轮`);
+        }
+      } else {
+        await execStep(st, progress, remaining);
+      }
+      if (!stopped) doneTop = i + 1;
+      else if (stopped.i === undefined) stopped.i = i;
     }
 
     const snap = await snapshotAll(id);
     const total = steps.length;
     const head = [
       drift,
-      `act ${stopped ? `停在第 ${stopped.i + 1} 步` : '完成'} ${done.length}/${total}：`,
+      `act ${stopped ? `停在第 ${stopped.i + 1} 步` : '完成'}（顶层 ${doneTop}/${total}，实际执行 ${executed} 个动作）：`,
       ...done.map((d) => '  ' + d),
       stopped ? `  ⏸ ${stopped.label}\n     ${stopped.why}` : '',
       stopped && stopped.i + 1 < total
@@ -1183,7 +1596,7 @@ const HANDLERS = {
         : '',
     ].filter(Boolean).join('\n');
 
-    return { ...snap, text: `${head}\n\n${snap.text}`, completed: !stopped, doneCount: done.length };
+    return { ...snap, text: `${head}\n\n${snap.text}`, completed: !stopped, doneCount: doneTop };
   },
 
   // 五个写操作走同一条路径：定位 → 执行（L1 或 L2）→ 采效果证据 → 必要时升级重试。
@@ -1451,6 +1864,12 @@ const HANDLERS = {
   // 后台标签页照样能截，既不打断用户，也不存在截错页面的可能。
   async screenshot(p, tabId) {
     const id = await resolveTab(tabId);
+    // 幕帘：先把我们画的一切（光标、边框、驾驶舱、ask）藏起来再拍。
+    // 不藏的话 agent 会在自己的截图里看到一个页面上并不存在的发光箭头，
+    // 把它当页面元素去理解甚至去点。应答回来时样式已生效：两条截图路径
+    // 都在 ack 之后才合成新帧。页面里没有 mark.js 时 veil 返回 false——
+    // 幕帘失败绝不能弄失败截图本身。
+    const veiled = await veilMarks(id, true);
     try {
       return { dataUrl: await cdp.screenshot(id) };
     } catch (e) {
@@ -1476,7 +1895,14 @@ const HANDLERS = {
             `拒绝截图——否则截到的是用户当前正在看的其它页面。`);
         }
       }
+      // 等一帧再抓：captureVisibleTab 拿的是合成器当前帧，幕帘的 visibility
+      // 刚设完可能还没画上去。60ms > 一个 60Hz 帧周期，页面进程的 rAF 这边够不着，
+      // 用固定等待兜住（tab 不在前台的分支上面已经 sleep(250)，这里覆盖的是
+      // 「本来就在前台」那条最短路径）。
+      if (veiled) await sleep(60);
       return { dataUrl: await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' }) };
+    } finally {
+      if (veiled) void veilMarks(id, false);
     }
   },
 
@@ -1563,7 +1989,8 @@ const HANDLERS = {
       await chrome.tabs.update(id, { active: true });
     }
 
-    await chrome.scripting.executeScript({ target: { tabId: id }, files: ['ask-overlay.js'] });
+    // ask 的浮条并进了 mark.js（统一呈现层），协议没变，只是换了宿主文件
+    await chrome.scripting.executeScript({ target: { tabId: id }, files: ['mark.js'] });
     if (selectors.length) {
       await chrome.tabs.sendMessage(id, { __hcAsk: 'flash', selectors }).catch(() => {});
     }
@@ -1608,6 +2035,23 @@ const HANDLERS = {
     };
   },
 
+  // agent 的一句话意图声明，进驾驶舱的「准备做」一栏。fire-and-forget：
+  // 立刻回 ok，呈现走 syncMark 的旁路——这个工具的全部成本必须接近零，
+  // 否则 agent 会因为「多一次往返」而干脆不用它。
+  //
+  // 文案是 agent 写的（可能源自被注入的页面）。这里只截长度，页面那侧
+  // 一律 textContent 呈现且和扩展观察到的事实分区——见 mark.js 的 intent 区。
+  async status(p, _tabId, ctx) {
+    const text = String(p.text || '').trim().slice(0, 80);
+    const sid = ctx?.sid;
+    if (sid && text) {
+      await chrome.storage.session.set({ [intentKey(sid)]: { text, t: Date.now() } });
+      const { [agentTabKey(sid)]: tab } = await chrome.storage.local.get(agentTabKey(sid));
+      if (tab) void syncMark(tab, { sid });
+    }
+    return { text: 'ok' };
+  },
+
   // 回归测试用：把支付确认的等待时间调短，否则每条相关用例都要等三分钟。
   // 故意不写进 MCP 工具列表，所以 agent 那一侧看不到、也调不到它。
   // 即使被调到也不危险——超时一律按拒绝处理，调短只会让支付更容易失败。
@@ -1625,6 +2069,11 @@ const HANDLERS = {
 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// 截图幕帘的开合。判据和 postMark 一样认回执——sendMessage 对没有监听者的
+// 页面 resolve(undefined) 而不是 reject，「没报错」不等于「藏好了」。
+const veilMarks = (tabId, on) =>
+  chrome.tabs.sendMessage(tabId, { __hcMark: 'stealth', on }).then((r) => !!r?.ok).catch(() => false);
 
 // ---------- 生命周期 ----------
 
@@ -1658,7 +2107,18 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   const gone = Object.keys(sess).filter((k) =>
     (k.startsWith('seen:') && k.endsWith(':' + tabId)) || k === frameSnapKey(tabId) || k === childKey(tabId));
   if (gone.length) await chrome.storage.session.remove(gone);
+  await noteMarked(tabId, false);
   emit('tab_closed', { tabId });
+});
+
+// 页面自己跳走了（agent 点了个链接、站点自动重定向），页面里的 mark.js
+// 跟着没了。只靠命令后那次刷新的话，标记会在「跳转完成」到「下一条命令」
+// 之间消失——而那段空窗恰好是用户最可能切过来看一眼的时候。
+//
+// 这个监听器对浏览器里每一个标签页的每一次加载都会响，所以 syncMark 的
+// 第一件事是查 liveSids：没有会话在线时它一次 storage.get 就返回了。
+chrome.tabs.onUpdated.addListener((tabId, info) => {
+  if (info.status === 'complete') void syncMark(tabId);
 });
 
 chrome.runtime.onMessage.addListener((m, _s, sendResponse) => {
@@ -1705,6 +2165,44 @@ chrome.runtime.onMessage.addListener((m, _s, sendResponse) => {
   // 否则权限撤销了，黄条却还留在标签页上，而且再也没人能去摘它
   if (m.__hcPopup === 'detachAll') {
     cdp.reapAll().finally(() => sendResponse({ ok: true }));
+    return true;
+  }
+  // popup 的会话列表：谁、在控哪一页。数据全在扩展这一侧（槽 + live 名单），
+  // popup 够不着桥，所以由这儿组装。
+  if (m.__hcPopup === 'sessions') {
+    (async () => {
+      try {
+        const [all, lives] = await Promise.all([chrome.storage.local.get(null), liveList()]);
+        const clients = await chrome.storage.session.get(lives.map(sidClientKey));
+        const rows = [];
+        for (const sid of lives) {
+          const tabId = all[agentTabKey(sid)];
+          let title = '';
+          // 标题里的 emoji 前缀是我们自己加的，这一行左边已经有色点了，
+          // 再带一次只是噪音
+          if (tabId) title = await chrome.tabs.get(tabId).then((t) => stripMarkPrefix(t.title) || t.url || '').catch(() => '');
+          rows.push({ ...identityOf(sid, clients[sidClientKey(sid)]), tabId: title ? tabId : null, title });
+        }
+        sendResponse({ sessions: rows, enabled: await markEnabled() });
+      } catch {
+        sendResponse({ sessions: [], enabled: true });
+      }
+    })();
+    return true;
+  }
+  // 开关拨过之后要立刻见效：关掉时把已经贴出去的标记全摘干净，
+  // 否则用户会看到一个「已关闭」的开关配着满屏还在的标记。
+  if (m.__hcPopup === 'markSync') {
+    (async () => {
+      if (await markEnabled()) await resyncMarks();
+      else {
+        const { [MARKED_TABS]: list = [] } = await chrome.storage.session.get(MARKED_TABS);
+        // 组和页内标记同开同关：开关拨到关，两种痕迹都得立刻消失
+        for (const tabId of list) { await postMark(tabId, { __hcMark: 'clear' }); await syncGroup(tabId, []); }
+        await chrome.storage.session.set({ [MARKED_TABS]: [] });
+      }
+      sendResponse({ ok: true });
+    })();
     return true;
   }
 });

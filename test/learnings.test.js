@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 process.env.HUASHU_CHROME_LEARNINGS_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'hc-learnings-'));
-const { getLearnings, saveLearnings, LEARNINGS_DIR } = await import('../src/lib/learnings.js');
+const { getLearnings, saveLearnings, lintPlaybooks, LEARNINGS_DIR } = await import('../src/lib/learnings.js');
 
 test('无参调用列出出厂经验的站点', () => {
   const out = getLearnings();
@@ -55,4 +55,35 @@ test('空内容不落盘', () => {
   const r = saveLearnings('empty.example', '   ');
   assert.match(r, /没存/);
   assert.ok(!fs.existsSync(path.join(LEARNINGS_DIR, 'empty.example.md')));
+});
+
+// ---------- 可执行剧本（L3）----------
+
+test('剧本体检：好剧本零警告，坏 JSON 和坏形状都点名', () => {
+  const good = '摸清的流程：\n```act\n[{"do":"navigate","url":"https://x.com/{{用户名}}"},{"do":"repeat","steps":[{"do":"scroll","to":"bottom"}],"until":{"textContains":"{{停止词}}"},"max":5}]\n```\n';
+  assert.deepEqual(lintPlaybooks(good), []);
+  // 占位符不是错误——体检前会替换成假值
+  const badJson = '```act\n[{"do":"click",]\n```';
+  assert.match(lintPlaybooks(badJson)[0], /JSON/);
+  const badShape = '```act\n[{"do":"repeat","steps":[{"do":"click","ref":"e1"}]}]\n```';
+  assert.match(lintPlaybooks(badShape)[0], /find/);
+  // 不是数组也点名
+  assert.match(lintPlaybooks('```act\n{"do":"click"}\n```')[0], /数组/);
+});
+
+test('存坏剧本：照存（经验不阻塞），但当面说清', () => {
+  const r = saveLearnings('playbook-demo.example', '流程：\n```act\nnot json\n```');
+  assert.match(r, /已存/);           // 硬约束：体检不合格也不挡存
+  assert.match(r, /剧本体检没过/);
+});
+
+test('get 时有剧本才提示可执行，并保留「可能过时」的免责', () => {
+  saveLearnings('playbook-demo.example', '导出流程：\n```act\n[{"do":"click","selector":".export"}]\n```');
+  const out = getLearnings('playbook-demo.example');
+  assert.match(out, /1 份可执行剧本/);
+  assert.match(out, /可能过时/);
+  assert.match(out, /经验仅供参考/);   // HINT 是硬约束，永远在
+  // 没剧本的站点：零噪音
+  const plain = getLearnings('jd.com');
+  assert.ok(!plain.includes('可执行剧本'));
 });

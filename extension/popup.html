@@ -15,6 +15,11 @@
   button.ghost.on { background: #16a34a; color: #fff; }
   .tip { margin-top: 12px; font-size: 11px; color: #8a8f98; }
   code { font-size: 10.5px; background: color-mix(in srgb, currentColor 9%, transparent); padding: 1px 4px; border-radius: 4px; }
+  .sess { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+  .sess .s { display: flex; align-items: center; gap: 7px; font-size: 11.5px; line-height: 1.4; }
+  .sess .swatch { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .sess .who { font-weight: 600; flex: none; }
+  .sess .page { color: #8a8f98; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>
 
 <h1>huashu-chrome</h1>
@@ -35,6 +40,17 @@
 <div class="tip" id="l2tip">
   默认开启。agent 能派发浏览器级的真实输入事件，应付会检查 <code>isTrusted</code> 的站点、
   富文本编辑器，也能直接截后台标签页。只在需要的那几秒接入调试器，用完自动断开。
+</div>
+
+<div class="row" style="margin-top:10px">
+  <span class="dot" id="markdot"></span>
+  <span class="state" id="markstate">控制标记</span>
+</div>
+<button id="markbtn" class="ghost">开启</button>
+<div class="sess" id="sess"></div>
+<div class="tip" id="marktip">
+  被 agent 操控的页面会带上颜色边框、头像光标和右下角驾驶舱，
+  标签页图标换成花叔头像＋会话色环——你随时知道哪一页有主、是谁、在干什么。
 </div>
 
 <div class="tip" id="tip">连不上时终端跑 <code>huashu-chrome doctor</code></div>

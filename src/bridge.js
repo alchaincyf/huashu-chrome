@@ -115,6 +115,12 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
         for (let i = waiting.length - 1; i >= 0; i--) {
           if (waiting[i].ws === ws) { clearTimeout(waiting[i].timer); waiting.splice(i, 1); }
         }
+        // 名单变了，告诉扩展一声。它平时是搭着每条命令收到 live 的，而一个会话
+        // 「结束」的特征恰恰是再也没有命令过来——不推这一条，那个会话留在页面上的
+        // 控制标记就摘不掉了。断线重连的情况会在下一条命令里自动补回来。
+        if (extension && extension.readyState === 1) {
+          send(extension, { type: 'event', event: 'sessions', live: liveSessions() });
+        }
       }
       if (ws === extension) {
         extension = null;
@@ -244,7 +250,8 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
     audit({ ev: 'cmd', id: key, cmd: msg.cmd, client: ws.client, sid: ws.sid, params: redact(msg.params) });
     // sid 盖章：扩展据此维护每个会话自己的受控 tab 槽（多 agent 并发隔离）。
     // live 是此刻还连着的会话，扩展拿它判断某个标签页「还有没有主」。
-    send(extension, { ...msg, __k: key, sid: ws.sid, live: liveSessions() });   // __k 原样带回，用于精确路由
+    // client 是给人看的：页面上的控制标记要写出「Claude Code」而不是一串 sid。
+    send(extension, { ...msg, __k: key, sid: ws.sid, client: ws.client, live: liveSessions() });   // __k 原样带回，用于精确路由
   }
 
   function routeBack(ws, msg) {
