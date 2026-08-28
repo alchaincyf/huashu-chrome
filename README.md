@@ -11,6 +11,10 @@ agent：（打开你已登录的 CRM，逐条填表提交）
 
 不用 API key，不用重新登录，不用处理验证码——用的就是你此刻这个浏览器里的身份。
 
+![系统原理图：一条命令穿过五个器官——npm 包 → CLI → MCP server → 本地桥 → Chrome 扩展，最后落在你真实浏览器的真实按钮上](https://raw.githubusercontent.com/alchaincyf/huashu-chrome/master/media/architecture.png)
+
+「npm 包？插件？CLI？还是 MCP？」——都是。它们是同一个产品的五个器官：npm 包是分发载体，CLI 是入口（install / mcp / doctor），MCP server 是 agent 的接口，本地桥是 127.0.0.1 上的常驻路由器，Chrome 扩展是手。上图就是一条命令穿过它们的全程。
+
 ## 为什么需要它
 
 浏览器控制这件事，现在的格局是：
@@ -274,6 +278,10 @@ Cursor     ──stdio──┘         │ ws://127.0.0.1:8899
 L2 只在需要真实事件、后台截图、或页面 CSP 拦下求值时才接入，用完就断——
 黄条不常驻。扩展弹窗里可以整个关掉。
 
+一条 `click` 从 agent 到页面再回到 agent 的完整旅程（8 站，全程 127.0.0.1）：
+
+![信号追踪：agent → stdio → MCP server → WebSocket+token → 桥（白名单裁决/审计/身份章）→ 扩展 → 页面定位与真实点击 → 效果证据 → 快照原路返回](https://raw.githubusercontent.com/alchaincyf/huashu-chrome/master/media/journey.png)
+
 多个 agent 会话可以同时连桥，每个会话有自己独立的受控标签页。会话身份由 agent
 进程自报且**跨桥重启稳定**——桥会因为版本换代、空闲自杀、崩溃而重启，而受控标签页
 不该跟着一起没。新会话想用一个还有主的页面会被拦下并给出三条出路；主人已经断开的
@@ -291,6 +299,8 @@ L2 只在需要真实事件、后台截图、或页面 CSP 拦下求值时才接
 | 页内 | 同色细边框＋呼吸泛光的箭头光标＋右下角驾驶舱（正在做 / 准备做 / 时间线，带花叔头像） | 他切进去那一眼就知道这页有主、是谁、在干什么、接下来要干什么 |
 | 扩展弹窗 | 会话列表：谁 · 在控哪一页 | 全局俯瞰，也是开关所在 |
 
+![被操控的 Chrome 长什么样：花叔标签组、四边描边、呼吸光标、右下角驾驶舱、人工介入浮条；下方对比 agent 截图视角——幕帘挡住了给人看的一切](https://raw.githubusercontent.com/alchaincyf/huashu-chrome/master/media/visible.png)
+
 外观（会话色）是会话 id 的纯函数，所以它继承了会话身份那份跨桥重启的
 稳定性——桥抖一下，页面上的标记不会莫名换色。驾驶舱上会打出 agent 刚做的动作
 （「点击 e12」）和最近的时间线，但**绝不显示输入的内容**——那可能是密码或
@@ -300,6 +310,8 @@ L2 只在需要真实事件、后台截图、或页面 CSP 拦下求值时才接
 同一个页面被两个会话占着时，边框变成双色斜条纹、并排两枚胶囊——
 「你们正在互相踩」这件事必须一眼可见。会话一断开，它的标记和标签组
 立刻从所有页面上撤走。
+
+![多会话隔离：会话 A 紫色描边、会话 B 绿色描边各管各页；两个会话踩同一页时边框变双色告警条纹](https://raw.githubusercontent.com/alchaincyf/huashu-chrome/master/media/sessions.png)
 
 默认开着。录屏或演示时嫌碍事，在扩展弹窗里一键关掉。
 
