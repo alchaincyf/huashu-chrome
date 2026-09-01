@@ -4,6 +4,8 @@
 #   npm version patch   # 或 minor / major，会自动 commit 并打 tag
 #   git push --follow-tags
 #
+# 本地不要再手动 npm publish——发布交给这条流水线，两边都发只会得到一封失败邮件。
+#
 # npm 网页上必须先把这个文件名（publish.yml）填进
 # Settings → Trusted Publisher，大小写和扩展名都要一致，否则 OIDC 换不到凭据。
 
@@ -36,4 +38,17 @@ jobs:
       - run: npm ci
       - run: npm test
 
-      - run: npm publish
+      # 本地手动 npm publish 过之后再推 tag，CI 会撞上「版本已存在」而红——
+      # 包明明发出去了，邮件却报发布失败。先问一次 registry，发过就跳过。
+      - id: published
+        run: |
+          PKG=$(node -p "require('./package.json').name")@$(node -p "require('./package.json').version")
+          if npm view "$PKG" version >/dev/null 2>&1; then
+            echo "$PKG 已在 npm 上，跳过发布"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.published.outputs.skip != 'true'
+        run: npm publish
