@@ -66,13 +66,19 @@ async function toBridge(msg) {
   directSend(msg);   // offscreen 没建起来，或者它手上那条 socket 断了
 }
 
+// 判据是**现场问**，不是读缓存。
+//
+// 上一版读的是 storage.session 里的 bridgeConnected，而那个标志只在 offscreen
+// 主动上报时才更新——它被浏览器冻结或回收时根本没机会上报 false，标志就永久
+// 卡在 true。于是下面那个每 30 秒的自愈 alarm 每次醒来都判「连着呢」直接返回，
+// 一次重连都不发起。8-31 15:46 断开、17:25 用户手动重载扩展才恢复，中间 99
+// 分钟就是这么来的：扩展这侧以为自己在线，桥那侧早就把它判死了。
+//
+// 缓存留着，但只喂 badge 和 popup 的显示，绝不参与「要不要重连」这个判断。
 async function connected() {
   if (directWs?.readyState === 1) return true;
-  try {
-    return !!(await chrome.storage.session.get('bridgeConnected')).bridgeConnected;
-  } catch {
-    return false;
-  }
+  const r = await chrome.runtime.sendMessage({ __hcBridge: 'status' }).catch(() => null);
+  return !!r?.connected;
 }
 
 // ---------- 兜底：SW 自己拿着 socket ----------
@@ -81,8 +87,37 @@ async function connected() {
 // 同时连的话桥会看到两个扩展，而它「同时只认一个」，后来者会把前一个踢掉。
 
 const PORTS = [8899, 8900, 8901, 8902, 8903];
+const DIRECT_DEAD_MS = 45000;   // 和 offscreen 那条腿同一个判据：三拍没回音就是死了
 let directWs = null;
 let directTimer = null;
+let directLastRx = 0;
+
+// 这个 Chrome 实例的身份证。
+//
+// 桥靠它区分两件以前分不开的事：「同一个扩展断线重连」该替换掉旧连接，
+// 「另一个 Chrome 也装了这份扩展」该并存。分不开的时候桥只能留一个槽，
+// 于是主窗口和 agent 起的 headless 实例每秒互相踢一次（8-29 抓到的现场）。
+//
+// 存在 storage.local：同一个 profile 重启、重载扩展之后都不变，
+// 而另起一个 --user-data-dir 的实例必然拿到一个新的。
+// 扩展 ID 不能拿来当它用——同一份代码在两个 Chrome 里 ID 是一样的。
+let iidCache = null;
+async function instanceId() {
+  if (iidCache) return iidCache;
+  try {
+    const { hcInstanceId } = await chrome.storage.local.get('hcInstanceId');
+    if (hcInstanceId) return (iidCache = hcInstanceId);
+    const fresh = crypto.randomUUID();
+    await chrome.storage.local.set({ hcInstanceId: fresh });
+    return (iidCache = fresh);
+  } catch {
+    return null;   // 拿不到就退回桥那侧的老行为（按扩展 id 替换），不阻断连接
+  }
+}
+
+// headless 实例是 agent 起来抓页面的，没有窗口也没有用户的登录态在用，
+// 桥路由命令时要让着有窗口的那个——UA 是唯一稳定的判据。
+const isHeadless = () => /HeadlessChrome/.test(navigator.userAgent);
 
 function directSend(msg) {
   if (directWs?.readyState === 1) directWs.send(JSON.stringify(msg));
@@ -99,6 +134,9 @@ function directSend(msg) {
 // 交接改成显式的：offscreen 一旦真的连上会发 'up'，SW 收到就把自己这条关掉。
 async function directConnect() {
   if (directWs && directWs.readyState <= 1) return;
+  // 两条腿必须报同一个 instanceId：桥认的是实例不是连接，报岔了
+  // 就会被当成两个 Chrome 并存，谁也不替换谁。
+  const iid = await instanceId();
   for (const port of PORTS) {
     try {
       directWs = await new Promise((resolve, reject) => {
@@ -107,13 +145,15 @@ async function directConnect() {
         sock.onopen = () => sock.send(JSON.stringify({
           type: 'hello', role: 'extension', extId: chrome.runtime.id,
           version: chrome.runtime.getManifest().version,
+          instanceId: iid, headless: isHeadless(),
           chrome: (navigator.userAgent.match(/Chrome\/([\d.]+)/) || [])[1], v: 1,
         }));
         sock.onmessage = (ev) => {
           const m = JSON.parse(ev.data);
           if (m.type !== 'welcome') { clearTimeout(t); sock.close(); return reject(new Error('rejected')); }
           clearTimeout(t);
-          sock.onmessage = (e) => { const x = JSON.parse(e.data); if (x.type !== 'pong') onMessage(x); };
+          directLastRx = Date.now();
+          sock.onmessage = (e) => { directLastRx = Date.now(); const x = JSON.parse(e.data); if (x.type !== 'pong') onMessage(x); };
           sock.onclose = () => { directWs = null; stopDirectPing(); setBadge(false); };
           sock.onerror = () => {};
           resolve(sock);
@@ -128,11 +168,21 @@ async function directConnect() {
   setBadge(false);
 }
 
+// 兜底腿也要验回音，理由和 offscreen 那条腿完全一样：半开时 readyState
+// 照样是 1、send 照样不报错，只发不验的心跳一辈子发现不了。而这条腿是
+// 「offscreen 建不起来」时的唯一通路，它哑掉就真的没人在连了。
 function startDirectPing() {
   stopDirectPing();
   directTimer = setInterval(() => {
-    if (directWs?.readyState === 1) directWs.send(JSON.stringify({ type: 'ping' }));
-    else directConnect();
+    if (directWs?.readyState !== 1) return directConnect();
+    if (Date.now() - directLastRx > DIRECT_DEAD_MS) {
+      try { directWs.close(); } catch { /* 已经废了 */ }
+      directWs = null;
+      stopDirectPing();
+      setBadge(false);
+      return directConnect();
+    }
+    directWs.send(JSON.stringify({ type: 'ping' }));
   }, 15000);
 }
 function stopDirectPing() {
@@ -2190,6 +2240,13 @@ cdp.reapOrphans();
 chrome.alarms?.onAlarm.addListener(async () => {
   await ensureOffscreen();
   if (await connected()) return setBadge(true);
+  // 先让 offscreen 那条腿尽力——kick 会等它把五个端口探完再回话。
+  // 不等就直接自己顶上的话，两条腿会同时往桥上连，而桥只认一个、后来者
+  // 把前一个踢掉、被踢的立刻重连再踢回去，就是 8-29 抓到的每秒互相挤兑。
+  // 但也只让它这一次：「文档建起来了却连不上」是踩过的死局，
+  // 判据永远是连上了没有，不是文档在不在。
+  const kicked = await chrome.runtime.sendMessage({ __hcBridge: 'kick' }).catch(() => null);
+  if (kicked?.connected) return setBadge(true);
   await directConnect();
   setBadge(await connected());
 });
@@ -2239,8 +2296,13 @@ chrome.runtime.onMessage.addListener((m, _s, sendResponse) => {
   }
   // offscreen 拿不到 chrome.runtime.getManifest()，握手身份只能由这边供给
   if (m?.__hcBridge === 'identity') {
-    sendResponse({ extId: chrome.runtime.id, version: chrome.runtime.getManifest().version });
-    return true;
+    instanceId().then((iid) => sendResponse({
+      extId: chrome.runtime.id,
+      version: chrome.runtime.getManifest().version,
+      instanceId: iid,
+      headless: isHeadless(),
+    }));
+    return true;   // 异步回答，通道要留着
   }
   // 同理，它也够不着 chrome.storage，连接状态托这边落盘
   if (m?.__hcBridge === 'status') {

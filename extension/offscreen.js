@@ -23,12 +23,14 @@ const PORTS = [8899, 8900, 8901, 8902, 8903];
 const PING_MS = 15000;          // 留足余量：30 秒空闲线，20 秒太贴边
 const PROBE_MS = 1500;
 const MAX_BACKOFF = 15000;
+const DEAD_MS = 45000;          // 三个心跳周期一声不吭 = 这条连接已经死了
 
 let ws = null;
 let pingTimer = null;
 let retryTimer = null;
 let retryDelay = 0;
 let connecting = false;
+let lastRx = 0;                 // 最近一次从桥收到**任何**东西的时刻（含 pong）
 
 const post = (m) => chrome.runtime.sendMessage(m).catch(() => { /* SW 正在起来，下一条会到 */ });
 
@@ -89,6 +91,10 @@ async function connect() {
       role: 'extension',
       extId: who.extId,
       version: who.version,
+      // 桥按实例区分连接，靠这两个字段：同 instanceId = 同一个 Chrome 断线重连，
+      // 该顶掉旧连接；不同 = 另一个 Chrome，该并存。headless 的那个不抢主。
+      instanceId: who.instanceId,
+      headless: !!who.headless,
       chrome: (navigator.userAgent.match(/Chrome\/([\d.]+)/) || [])[1],
       v: 1,
     };
@@ -108,13 +114,14 @@ async function connect() {
 
     ws = hit.sock;
     retryDelay = 0;
+    lastRx = Date.now();      // 看门狗的起点：刚握完手，算收到过
     const deliver = (raw) => {
       let msg;
       try { msg = JSON.parse(raw); } catch { return; }
       if (msg.type === 'pong') return;              // 心跳回执，收到本身就是目的
       post({ __hcBridge: 'in', msg });              // 其余全部丢给 SW，它才认识命令
     };
-    ws.onmessage = (e) => deliver(e.data);
+    ws.onmessage = (e) => { lastRx = Date.now(); deliver(e.data); };
     ws.onclose = () => { ws = null; stopPing(); setStatus(false); scheduleReconnect(); };
     ws.onerror = () => { /* onclose 会跟着来，在那儿统一处理 */ };
     startPing();
@@ -126,11 +133,30 @@ async function connect() {
   }
 }
 
+// 心跳必须**验回音**，只发不验等于没发。
+//
+// 踩出来的：8-31 15:46 桥记下「扩展断开」，直到 17:25 用户手动重载扩展才恢复，
+// 中间 99 分钟一次重连都没发生。死法是半开——offscreen 被浏览器冻结、或系统
+// 睡醒后本地网络栈换了代，桥那侧的 socket 已经关了，这侧的 readyState 却
+// 还停在 1，`ws.send()` 也不报错。于是 onclose 永远不来，scheduleReconnect
+// 永远不触发，而 connect() 开头那句 `if (ws?.readyState <= 1) return`
+// 把所有重连尝试原地挡掉。扩展看着一切正常，桥那边已经判它死了。
+//
+// 所以判据不能是 readyState（它只反映本地对 socket 的记忆），只能是
+// 「最近还收到过对面的东西吗」。桥收到 ping 一定回 pong，45 秒里三次
+// 都没回音，这条连接就当死的处理：主动 close 掉，让重连链跑起来。
 function startPing() {
   stopPing();
   pingTimer = setInterval(() => {
-    if (ws?.readyState === 1) ws.send(JSON.stringify({ type: 'ping' }));
-    else connect();
+    if (ws?.readyState !== 1) return connect();
+    if (Date.now() - lastRx > DEAD_MS) {
+      try { ws.close(); } catch { /* 已经废了 */ }
+      ws = null;
+      stopPing();
+      setStatus(false);
+      return scheduleReconnect();
+    }
+    ws.send(JSON.stringify({ type: 'ping' }));
   }, PING_MS);
 }
 function stopPing() {
@@ -150,7 +176,9 @@ chrome.runtime.onMessage.addListener((m, _s, sendResponse) => {
     return true;
   }
   if (m?.__hcBridge === 'status') {
-    sendResponse({ connected: ws?.readyState === 1 });
+    // 同上：readyState 只是本地对 socket 的记忆，半开时它照样是 1。
+    // 把新鲜度一起算进去，SW 才不用等看门狗那 45 秒就能识破。
+    sendResponse({ connected: ws?.readyState === 1 && Date.now() - lastRx <= DEAD_MS });
     return true;
   }
   if (m?.__hcBridge === 'kick') {                   // popup 点了「立即连接」

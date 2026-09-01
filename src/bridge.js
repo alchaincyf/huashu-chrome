@@ -18,6 +18,7 @@ const PROTOCOL = 1;
 const HELLO_TIMEOUT = 5000;
 const CMD_TIMEOUT = 30000;
 const IDLE_EXIT_MS = 30 * 60 * 1000; // 半小时没人用就自己退，别留僵尸进程
+const EXT_SILENCE_MS = 50000;        // 扩展每 15 秒一次心跳，连着三拍没到就是死了
 
 // writeInfo=false 供测试用：不写 bridge.json，否则测试桥的 token 会盖掉
 // 真在跑的那个桥，用户所有 agent 会话当场断连。
@@ -25,7 +26,17 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
   ensureHome();
 
   const agents = new Set();      // role=agent 的连接
-  let extension = null;          // role=extension，同时只认一个
+  // role=extension 的连接。**按实例并存**，不是单槽。
+  //
+  // 单槽那版的死法（8-29 抓到）：主 Chrome 和 agent 起的 headless 实例
+  // 各自加载同一份扩展、各自来连，后来的把前一个踢掉、被踢的立刻重连再踢回去
+  // ——每秒一次，命令落在哪一方刚被踢掉的窗口里就报 NO_EXTENSION，
+  // 用户看到的是「插件时有时无」。
+  //
+  // 现在认 instanceId：同一个实例重连才替换，不同实例并存，命令按 primary()
+  // 路由到有窗口的那个。顺带把「同一个 Chrome 里装了两份扩展」（比如加 key
+  // 之前留下的旧 ID 条目被误启用）也一并接住了——那也只是多一个实例，不再是抢。
+  const extensions = new Set();
   // key 是「连接序号:消息id」，不是裸 id——每个 agent 进程的 id 都从 c1 开始数，
   // 只按 id 存会让两个会话的 c1 互相覆盖，响应串到别人的请求上，而且毫无征兆。
   const pending = new Map();
@@ -65,6 +76,22 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
   // 几十字节换掉一整条时序假设，划算。
   const liveSessions = () => [...new Set([...agents].map((a) => a.sid).filter(Boolean))];
 
+  // 命令发给谁。
+  //
+  // 有窗口的实例优先——headless 那个是 agent 自己起来抓页面的，
+  // 没有用户的登录态在用，把「打开淘宝订单页」路由过去等于什么都看不到。
+  // 同一档里取最近有动静的那个（心跳也算动静），这样多开几个有头 Chrome 时
+  // 命令跟着用户正在用的那个走。
+  const liveExtensions = () => [...extensions].filter((e) => e.readyState === 1);
+  function primary() {
+    const live = liveExtensions();
+    if (!live.length) return null;
+    const headed = live.filter((e) => !e.headless);
+    const pool = headed.length ? headed : live;
+    return pool.reduce((a, b) => (a.lastRx >= b.lastRx ? a : b));
+  }
+  const extLabel = (ws) => `Chrome ${ws.chromeVersion || '?'}${ws.headless ? ' · headless' : ''} · 扩展 ${ws.extVersion}`;
+
   const wss = new WebSocketServer({
     host: '127.0.0.1',
     port,
@@ -82,6 +109,7 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
     ws.isExtension = typeof origin === 'string' && origin.startsWith('chrome-extension://');
     ws.helloed = false;
     ws.connId = ++connSeq;
+    ws.lastRx = Date.now();
 
     const helloTimer = setTimeout(() => {
       if (!ws.helloed) ws.close(4008, 'hello timeout');
@@ -95,6 +123,7 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
         return send(ws, { type: 'res', ok: false, error: { code: 'INTERNAL', message: '非法 JSON' } });
       }
       lastActivity = Date.now();
+      ws.lastRx = lastActivity;
 
       if (!ws.helloed) {
         clearTimeout(helloTimer);
@@ -118,20 +147,23 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
         // 名单变了，告诉扩展一声。它平时是搭着每条命令收到 live 的，而一个会话
         // 「结束」的特征恰恰是再也没有命令过来——不推这一条，那个会话留在页面上的
         // 控制标记就摘不掉了。断线重连的情况会在下一条命令里自动补回来。
-        if (extension && extension.readyState === 1) {
-          send(extension, { type: 'event', event: 'sessions', live: liveSessions() });
+        // 每个实例都要知道名单：它们各自维护自己那份受控标签页槽
+        for (const e of liveExtensions()) {
+          send(e, { type: 'event', event: 'sessions', live: liveSessions() });
         }
       }
-      if (ws === extension) {
-        extension = null;
-        log('扩展断开');
-        broadcast({ type: 'event', event: 'extension_offline' });
-        // 扩展没了，所有在途命令立刻失败，别让 agent 干等 30 秒
-        for (const [, p] of pending) {
+      if (extensions.delete(ws)) {
+        log(`扩展断开（${extLabel(ws)}）`);
+        // 只失败**这条连接**承接的在途命令。别的实例还在正常干活，
+        // 一起清掉就是误伤——单槽时代不存在这个区分，多实例下必须有。
+        for (const [k, p] of pending) {
+          if (p.ext !== ws) continue;
           clearTimeout(p.timer);
+          pending.delete(k);
           send(p.agent, { type: 'res', id: p.id, ok: false, error: { code: 'NO_EXTENSION', message: '扩展在命令执行中断开' } });
         }
-        pending.clear();
+        // 一个都不剩了才算「扩展离线」
+        if (!liveExtensions().length) broadcast({ type: 'event', event: 'extension_offline' });
       }
     });
 
@@ -143,16 +175,37 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
 
     if (msg.role === 'extension') {
       if (!ws.isExtension) return ws.close(4003, 'role/origin mismatch');
-      if (extension && extension.readyState === 1) extension.close(4009, 'replaced'); // 后来者接管，避免重载扩展后卡死
-      extension = ws;
       ws.helloed = true;
       ws.extVersion = msg.version || '?';
+      ws.chromeVersion = msg.chrome || '?';
+      ws.headless = !!msg.headless;
+      // 老扩展不报 instanceId。退回按扩展 id 认——行为和单槽那版一样
+      // （同一份代码的两个实例仍会互相替换），但至少不会跟新扩展混着算。
+      ws.instanceId = msg.instanceId || `ext:${msg.extId || '?'}`;
+
+      // 同一个实例又连了一条：那是断线重连或重载扩展，旧的那条已经是死的，
+      // 顶掉它。**只顶同实例的**——顶错了就退回单槽，每秒互踢的老毛病就回来了。
+      for (const old of extensions) {
+        if (old.instanceId === ws.instanceId && old !== ws) {
+          extensions.delete(old);
+          if (old.readyState === 1) old.close(4009, 'replaced');
+        }
+      }
+      extensions.add(ws);
+
       // 改了扩展代码却忘记去 chrome://extensions 重载，是这类产品最高频的故障，
       // 症状还都是些莫名其妙的行为。这里把它变成一句明确的话。
       if (ws.extVersion !== VERSION) {
         log(`⚠️  版本不一致：扩展 ${ws.extVersion} vs 桥 ${VERSION} —— 去 chrome://extensions 重载扩展`);
       }
-      log(`扩展已连接（Chrome ${msg.chrome || '?'} · 扩展 ${ws.extVersion}）`);
+      log(`扩展已连接（${extLabel(ws)}）`);
+      // 多实例不再是故障，但仍然值得说一声：命令只会去其中一个，
+      // 而「为什么我的命令跑到另一个 Chrome 里去了」全靠这行日志才查得到。
+      const live = liveExtensions();
+      if (live.length > 1) {
+        log(`⚠️  当前有 ${live.length} 个 Chrome 实例连着（${live.map(extLabel).join(' / ')}），`
+          + `命令路由到：${extLabel(primary())}`);
+      }
       send(ws, { type: 'welcome', bridge: VERSION, v: PROTOCOL });
       broadcast({ type: 'event', event: 'extension_online' });
       flushWaiting();
@@ -172,11 +225,17 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
       // 行为和以前一样（桥一重启就丢槽），但至少不会串到别人的槽上。
       ws.sid = msg.sessionId || `conn:${ws.connId}`;
       log(`agent 已连接：${ws.client}（会话 ${ws.sid}）`);
+      const ext = primary();
       send(ws, {
         type: 'welcome', bridge: VERSION, v: PROTOCOL,
-        extensionOnline: !!extension,
-        extensionVersion: extension?.extVersion,
-        versionMismatch: !!extension && extension.extVersion !== VERSION,
+        extensionOnline: !!ext,
+        extensionVersion: ext?.extVersion,
+        versionMismatch: !!ext && ext.extVersion !== VERSION,
+        // 多实例是诊断信息，不是故障。doctor 要能说出「有两个 Chrome 连着」，
+        // 否则「命令跑到另一个窗口去了」这种事只能靠猜。
+        extensions: liveExtensions().map((e) => ({
+          chrome: e.chromeVersion, version: e.extVersion, headless: e.headless, primary: e === ext,
+        })),
       });
       return;
     }
@@ -188,8 +247,9 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
     // agent → extension
     if (msg.type === 'cmd') {
       if (!agents.has(ws)) return;
-      if (!extension || extension.readyState !== 1) return enqueue(ws, msg);
-      return dispatch(ws, msg);
+      const target = primary();
+      if (!target) return enqueue(ws, msg);
+      return dispatch(ws, msg, target);
     }
 
     // extension → agent
@@ -226,7 +286,8 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
     if (q.length) log(`扩展回来了，补发 ${q.length} 条排队的命令`);
   }
 
-  function dispatch(ws, msg) {
+  function dispatch(ws, msg, target = primary()) {
+    if (!target) return enqueue(ws, msg);
     const gate = checkSite(msg);
     if (gate) {
       audit({ ev: 'blocked', cmd: msg.cmd, client: ws.client, reason: gate.code });
@@ -241,7 +302,8 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
       send(ws, { type: 'res', id: msg.id, ok: false, error: { code: 'TIMEOUT', message: `扩展 ${Math.round(ms / 1000)}s 未响应` } });
     }, ms);
 
-    pending.set(key, { agent: ws, cmd: msg.cmd, timer, startedAt: Date.now(), id: msg.id });
+    // 记下**是哪个实例接的**：它断线时只该失败自己承接的这些，别误伤其他实例
+    pending.set(key, { agent: ws, ext: target, cmd: msg.cmd, timer, startedAt: Date.now(), id: msg.id });
     // 审计里的 id 必须全局唯一，否则 cmd 和 res 根本配不上对：
     // msg.id 是每个 agent 进程内自增的（都从 c1 开始数），实测 5381 条 cmd
     // 只有 281 个不同的 id，最多的一个出现了 1088 次。
@@ -251,7 +313,7 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
     // sid 盖章：扩展据此维护每个会话自己的受控 tab 槽（多 agent 并发隔离）。
     // live 是此刻还连着的会话，扩展拿它判断某个标签页「还有没有主」。
     // client 是给人看的：页面上的控制标记要写出「Claude Code」而不是一串 sid。
-    send(extension, { ...msg, __k: key, sid: ws.sid, client: ws.client, live: liveSessions() });   // __k 原样带回，用于精确路由
+    send(target, { ...msg, __k: key, sid: ws.sid, client: ws.client, live: liveSessions() });   // __k 原样带回，用于精确路由
   }
 
   function routeBack(ws, msg) {
@@ -262,7 +324,7 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
 
     // extension → agent
     if (msg.type === 'res') {
-      if (ws !== extension) return;
+      if (!extensions.has(ws)) return;
       let key = msg.__k;
       let p = key ? pending.get(key) : null;
       if (!p) {
@@ -278,7 +340,7 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
       return;
     }
 
-    if (msg.type === 'event' && ws === extension) broadcast(msg);
+    if (msg.type === 'event' && extensions.has(ws)) broadcast(msg);
   }
 
   // 站点白名单：默认拒绝。裁决在这里做，agent 够不着。
@@ -349,11 +411,21 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
   }
 
   const idleTimer = setInterval(() => {
-    if (agents.size === 0 && !extension && Date.now() - lastActivity > IDLE_EXIT_MS) {
+    // 桥原来只在收到 close 时才知道扩展没了——可半开连接永远不发 close。
+    // 扩展那侧 readyState 还停在 1、send 也不报错，两边就这么各自以为
+    // 对方还在，而 agent 收到的全是 NO_EXTENSION。主动切断是为了让扩展侧的
+    // onclose 真的触发，它那条重连链才跑得起来。
+    for (const e of liveExtensions()) {
+      if (Date.now() - e.lastRx > EXT_SILENCE_MS) {
+        log(`扩展静默超时，判定这条连接已死（${extLabel(e)}）`);
+        e.terminate();
+      }
+    }
+    if (agents.size === 0 && !liveExtensions().length && Date.now() - lastActivity > IDLE_EXIT_MS) {
       log('空闲超时，桥自行退出');
       process.exit(0);
     }
-  }, 60000);
+  }, 20000);
   idleTimer.unref();
 
   return { wss, port, token, ready, close: () => { clearInterval(idleTimer); wss.close(); for (const c of wss.clients) c.terminate(); } };

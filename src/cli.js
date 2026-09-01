@@ -150,6 +150,17 @@ async function doctor() {
       const r = await probe(info);
       r.ok ? ok(`握手正常${r.extensionOnline ? ` · Chrome 扩展在线 (v${r.extensionVersion})` : ''}`) : bad('握手失败：' + r.error);
       if (r.versionMismatch) bad(`扩展版本 ${r.extensionVersion} 和 CLI 不一致`, '去 chrome://extensions 点重载，再刷新目标页面');
+      // 多个 Chrome 实例连着不再是故障（桥按实例路由），但必须说出来：
+      // 「命令为什么跑到另一个窗口去了」只有这一处看得见。
+      if ((r.extensions || []).length > 1) {
+        console.log(`  ℹ️  ${r.extensions.length} 个 Chrome 实例连着桥：`);
+        for (const e of r.extensions) {
+          console.log(`       ${e.primary ? '→' : ' '} Chrome ${e.chrome} · 扩展 ${e.version}${e.headless ? ' · headless' : ''}${e.primary ? '（命令走这个）' : ''}`);
+        }
+        if (r.extensions.some((e) => e.headless)) {
+          console.log('       headless 那个多半是某次抓取留下的孤儿进程，可以 kill 掉');
+        }
+      }
       if (r.ok && !r.extensionOnline) {
         // 这一句原先只说「确认扩展已启用」，而它最常见的原因根本不是没启用：
         // Chrome 会回收扩展的后台进程，桥这边就表现为「没连上」。先说这个，
@@ -182,7 +193,7 @@ function probe(info) {
       const m = JSON.parse(ev.data);
       ws.close();
       resolve(m.type === 'welcome'
-        ? { ok: true, extensionOnline: m.extensionOnline, extensionVersion: m.extensionVersion, versionMismatch: m.versionMismatch }
+        ? { ok: true, extensionOnline: m.extensionOnline, extensionVersion: m.extensionVersion, versionMismatch: m.versionMismatch, extensions: m.extensions || [] }
         : { ok: false, error: JSON.stringify(m) });
     };
   });
