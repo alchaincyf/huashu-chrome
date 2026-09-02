@@ -104,7 +104,7 @@ args = ["-y", "huashu-chrome", "mcp", "--client", "codex"]
 |---|---|
 | `snapshot` | 把当前页拍成带 ref 编号的可交互元素清单（含 value / checked / selected / expanded / disabled 和靠 class 表达的状态），弹窗和页面提示单列，一页通常 1–2k token |
 | `fill` | **一次填完整张表**并提交。10 个字段一个来回，不是十个 |
-| `click` `type` `select` | 按 ref 操作，返回操作后的新快照 |
+| `click` `type` `select` | 按 ref 操作，返回操作后的新快照。带 `expect`（`{checked, value, text, gone, appears}`）时回答的不再是「变没变」而是「变成我要的样子没有」，落空明说。画布、地图、游戏这类快照里什么都没有的页面，`click {x, y}` 按截图坐标发真实点击，`dragTo` 拖拽 |
 | `key` | Esc / Tab / Enter / 方向键 / `ctrl+a`，可传数组一次按一串 |
 | `navigate` `tabs` `wait` `scroll` | 导航、标签页、等待、滚动加载 |
 | `read_text` | 正文提取成 markdown，去掉导航页脚广告和头像图 |
@@ -128,7 +128,7 @@ args = ["-y", "huashu-chrome", "mcp", "--client", "codex"]
 
 | 工具 | 干什么 |
 |---|---|
-| `screenshot` | 只在版式本身就是问题时用。开了高保真模式可以直接截后台标签页，不打断你；`savePath` 落盘不进上下文 |
+| `screenshot` | 只在版式本身就是问题时用。开了高保真模式可以直接截后台标签页，不打断你。默认 60% 缩放的 JPEG（视觉 token 省四分之三），`full:true` 拿 1:1 PNG；`savePath` 落盘不进上下文 |
 
 这套顺序不用你教给 agent——MCP server 在握手时就把它作为 `instructions` 下发了。
 
@@ -149,6 +149,11 @@ agent 说「点 e3」，不说「点坐标 (420, 88)」也不说「点 `.btn-sea
 
 **iframe 里的元素**编号带 `@fN` 后缀（`[e5@f2] button "确认支付"`），照原样传给任何
 工具即可，路由是自动的，跨源也有效——支付、验证码、OAuth 都在 iframe 里。
+
+**弹窗和站方声明的工具也单列**。`[role=dialog]` 一类的浮层文字放在 `🪟` 段；页面用
+WebMCP 声明式表单（`<form toolname tooldescription>`，Chrome 149 起 origin trial）自述
+「这个表单干什么、每个字段填什么」时，放在 `🔧` 段并标出各字段的 ref——站方写的参数说明
+比猜字段准。
 
 **页面提示单列一段**。表单流程最主要的失败模式是校验错误，而它常在长页面的下方：
 

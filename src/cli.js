@@ -161,7 +161,7 @@ async function doctor() {
     }
   }
   if (alive) {
-    ok(`pid ${info.pid} · 端口 ${info.port} · 起于 ${info.startedAt?.slice(11, 19)}`);
+    ok(`pid ${info.pid} · 端口 ${info.port} · 起于 ${info.startedAt ? new Date(info.startedAt).toLocaleTimeString('zh-CN', { hour12: false }) : '?'}`);
     {
       const r = await probe(info);
       r.ok ? ok(`握手正常${r.extensionOnline ? ` · Chrome 扩展在线 (v${r.extensionVersion})` : ''}`) : bad('握手失败：' + r.error);

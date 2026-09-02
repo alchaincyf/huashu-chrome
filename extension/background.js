@@ -1166,10 +1166,16 @@ async function execL2(id, cmd, params, loc) {
 // 只能再拍一次或写 eval 去核实（审计里 click→eval 109 次、snapshot→snapshot
 // 588 次，相当一部分是这么来的）。所以等证据集合连续两拍不再变化再返回：
 // 快页面多付 100ms，慢页面拿到的是落定后的样子。上限仍是 SETTLE_MS。
+//
+// 带 expect 时判据换成「期望满足了没有」：满足立刻返回（最强的证据），
+// 到点没满足就把现场写进 expectUnmet——「变没变」和「变成我要的样子没有」
+// 终于是两个问题了。
 async function settle(id, frameId, params, baseline, beforeUrl) {
   const deadline = Date.now() + SETTLE_MS;
   let last = { changed: false, parts: [] };
   let prevKey = null;
+  const expect = params.expect && typeof params.expect === 'object' ? params.expect : null;
+  let verdict = null;
   while (Date.now() < deadline) {
     await sleep(100);
     const url = (await chrome.tabs.get(id)).url;
@@ -1177,6 +1183,11 @@ async function settle(id, frameId, params, baseline, beforeUrl) {
     if (url !== beforeUrl) return { changed: true, navigated: true, parts: [`已跳转到 ${url}`] };
     try {
       last = await toContent(id, { __hc: 'effect', baseline, ref: params.ref, selector: params.selector, find: params.find }, frameId);
+      if (expect) {
+        verdict = await toContent(id, { __hc: 'expect', expect, ref: params.ref, selector: params.selector, find: params.find }, frameId);
+        if (verdict?.ok) return { ...last, changed: true, parts: [...(last.parts || []), `期望已满足：${verdict.text}`] };
+        continue;   // 有期望就等期望，不按「证据稳定」早停
+      }
     } catch {
       /* 页面正在换页时 content script 会短暂不在，下一轮再问 */
       continue;
@@ -1190,8 +1201,11 @@ async function settle(id, frameId, params, baseline, beforeUrl) {
     if (key === prevKey) return last;
     prevKey = key;
   }
+  if (expect) last = { ...last, expectUnmet: verdict?.text || condOf(expect) };
   return last;
 }
+
+const condOf = (e) => Object.entries(e || {}).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(' ');
 
 // ---------- 凭据隐去 ----------
 //
@@ -1342,6 +1356,13 @@ async function evalCond(tabId, cond) {
   if (!cond || typeof cond !== 'object') return true;
   let hit = false;
   try {
+    // 单元素判据 {ref|selector, checked|value|text}：走 content 的 expect，那边认得 refMap
+    if ((cond.ref || cond.selector) && ('checked' in cond || 'value' in cond || 'text' in cond)) {
+      const { ref, selector, not, ...expect } = cond;
+      const v = await toContent(tabId, { __hc: 'expect', expect, ref, selector }).catch(() => null);
+      hit = !!v?.ok;
+      return cond.not ? !hit : hit;
+    }
     if (cond.urlContains) hit = ((await chrome.tabs.get(tabId)).url || '').includes(cond.urlContains);
     if (!hit && (cond.selectorExists || cond.textContains)) {
       const [{ result } = {}] = await chrome.scripting.executeScript({
@@ -1434,6 +1455,26 @@ async function performCore(id, cmd, p, { blockSensitive = false } = {}, ctx) {
   // 定位：resolve、滚动、遮挡检测全在 content script 里做（一行没改），
   // 顺带把效果基线采回来。没有 ref 的操作（fill、无 ref 的 key）只采基线。
   const hasTarget = !!(params.ref || params.selector || params.find);
+
+  // 坐标点击 / 拖拽：canvas、地图、游戏这类站快照里什么都没有，agent 只能靠截图看，
+  // 而看到了也没有任何一条路能点到那个位置（审计里 287 次截图集中在这类站）。
+  // 走真实事件，不做元素定位，效果证据只有全局那几样；支付闸门在这里管不着——
+  // 坐标点不到「按钮文案」，这条路的安全边界是它本来就要求显式给坐标。
+  if (cmd === 'click' && !hasTarget && Number.isFinite(params.x) && Number.isFinite(params.y)) {
+    const base = await toContent(id, { __hc: 'locate', baselineOnly: true }, frameId).catch(() => null);
+    const x = Number(params.x), y = Number(params.y);
+    let note;
+    if (params.dragTo && Number.isFinite(params.dragTo.x) && Number.isFinite(params.dragTo.y)) {
+      await cdp.drag(id, x, y, Number(params.dragTo.x), Number(params.dragTo.y));
+      note = `已从 (${x}, ${y}) 拖到 (${params.dragTo.x}, ${params.dragTo.y})（真实事件）`;
+    } else {
+      await cdp.click(id, x, y);
+      note = `已点击坐标 (${x}, ${y})（真实事件）`;
+    }
+    const ev = await settle(id, frameId, { ...params, ref: undefined }, base?.baseline, before);
+    const after = (await chrome.tabs.get(id)).url;
+    return { note, l2note: '', ev, navigated: before !== after, upgraded: false };
+  }
   const loc = await toContent(id,
     // fields 要带过去：fill 没有单一目标，它的效果证据靠逐个字段的状态，
     // 不然填表这条最高频的路上永远报「页面没有反应」。
@@ -1610,6 +1651,7 @@ function effectLines({ note, l2note, ev, upgraded, followed }) {
   return [
     note + (upgraded ? '　←　普通事件无效，已自动改用真实事件' : ''),
     l2note,
+    ev.expectUnmet ? `⚠️ 期望未满足（等了 ${SETTLE_MS / 1000}s）：${ev.expectUnmet}。别按「成功」往下走。` : '',
     ev.changed
       ? `效果：${ev.parts.join('；')}` + (ev.volatile ? '　（注意：这个页面本身也在持续变化）' : '')
       : ev.unattributable
@@ -1748,6 +1790,10 @@ const HANDLERS = {
           id = r.followed.to;
           structureChanged = true;
           out.push(`✅ ${label}　↪️ 开了新标签页 [${r.followed.to}]，后面几步已改在新页面上执行`);
+          return;
+        }
+        if (r.ev.expectUnmet) {
+          stopped = { label, why: `期望未满足：${r.ev.expectUnmet}。页面没变成这一步预期的样子，后面的步骤不该跑。` };
           return;
         }
         if (!r.ev.changed) {
@@ -2122,7 +2168,7 @@ const HANDLERS = {
     // 幕帘失败绝不能弄失败截图本身。
     const veiled = await veilMarks(id, true);
     try {
-      return { dataUrl: await cdp.screenshot(id) };
+      return await cdp.screenshot(id, { full: !!p.full });
     } catch (e) {
       if (e.code !== 'NEEDS_L2' && e.code !== 'L2_BUSY') throw e;
       // 没有调试器权限时退回老路，前台保护一条不少
@@ -2151,7 +2197,10 @@ const HANDLERS = {
       // 用固定等待兜住（tab 不在前台的分支上面已经 sleep(250)，这里覆盖的是
       // 「本来就在前台」那条最短路径）。
       if (veiled) await sleep(60);
-      return { dataUrl: await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' }) };
+      // 这条老路缩不了尺寸，至少换成 JPEG 省一截
+      return p.full
+        ? { dataUrl: await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' }), scale: 1 }
+        : { dataUrl: await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 80 }), scale: 1 };
     } finally {
       if (veiled) void veilMarks(id, false);
     }

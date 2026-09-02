@@ -193,6 +193,21 @@ export async function hover(tabId, x, y) {
     cmd('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none', buttons: 0 }));
 }
 
+// 真实拖拽：按下 → 分几步移过去 → 松开。画布类应用（react-flow、地图、游戏）
+// 靠 mousemove 的中间点判断拖拽意图，一步跳到终点很多库不认。
+export async function drag(tabId, x1, y1, x2, y2, { steps = 8 } = {}) {
+  return withL2(tabId, async (cmd) => {
+    await cmd('Input.dispatchMouseEvent', { type: 'mouseMoved', x: x1, y: y1, button: 'none', buttons: 0 });
+    await cmd('Input.dispatchMouseEvent', { type: 'mousePressed', x: x1, y: y1, button: 'left', buttons: 1, clickCount: 1 });
+    for (let i = 1; i <= steps; i++) {
+      const x = x1 + (x2 - x1) * i / steps, y = y1 + (y2 - y1) * i / steps;
+      await cmd('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'left', buttons: 1 });
+    }
+    await cmd('Input.dispatchMouseEvent', { type: 'mouseReleased', x: x2, y: y2, button: 'left', buttons: 0, clickCount: 1 });
+    return true;
+  });
+}
+
 const VK = {
   Enter: 13, Tab: 9, Escape: 27, Backspace: 8, Delete: 46, ' ': 32,
   ArrowUp: 38, ArrowDown: 40, ArrowLeft: 37, ArrowRight: 39,
@@ -258,10 +273,25 @@ export async function setFileInput(tabId, selector, files) {
 // 截后台标签页。captureVisibleTab 截的是「那个窗口当前可见的那一页」，
 // 所以现在的 screenshot 必须先把标签页切到前台——而那会打断用户，
 // 与本产品「后台干活」的硬规则直接冲突。CDP 这条不需要前台。
-export async function screenshot(tabId, { format = 'png' } = {}) {
+//
+// 默认 60% 缩放的 JPEG：视觉 token 按像素数算，缩到 0.6 就是省掉 64%，而
+// 「这一页大概长什么样、按钮在哪」这类问题 60% 足够看清。要读小字、量像素
+// 传 full:true 拿 1:1 PNG。缩放走 clip.scale——Chrome 在合成时缩，不是拍完再缩。
+export async function screenshot(tabId, { full = false } = {}) {
   return withL2(tabId, async (cmd) => {
-    const r = await cmd('Page.captureScreenshot', { format, captureBeyondViewport: false });
-    return `data:image/${format};base64,${r.data}`;
+    if (full) {
+      const r = await cmd('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
+      return { dataUrl: `data:image/png;base64,${r.data}`, scale: 1 };
+    }
+    const scale = 0.6;
+    const m = await cmd('Page.getLayoutMetrics');
+    const v = m.cssVisualViewport || m.visualViewport || {};
+    const width = Math.max(1, Math.round(v.clientWidth || 1280)), height = Math.max(1, Math.round(v.clientHeight || 800));
+    const r = await cmd('Page.captureScreenshot', {
+      format: 'jpeg', quality: 80, captureBeyondViewport: false,
+      clip: { x: 0, y: 0, width, height, scale },
+    });
+    return { dataUrl: `data:image/jpeg;base64,${r.data}`, scale };
   });
 }
 

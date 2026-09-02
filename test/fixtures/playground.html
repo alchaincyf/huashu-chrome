@@ -213,6 +213,18 @@
   <p>状态文字：<span id="statusText">订单状态：待付款</span></p>
 </section>
 
+<section id="s15">
+  <h2>15. 像素路径与期望</h2>
+  <canvas id="cv" width="240" height="90" style="border:1px solid #999;display:block"></canvas>
+  <p>画布收到：点击 <b id="cvOut">无</b> · 拖拽 <b id="dragOut">无</b></p>
+  <p><button id="toggleBtn">切换</button> 开关：<b id="toggleOut">关</b></p>
+  <form toolname="search-cars" tooldescription="按品牌和车型搜车" toolautosubmit onsubmit="return false">
+    <input name="make" toolparamdescription="品牌，如 BMW" placeholder="品牌">
+    <input name="model" toolparamdescription="车型，如 330i" placeholder="车型">
+    <button type="submit">搜索</button>
+  </form>
+</section>
+
 <script>
 // 跨源 iframe：localhost 和 127.0.0.1 是不同的源，端口跟随当前页面，换端口也能跑
 document.getElementById('xframe').src =
@@ -349,4 +361,15 @@ document.getElementById('slowBtn').onclick = function () {
 document.getElementById('openDlg').onclick = () => document.getElementById('dlg').classList.remove('hidden');
 document.getElementById('dlgClose').onclick = () => document.getElementById('dlg').classList.add('hidden');
 document.getElementById('chk').onclick = function () { this.classList.toggle('is-checked'); };
+
+// ---- 15. 像素路径与期望 ----
+const cv = document.getElementById('cv');
+const cvPos = (e) => { const r = cv.getBoundingClientRect(); return `${Math.round(e.clientX - r.left)},${Math.round(e.clientY - r.top)}`; };
+cv.addEventListener('click', (e) => { document.getElementById('cvOut').textContent = cvPos(e) + (e.isTrusted ? '' : '(合成)'); });
+let dragFrom = null;
+cv.addEventListener('mousedown', (e) => { dragFrom = cvPos(e); });
+cv.addEventListener('mouseup', (e) => { if (dragFrom) document.getElementById('dragOut').textContent = `${dragFrom}→${cvPos(e)}`; dragFrom = null; });
+document.getElementById('toggleBtn').onclick = () => {
+  const o = document.getElementById('toggleOut'); o.textContent = o.textContent === '关' ? '已开启' : '关';
+};
 </script>

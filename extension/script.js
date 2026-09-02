@@ -74,6 +74,10 @@ export function condText(cond) {
   if (cond.urlContains) parts.push(`url含"${String(cond.urlContains).slice(0, 30)}"`);
   if (cond.selectorExists) parts.push(`有 ${String(cond.selectorExists).slice(0, 30)}`);
   if (cond.textContains) parts.push(`文本含"${String(cond.textContains).slice(0, 20)}"`);
+  if (cond.ref || cond.selector) {
+    const who = cond.ref ? `[${cond.ref}]` : `(${String(cond.selector).slice(0, 30)})`;
+    for (const k of ['checked', 'value', 'text']) if (k in cond) parts.push(`${who} ${k}=${JSON.stringify(cond[k]).slice(0, 30)}`);
+  }
   const s = parts.join(' 或 ') || '（空条件）';
   return cond.not ? `非（${s}）` : s;
 }

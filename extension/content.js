@@ -359,11 +359,13 @@
     const excerpt = mainText().slice(0, 1500);
     const alerts = collectAlerts();
     const overlays = collectOverlays();
+    const tools = collectDeclaredTools(refMap);
     const header = `# ${document.title} — ${location.href}\n[snapshot ${snapshotId}] ${n} 个可交互元素`
       + (truncated ? '（已截断：元素太多，只列了一部分；要看别处的，先滚动到那里再拍）' : '')
       + (keep.offWindow ? `（视口上下几屏之外还有 ${keep.offWindow} 个，scroll 过去再拍才看得到）` : '') + '\n'
       + (alerts.length ? `\n⚠️ 页面提示：\n${alerts.map((a) => '  · ' + a).join('\n')}\n` : '')
-      + (overlays.length ? `\n🪟 浮层/对话框（盖在页面上，多半要先处理）：\n${overlays.map((a) => '  · ' + a).join('\n')}\n` : '');
+      + (overlays.length ? `\n🪟 浮层/对话框（盖在页面上，多半要先处理）：\n${overlays.map((a) => '  · ' + a).join('\n')}\n` : '')
+      + (tools.length ? `\n🔧 页面声明的工具（WebMCP 表单，站方自己写的参数说明，比猜字段准）：\n${tools.map((a) => '  · ' + a).join('\n')}\n` : '');
     return {
       untrusted: true,
       meta: `url="${location.href}" snapshot="${snapshotId}"`,
@@ -438,6 +440,34 @@
         if (el.querySelector('[role="dialog"],[role="alertdialog"]')) continue;
         const t = (el.innerText || '').replace(/\s+/g, ' ').trim();
         if (t) out.push(t.length > 200 ? t.slice(0, 200) + '…' : t);
+      }
+    } catch { /* 页面正在换页 */ }
+    return out;
+  }
+
+  // WebMCP 的声明式表单（Chrome 149 起 origin trial；Booking、Shopify、Etsy 在试）：
+  // <form toolname tooldescription> + <input name toolparamdescription>。
+  // 站方自己把「这个表单是干什么的、每个字段填什么」写在了 DOM 上——
+  // 这是「NETWORK for DATA」哲学的官方化：页面自己说它能做什么，别猜。
+  // 这里只做发现，不做新命令：填还是 fill、提交还是 click，走既有的效果证据和支付闸门。
+  // 命令式 API（document.modelContext.getTools）住在页面主世界，隔离世界够不着，先不碰。
+  function collectDeclaredTools(refs) {
+    const out = [];
+    try {
+      for (const form of document.querySelectorAll('form[toolname]')) {
+        if (out.length >= 6) break;
+        const name = form.getAttribute('toolname') || '';
+        const desc = (form.getAttribute('tooldescription') || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+        const params = [];
+        for (const el of form.querySelectorAll('[name]')) {
+          if (params.length >= 8) break;
+          const pd = (el.getAttribute('toolparamdescription') || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+          let ref = '';
+          for (const [r, rec] of refs) if (rec.el === el) { ref = r; break; }
+          params.push(`${el.getAttribute('name')}${pd ? `（${pd}）` : ''}${ref ? ` [${ref}]` : ''}`);
+        }
+        out.push(`${name}${desc ? ` — ${desc}` : ''}${params.length ? `；参数：${params.join('、')}` : ''}`
+          + (form.hasAttribute('toolautosubmit') ? '；站方允许自动提交' : ''));
       }
     } catch { /* 页面正在换页 */ }
     return out;
@@ -1856,6 +1886,46 @@
     return { data: { untrusted: true, text: bits.join('\n') } };
   }
 
+  // 期望判定：把「变没变」升级成「变成我要的样子没有」。返回 {ok, text}，
+  // text 是现场读数——不满足时 agent 要知道现在到底是什么，不是只知道「不是」。
+  function doExpect(p) {
+    const e = p.expect || {};
+    let el = null;
+    try {
+      if (p.find) el = findEl(p.find);
+      else if (p.selector) el = document.querySelector(p.selector);
+      else if (p.ref) el = refMap.get(p.ref)?.el || null;
+    } catch { el = null; }
+    const alive = !!(el && el.isConnected && isVisible(el, undefined, true));
+    const checks = [];
+    if ('gone' in e) checks.push([!alive === !!e.gone, `gone=${!alive}`]);
+    if (e.appears) {
+      let seen = false;
+      try { seen = !!document.querySelector(e.appears); } catch { /* 不是 selector */ }
+      if (!seen) seen = (document.body?.innerText || '').includes(e.appears);
+      checks.push([seen, `appears(${e.appears})=${seen}`]);
+    }
+    if ('checked' in e || 'value' in e || 'text' in e) {
+      if (!el) checks.push([false, '目标不在页面上']);
+      else {
+        if ('checked' in e) {
+          const now = !!(el.checked ?? el.getAttribute('aria-checked') === 'true');
+          checks.push([now === !!e.checked, `checked=${now}`]);
+        }
+        if ('value' in e) {
+          const now = String(el.value ?? el.innerText ?? '').trim();
+          checks.push([now === String(e.value) || now.includes(String(e.value)), `value=${JSON.stringify(now.slice(0, 80))}`]);
+        }
+        if ('text' in e) {
+          const now = (el.innerText || el.value || '').replace(/\s+/g, ' ').trim();
+          checks.push([now.includes(String(e.text)), `text=${JSON.stringify(now.slice(0, 80))}`]);
+        }
+      }
+    }
+    if (!checks.length) return { data: { ok: true, text: '（空期望）' } };
+    return { data: { ok: checks.every((c) => c[0]), text: checks.map((c) => c[1]).join('，') } };
+  }
+
   function doQuery(p) {
     if (p.contains) return queryByText(p);
     if (!p.selector) throw fail('INTERNAL', 'query 需要 selector 或 contains');
@@ -1937,6 +2007,7 @@
           case 'wait': return sendResponse(await doWait(msg));
           case 'query': return sendResponse(doQuery(msg));
           case 'read': return sendResponse(doRead(msg));
+          case 'expect': return sendResponse(doExpect(msg));
           case 'upload': return sendResponse(doUpload(msg));
           case 'scroll': return sendResponse(await doScroll(msg));
           case 'history':

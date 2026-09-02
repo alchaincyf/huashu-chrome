@@ -1130,3 +1130,76 @@ test('act 里小动静（区块 +几个节点）不作废 ref', async () => {
   });
   assert.match(r.text, /act 完成（顶层 2\/2/, r.text.split('\n').slice(0, 6).join('\n'));
 });
+
+// ---------- 像素路径、期望、WebMCP ----------
+
+test('坐标点击打在画布上，画布收到的是真实事件', async () => {
+  await bottom();
+  const [x, y] = JSON.parse(await val('(() => { const r = document.getElementById("cv").getBoundingClientRect(); return [Math.round(r.left + 120), Math.round(r.top + 45)]; })()'));
+  const r = await c.call('click', { x, y });
+  assert.match(r.text, /已点击坐标/);
+  const got = await val('document.getElementById("cvOut").textContent');
+  assert.match(got, /^"12\d,4\d"$/, `画布记到的坐标不对：${got}`);
+  assert.doesNotMatch(got, /合成/, '坐标点击必须是真实事件');
+});
+
+test('dragTo 走真实拖拽，画布记到起点和终点', async () => {
+  await bottom();
+  const [x, y] = JSON.parse(await val('(() => { const r = document.getElementById("cv").getBoundingClientRect(); return [Math.round(r.left + 20), Math.round(r.top + 20)]; })()'));
+  const r = await c.call('click', { x, y, dragTo: { x: x + 100, y: y + 30 } });
+  assert.match(r.text, /已从 \(/);
+  const got = await val('document.getElementById("dragOut").textContent');
+  assert.match(got, /^"2\d,2\d→1[12]\d,[45]\d"$/, `拖拽起终点不对：${got}`);
+});
+
+test('expect 命中：效果证据写明「期望已满足」', async () => {
+  await bottom();
+  // text 看的是目标本身（这里是按钮），输出在别的元素上——用 appears 看页面
+  const r = await c.call('click', { selector: '#toggleBtn', expect: { appears: '开关：已开启' } });
+  assert.match(r.text, /期望已满足/, r.text.split('\n').slice(0, 3).join('\n'));
+  const r2 = await c.call('click', { selector: '#toggleBtn', expect: { appears: '开关：关' } });
+  assert.match(r2.text, /期望已满足/);
+});
+
+test('expect 落空：明说未满足，act 停在这一步', async () => {
+  await bottom();
+  const r = await c.call('click', { selector: '#toggleBtn', expect: { appears: '这段文字不会出现' } });
+  assert.match(r.text, /⚠️ 期望未满足/);
+  const a = await c.call('act', {
+    steps: [
+      { do: 'click', selector: '#toggleBtn', expect: { appears: '这段文字不会出现' } },
+      { do: 'click', selector: '#toggleBtn' },
+    ],
+  });
+  assert.match(a.text, /act 停在第 1 步/);
+  assert.match(a.text, /期望未满足/);
+});
+
+test('assert 支持单元素判据 {selector, text}', async () => {
+  await bottom();
+  const now = JSON.parse(await val('document.getElementById("toggleOut").textContent'));
+  const a = await c.call('act', {
+    steps: [
+      { do: 'assert', cond: { selector: '#toggleOut', text: now } },
+      { do: 'assert', cond: { selector: '#toggleOut', text: now === '关' ? '已开启' : '关' } },
+    ],
+  });
+  assert.match(a.text, /✅ 断言成立/);
+  assert.match(a.text, /断言不成立/);
+});
+
+test('WebMCP 声明式表单进快照头部，参数说明和 ref 一起给', async () => {
+  const snap = await bottom();
+  assert.match(snap.text, /🔧 页面声明的工具[\s\S]*search-cars — 按品牌和车型搜车；参数：make（品牌，如 BMW） \[e\d+\]、model（车型，如 330i） \[e\d+\]；站方允许自动提交/);
+});
+
+test('截图默认 60% JPEG，full 才是 1:1 PNG', async (t) => {
+  await go();
+  const small = await c.call('screenshot', {}).catch((e) => ({ err: e }));
+  if (small.err?.code === 'NEEDS_L2' || small.err?.code === 'L2_BUSY') return t.skip('没有调试器权限');
+  assert.match(small.dataUrl, /^data:image\/jpeg/);
+  assert.equal(small.scale, 0.6);
+  const full = await c.call('screenshot', { full: true });
+  assert.match(full.dataUrl, /^data:image\/png/);
+  assert.ok(full.dataUrl.length > small.dataUrl.length * 1.5, `全尺寸 PNG 应明显更大：${full.dataUrl.length} vs ${small.dataUrl.length}`);
+});
