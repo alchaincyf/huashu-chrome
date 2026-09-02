@@ -31,6 +31,8 @@ let retryTimer = null;
 let retryDelay = 0;
 let connecting = false;
 let lastRx = 0;                 // 最近一次从桥收到**任何**东西的时刻（含 pong）
+let lastTick = 0;               // 心跳定时器上一次跑到的时刻——判「机器睡过一觉」用
+let bridgeVersion = '';         // welcome 里桥报的版本，popup 要显示、SW 要比对
 
 const post = (m) => chrome.runtime.sendMessage(m).catch(() => { /* SW 正在起来，下一条会到 */ });
 
@@ -115,10 +117,13 @@ async function connect() {
     ws = hit.sock;
     retryDelay = 0;
     lastRx = Date.now();      // 看门狗的起点：刚握完手，算收到过
+    bridgeVersion = String(hit.welcome?.bridge || '');
     const deliver = (raw) => {
       let msg;
       try { msg = JSON.parse(raw); } catch { return; }
       if (msg.type === 'pong') return;              // 心跳回执，收到本身就是目的
+      // 桥主动探活（静默 50 秒后它会先问一声再杀）——回一声就行，不必吵醒 SW
+      if (msg.type === 'ping') { if (ws?.readyState === 1) ws.send(JSON.stringify({ type: 'pong' })); return; }
       post({ __hcBridge: 'in', msg });              // 其余全部丢给 SW，它才认识命令
     };
     ws.onmessage = (e) => { lastRx = Date.now(); deliver(e.data); };
@@ -145,11 +150,26 @@ async function connect() {
 // 所以判据不能是 readyState（它只反映本地对 socket 的记忆），只能是
 // 「最近还收到过对面的东西吗」。桥收到 ping 一定回 pong，45 秒里三次
 // 都没回音，这条连接就当死的处理：主动 close 掉，让重连链跑起来。
+//
+// 但看门狗认的是**墙钟差**，而墙钟差在机器睡过一觉之后是假的：9-2 上午 bridge.log
+// 里 9 次「静默超时」逐条对上了 pmset 的暗唤醒记录——定时器在睡眠里根本没跑，
+// 醒来第一拍 Date.now() - lastRx 必然超过 45 秒，于是连接被自己判死、断一次、
+// 再重连一次，桥那侧同时也在杀。判据加一条：这一拍离上一拍超过两个周期，说明
+// 中间睡过，那就先把 lastRx 当成现在、立刻发一条 ping 去验，别急着杀。
 function startPing() {
   stopPing();
+  lastTick = Date.now();
   pingTimer = setInterval(() => {
+    const now = Date.now();
+    const slept = now - lastTick > PING_MS * 2;
+    lastTick = now;
     if (ws?.readyState !== 1) return connect();
-    if (Date.now() - lastRx > DEAD_MS) {
+    if (slept) {
+      lastRx = now;                                  // 睡过：重新起算，下一拍再看回音
+      ws.send(JSON.stringify({ type: 'ping' }));
+      return;
+    }
+    if (now - lastRx > DEAD_MS) {
       try { ws.close(); } catch { /* 已经废了 */ }
       ws = null;
       stopPing();
@@ -175,14 +195,18 @@ chrome.runtime.onMessage.addListener((m, _s, sendResponse) => {
     sendResponse({ sent: ws?.readyState === 1 });
     return true;
   }
+  // 同上：readyState 只是本地对 socket 的记忆，半开时它照样是 1。
+  // 把新鲜度一起算进去，SW 才不用等看门狗那 45 秒就能识破。
+  // kick 的回话**也**得算新鲜度：以前它裸看 readyState，半开时回「连着呢」，
+  // SW 的自愈 alarm 信了它就再也不走兜底——那是一条无限期的死路。
+  const fresh = () => ws?.readyState === 1 && Date.now() - lastRx <= DEAD_MS;
+  const state = () => ({ connected: fresh(), lastRx, bridge: bridgeVersion });
   if (m?.__hcBridge === 'status') {
-    // 同上：readyState 只是本地对 socket 的记忆，半开时它照样是 1。
-    // 把新鲜度一起算进去，SW 才不用等看门狗那 45 秒就能识破。
-    sendResponse({ connected: ws?.readyState === 1 && Date.now() - lastRx <= DEAD_MS });
+    sendResponse(state());
     return true;
   }
-  if (m?.__hcBridge === 'kick') {                   // popup 点了「立即连接」
-    connect().then(() => sendResponse({ connected: ws?.readyState === 1 }));
+  if (m?.__hcBridge === 'kick') {                   // popup 点了「重连」，或 alarm 自愈
+    connect().then(() => sendResponse(state()));
     return true;
   }
   return false;

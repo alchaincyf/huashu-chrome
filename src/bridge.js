@@ -24,7 +24,8 @@ const ORPHAN_GRACE_MS = 15000;       // 扩展断开时在途命令的宽限：�
 
 // writeInfo=false 供测试用：不写 bridge.json，否则测试桥的 token 会盖掉
 // 真在跑的那个桥，用户所有 agent 会话当场断连。
-export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo = true, orphanGraceMs = ORPHAN_GRACE_MS } = {}) {
+export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo = true, orphanGraceMs = ORPHAN_GRACE_MS,
+  silenceMs = EXT_SILENCE_MS, probeMs = EXT_PROBE_MS, tickMs = 20000 } = {}) {
   ensureHome();
 
   const agents = new Set();      // role=agent 的连接
@@ -446,18 +447,18 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
     const now = Date.now();
     for (const e of liveExtensions()) {
       const silent = now - e.lastRx;
-      if (silent <= EXT_SILENCE_MS) { e.probedAt = 0; continue; }
+      if (silent <= silenceMs) { e.probedAt = 0; continue; }
       if (!e.probedAt) { e.probedAt = now; send(e, { type: 'ping' }); continue; }
-      if (now - e.probedAt >= EXT_PROBE_MS) {
+      if (now - e.probedAt >= probeMs) {
         log(`扩展静默超时，探了 ${Math.round((now - e.probedAt) / 1000)}s 也没回音，判定这条连接已死（${extLabel(e)}）`);
         e.terminate();
       }
     }
-    if (agents.size === 0 && !liveExtensions().length && Date.now() - lastActivity > IDLE_EXIT_MS) {
+    if (writeInfo && agents.size === 0 && !liveExtensions().length && Date.now() - lastActivity > IDLE_EXIT_MS) {
       log('空闲超时，桥自行退出');
       process.exit(0);
     }
-  }, 20000);
+  }, tickMs);
   idleTimer.unref();
 
   return { wss, port, token, ready, close: () => { clearInterval(idleTimer); wss.close(); for (const c of wss.clients) c.terminate(); } };

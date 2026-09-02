@@ -45,8 +45,11 @@ test('agent 能通过 stdio 挂上 MCP server 并拿到工具表', async () => {
   //   18800 → 19900：把「看」下沉——query 的 contains（按文本找）、act 的 read 步、
   //   fetch 的 pages（自动翻页）。审计里 eval 占 22.7%、fetch→fetch 相邻 386 次，
   //   这三样每一样都直接打在一个最大的回合池上，schema 里省不得）
+  //   19900 → 21200：expect（click/type/select 与 act 步各一份，只留一句描述不铺
+  //   properties）、click 的 x/y/dragTo（canvas/游戏站 287 次截图后没有任何一条路能点）、
+  //   screenshot 的 full（默认 60% JPEG，每张图省四分之三的视觉 token）
   const total = tools.reduce((n, t) => n + t.description.length + JSON.stringify(t.inputSchema).length, 0);
-  assert.ok(total < 19900, `工具表膨胀到 ${total} 字符了，压回 19900 以内`);
+  assert.ok(total < 21200, `工具表膨胀到 ${total} 字符了，压回 21200 以内`);
 
   // click 必须强制要 snapshotId，否则 ref 防呆整套失效
   assert.deepEqual(tools.find((t) => t.name === 'type').inputSchema.required, ['text']);

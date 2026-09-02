@@ -38,11 +38,17 @@ async function ensureOffscreen() {
     try {
       if (!chrome.offscreen) throw new Error('这个 Chrome 没有 offscreen API');
       if (await chrome.offscreen.hasDocument()) return true;
-      await chrome.offscreen.createDocument({
-        url: 'offscreen.html',
-        reasons: ['WORKERS'],
-        justification: '维持与本机桥（127.0.0.1）的长连接；service worker 会被回收，连接会跟着断。',
-      });
+      // 加超时：createDocument 万一挂住不 resolve，`ensuring` 永远非空，
+      // 每条回执、每次 alarm 自愈都卡在它上面——整个扩展静默瘫痪。
+      // 8 秒建不起来就当失败走兜底，下一个 alarm 再试。
+      await Promise.race([
+        chrome.offscreen.createDocument({
+          url: 'offscreen.html',
+          reasons: ['WORKERS'],
+          justification: '维持与本机桥（127.0.0.1）的长连接；service worker 会被回收，连接会跟着断。',
+        }),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('createDocument 8 秒没返回')), 8000)),
+      ]);
       offscreenFailed = null;
       return true;
     } catch (e) {
@@ -63,7 +69,33 @@ async function toBridge(msg) {
     const r = await chrome.runtime.sendMessage({ __hcBridge: 'out', msg }).catch(() => null);
     if (r?.sent) return;
   }
-  directSend(msg);   // offscreen 没建起来，或者它手上那条 socket 断了
+  if (directSend(msg)) return;   // offscreen 没建起来，或者它手上那条 socket 断了
+  await stash(msg);              // 两条腿都不通：先存着，连上再补发
+}
+
+// ---------- 发件箱 ----------
+//
+// 命令在途时连接断了（睡醒后看门狗互杀、双腿替换、桥换代），回执以前就地丢掉：
+// 点击已经在页面上生效，agent 收到的却是 NO_EXTENSION，按提示重试就是双击。
+// 现在两条腿都发不出去的回执先写 storage.session（SW 随时被回收，内存不算数），
+// 任何一条腿连上就按原样补发；桥那侧对断线的在途命令留了宽限，按 __k 照常配对。
+// 只留 60 秒：过了这个时限桥早已把命令判死，补发也没人收。
+const OUTBOX = 'outbox';
+async function stash(msg) {
+  if (msg?.type !== 'res') return;   // 事件丢了无妨，回执不能丢
+  try {
+    const { [OUTBOX]: list = [] } = await chrome.storage.session.get(OUTBOX);
+    list.push({ t: Date.now(), msg });
+    await chrome.storage.session.set({ [OUTBOX]: list.slice(-50) });
+  } catch { /* 存不下就只能丢 */ }
+}
+async function flushOutbox(sendFn) {
+  let list = [];
+  try { ({ [OUTBOX]: list = [] } = await chrome.storage.session.get(OUTBOX)); } catch { return; }
+  if (!list.length) return;
+  await chrome.storage.session.remove(OUTBOX).catch(() => {});
+  const fresh = list.filter((it) => Date.now() - it.t < 60000);
+  for (const it of fresh) await sendFn(it.msg);
 }
 
 // 判据是**现场问**，不是读缓存。
@@ -76,9 +108,30 @@ async function toBridge(msg) {
 //
 // 缓存留着，但只喂 badge 和 popup 的显示，绝不参与「要不要重连」这个判断。
 async function connected() {
-  if (directWs?.readyState === 1) return true;
+  return (await connState()).connected;
+}
+
+// 给 popup 看的完整状态：连没连、上次收到桥的消息是几点、桥版本几、
+// offscreen 建不起来的原因。以前只有一盏灯，用户分不清是扩展断了、桥没起、
+// 还是终端根本没在跑。
+async function connState() {
+  if (directWs?.readyState === 1 && Date.now() - directLastRx <= DIRECT_DEAD_MS) {
+    return { connected: true, lastRx: directLastRx, bridge: directBridgeVersion, leg: 'direct' };
+  }
   const r = await chrome.runtime.sendMessage({ __hcBridge: 'status' }).catch(() => null);
-  return !!r?.connected;
+  return { connected: !!r?.connected, lastRx: r?.lastRx || directLastRx || 0, bridge: r?.bridge || '', leg: 'offscreen', offscreenError: offscreenFailed };
+}
+
+// 桥版本对不上时亮角标。npx 原地刷新了扩展文件、Chrome 跑的却还是旧 SW，
+// 这种错位以前只有 bridge.log 知道（22 条记录，没人看）。
+function noteBridgeVersion(v) {
+  if (!v) return;
+  const mine = chrome.runtime.getManifest().version;
+  bridgeMismatch = v === mine ? '' : v;
+  chrome.action.setTitle({ title: bridgeMismatch
+    ? `huashu-chrome：扩展 v${mine} 和桥 v${v} 版本不一致，去 chrome://extensions 重载一次`
+    : 'huashu-chrome' });
+  setBadge(true);
 }
 
 // ---------- 兜底：SW 自己拿着 socket ----------
@@ -91,6 +144,8 @@ const DIRECT_DEAD_MS = 45000;   // 和 offscreen 那条腿同一个判据：三�
 let directWs = null;
 let directTimer = null;
 let directLastRx = 0;
+let directLastTick = 0;
+let directBridgeVersion = '';
 
 // 这个 Chrome 实例的身份证。
 //
@@ -119,9 +174,11 @@ async function instanceId() {
 // 桥路由命令时要让着有窗口的那个——UA 是唯一稳定的判据。
 const isHeadless = () => /HeadlessChrome/.test(navigator.userAgent);
 
+// 发出去了回 true；没连着回 false 并顺手发起重连——调用方据此决定要不要存发件箱
 function directSend(msg) {
-  if (directWs?.readyState === 1) directWs.send(JSON.stringify(msg));
-  else directConnect();
+  if (directWs?.readyState === 1) { directWs.send(JSON.stringify(msg)); return true; }
+  directConnect();
+  return false;
 }
 
 // 判据是「连上了没有」，不是「offscreen 文档在不在」。
@@ -153,7 +210,14 @@ async function directConnect() {
           if (m.type !== 'welcome') { clearTimeout(t); sock.close(); return reject(new Error('rejected')); }
           clearTimeout(t);
           directLastRx = Date.now();
-          sock.onmessage = (e) => { directLastRx = Date.now(); const x = JSON.parse(e.data); if (x.type !== 'pong') onMessage(x); };
+          directBridgeVersion = String(m.bridge || '');
+          sock.onmessage = (e) => {
+            directLastRx = Date.now();
+            const x = JSON.parse(e.data);
+            if (x.type === 'pong') return;
+            if (x.type === 'ping') { if (sock.readyState === 1) sock.send(JSON.stringify({ type: 'pong' })); return; }
+            onMessage(x);
+          };
           sock.onclose = () => { directWs = null; stopDirectPing(); setBadge(false); };
           sock.onerror = () => {};
           resolve(sock);
@@ -162,6 +226,8 @@ async function directConnect() {
       });
       startDirectPing();
       setBadge(true);
+      noteBridgeVersion(directBridgeVersion);
+      void flushOutbox(async (m) => { if (directWs?.readyState === 1) directWs.send(JSON.stringify(m)); });
       return;
     } catch { /* 换下一个端口 */ }
   }
@@ -173,9 +239,14 @@ async function directConnect() {
 // 「offscreen 建不起来」时的唯一通路，它哑掉就真的没人在连了。
 function startDirectPing() {
   stopDirectPing();
+  directLastTick = Date.now();
   directTimer = setInterval(() => {
+    const now = Date.now();
+    const slept = now - directLastTick > 30000;   // 两拍没跑到 = 机器睡过，墙钟差不作数（同 offscreen）
+    directLastTick = now;
     if (directWs?.readyState !== 1) return directConnect();
-    if (Date.now() - directLastRx > DIRECT_DEAD_MS) {
+    if (slept) { directLastRx = now; directWs.send(JSON.stringify({ type: 'ping' })); return; }
+    if (now - directLastRx > DIRECT_DEAD_MS) {
       try { directWs.close(); } catch { /* 已经废了 */ }
       directWs = null;
       stopDirectPing();
@@ -190,7 +261,14 @@ function stopDirectPing() {
   directTimer = null;
 }
 
+let bridgeMismatch = '';   // 桥版本和扩展对不上时记下桥的版本；角标据此亮「!」
+
 function setBadge(on) {
+  if (on && bridgeMismatch) {
+    chrome.action.setBadgeText({ text: '!' });
+    chrome.action.setBadgeBackgroundColor({ color: '#f59e0b' });
+    return;
+  }
   chrome.action.setBadgeText({ text: on ? '' : '·' });
   chrome.action.setBadgeBackgroundColor({ color: on ? '#22c55e' : '#94a3b8' });
 }
@@ -2334,7 +2412,10 @@ chrome.runtime.onMessage.addListener((m, _s, sendResponse) => {
   // 两条同时连着的话，桥「同时只认一个扩展」，会互相踢，命令随机丢
   if (m?.__hcBridge === 'up') {
     setBadge(true);
+    noteBridgeVersion(m.bridge);
     if (directWs) { stopDirectPing(); try { directWs.close(); } catch { /* 已经废了 */ } directWs = null; }
+    // 断线期间攒下的回执，连上就补发——桥那侧留着宽限等它们
+    void flushOutbox((msg) => chrome.runtime.sendMessage({ __hcBridge: 'out', msg }).catch(() => null));
     return false;
   }
   // offscreen 拿不到 chrome.runtime.getManifest()，握手身份只能由这边供给
@@ -2355,16 +2436,16 @@ chrome.runtime.onMessage.addListener((m, _s, sendResponse) => {
   }
 
   if (m.__hcPopup === 'status') {
-    connected().then((c) => sendResponse({ connected: c }));
+    connState().then(sendResponse);
     return true;
   }
   if (m.__hcPopup === 'connect') {
     (async () => {
       if (await ensureOffscreen()) await chrome.runtime.sendMessage({ __hcBridge: 'kick' }).catch(() => {});
       if (!(await connected())) await directConnect();
-      const c = await connected();
-      setBadge(c);
-      sendResponse({ connected: c });
+      const s = await connState();
+      setBadge(s.connected);
+      sendResponse(s);
     })();
     return true;
   }

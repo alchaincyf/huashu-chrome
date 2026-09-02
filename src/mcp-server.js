@@ -36,6 +36,13 @@ const REAL = {
   type: 'boolean',
   description: 'Force a real browser-level event. Automatic on no-effect, except for submit/pay/delete.',
 };
+// 期望：把「变没变」升级成「变成我要的样子没有」。settle 命中就早停，超时未命中明说。
+// 这个对象出现三次，schema 每处都会完整展开——只留一句描述，不铺 properties
+const EXPECT = {
+  type: 'object',
+  description: 'Expected result, checked within the settle window and reported if unmet: '
+    + '{checked, value, text: target contains, gone: target removed, appears: selector/text now on page}',
+};
 
 const TOOLS = [
   {
@@ -61,12 +68,17 @@ const TOOLS = [
   },
   {
     name: 'click',
-    description: 'Click ONE element by ref. Know your next step already? Use `act` instead — each extra call costs a full model turn.',
+    description: 'Click ONE element by ref. Know your next step already? Use `act` instead — each extra call costs a full model turn. '
+      + 'Canvas / map / game with nothing in the snapshot? Pass x,y (CSS px from a screenshot) for a real click there; add dragTo for a drag.',
     inputSchema: {
       type: 'object',
       // 没有 button 参数：右键弹出的是浏览器原生菜单，扩展够不着，
       // 给了也只是个做不到的承诺；中键开新标签页用 tabs(action:"new") 更直接。
-      properties: { ref: REF, find: FIND, snapshotId: SNAP, selector: SEL, tabId: TAB, real: REAL },
+      properties: {
+        ref: REF, find: FIND, snapshotId: SNAP, selector: SEL, tabId: TAB, real: REAL, expect: EXPECT,
+        x: { type: 'number' }, y: { type: 'number' },
+        dragTo: { type: 'object', description: '{x, y}: press at x,y, move here, release.' },
+      },
       required: [],
     },
   },
@@ -76,7 +88,7 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        ref: REF, find: FIND, snapshotId: SNAP, selector: SEL, tabId: TAB, real: REAL,
+        ref: REF, find: FIND, snapshotId: SNAP, selector: SEL, tabId: TAB, real: REAL, expect: EXPECT,
         text: { type: 'string' },
         clear: { type: 'boolean', description: 'Clear existing value first. Default true.' },
         submit: { type: 'boolean', description: 'Press Enter after typing.' },
@@ -91,7 +103,7 @@ const TOOLS = [
       'from the snapshot, click one.',
     inputSchema: {
       type: 'object',
-      properties: { ref: REF, find: FIND, snapshotId: SNAP, tabId: TAB, value: { type: 'string' } },
+      properties: { ref: REF, find: FIND, snapshotId: SNAP, tabId: TAB, value: { type: 'string' }, expect: EXPECT },
       required: ['value'],
     },
   },
@@ -160,13 +172,14 @@ const TOOLS = [
     name: 'screenshot',
     description:
       'Screenshot the controlled tab, background tabs included. Prefer snapshot / read_text — ' +
-      'they cost far less.',
+      'they cost far less. Returned at 60% scale as JPEG by default; full:true for 1:1 PNG (e.g. to read small text or measure pixels).',
     inputSchema: {
       type: 'object',
       properties: {
         tabId: TAB, ref: REF, snapshotId: SNAP,
         focus: { type: 'boolean', description: 'Bring the tab forward first. Interrupts the user — ask before using.' },
-        savePath: { type: 'string', description: 'Absolute path to write a PNG instead of returning the image inline.' },
+        savePath: { type: 'string', description: 'Absolute path to write the image instead of returning it inline.' },
+        full: { type: 'boolean', description: 'Full-resolution PNG instead of the scaled JPEG.' },
       },
     },
   },
@@ -329,8 +342,8 @@ const TOOLS = [
       + 'attr?} or {contains} brings an observation back mid-batch. Blocks (one level): '
       + '`repeat` {steps,until,max} for pagination/load-more; `if` {cond,then,else} for optional banners; '
       + '`assert` {cond} stops unless the page matches. cond = {urlContains|selectorExists|textContains, '
-      + 'not} (OR-ed). Inside repeat use find/selector, never ref. Elsewhere: ref until the page '
-      + 're-renders, find after.',
+      + 'not} (OR-ed), or {ref|selector, checked|value|text} for one element. Inside repeat use find/selector, '
+      + 'never ref. Elsewhere: ref until the page re-renders, find after.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -345,6 +358,7 @@ const TOOLS = [
               text: { type: 'string', description: 'for type' },
               contains: { type: 'string', description: 'for read: find visible text' },
               attr: { type: 'string', description: 'for read: also report this attribute (value, checked, href…)' },
+              expect: { type: 'object', description: 'for click/type/select: same as the expect param; unmet = stop' },
               value: { type: 'string', description: 'for select' },
               key: { description: 'for key', anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
               fields: { type: 'array', items: { type: 'object' }, description: 'for fill' },
@@ -580,14 +594,15 @@ export async function startMcpServer({ client = 'unknown' } = {}) {
       // 截图走 image content，其余全是文本。带 savePath 就落盘只报路径——
       // 这个参数在 schema 里写了很久却从没实现过，agent 把绕法都写进 learnings 了。
       if (name === 'screenshot' && data.dataUrl) {
-        const b64 = data.dataUrl.split(',')[1];
+        const [head, b64] = data.dataUrl.split(',');
+        const mime = /^data:(image\/\w+)/.exec(head)?.[1] || 'image/png';
         if (args.savePath) {
           fs.mkdirSync(path.dirname(args.savePath), { recursive: true });
           fs.writeFileSync(args.savePath, Buffer.from(b64, 'base64'));
-          return { content: [{ type: 'text', text: `已保存截图 ${Math.round(b64.length * 3 / 4 / 1024)}KB → ${args.savePath}` }] };
+          return { content: [{ type: 'text', text: `已保存截图 ${Math.round(b64.length * 3 / 4 / 1024)}KB（${mime}${data.scale && data.scale !== 1 ? `，${Math.round(data.scale * 100)}% 缩放` : ''}）→ ${args.savePath}` }] };
         }
         return {
-          content: [{ type: 'image', data: b64, mimeType: 'image/png' }],
+          content: [{ type: 'image', data: b64, mimeType: mime }],
         };
       }
       // 二进制只落盘、只报路径——把 base64 倒进 context 是纯粹的浪费
