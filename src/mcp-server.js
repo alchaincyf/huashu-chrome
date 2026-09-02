@@ -10,6 +10,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { BridgeClient } from './lib/rpc.js';
 import { flatCount } from '../extension/script.js';
 import { getLearnings, saveLearnings } from './lib/learnings.js';
+import { audit } from './lib/paths.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { VERSION } from './lib/version.js';
@@ -40,8 +41,9 @@ const TOOLS = [
   {
     name: 'snapshot',
     description:
-      'Capture the current page as a compact list of interactive elements with refs, plus a text excerpt. ' +
-      'Call this before any click/type. Cheap — prefer it over screenshots. Refs ending in @fN live in ' +
+      'Capture the current page as a compact list of interactive elements with refs and state ' +
+      '(value/checked/selected/expanded/disabled), plus dialogs, alerts and a text excerpt. ' +
+      'Call this before any click/type. Cheap — prefer it over screenshots or eval. Refs ending in @fN live in ' +
       'an iframe: pass them through unchanged, they route themselves.',
     inputSchema: { type: 'object', properties: { tabId: TAB } },
   },
@@ -225,15 +227,22 @@ const TOOLS = [
   {
     name: 'fetch',
     description:
-      'Call a URL from inside the page, carrying the user\'s cookies. Use after `network` reveals an API: ' +
-      'change paging params to pull a whole dataset at once — but ALWAYS check the paging object in the ' +
-      'response, servers silently cap page size. 403/406 means the site signs its requests: do NOT forge ' +
-      'them; drive the site\'s own pagination UI and read via `network`. Same-origin rules apply.',
+      'Call a URL from inside the page, carrying the user\'s cookies. Use after `network` reveals an API. ' +
+      'Paged endpoint? Pass `pages`: it walks every page in ONE call — never loop fetch by hand, each loop turn ' +
+      'costs a model round. ALWAYS check the paging object in the response, servers silently cap page size. ' +
+      '403/406 means the site signs its requests: do NOT forge them; drive the site\'s own pagination UI and ' +
+      'read via `network`. Same-origin rules apply.',
     inputSchema: {
       type: 'object',
       properties: {
         url: { type: 'string' },
         init: { type: 'object', description: 'fetch() init: method, headers, body. credentials are already included.' },
+        pages: {
+          type: 'object',
+          description: 'Auto-paginate: {param:"page", from?, step?, max?} or {cursorParam:"cursor", cursorPath:"data.next_cursor", max?}. '
+            + 'Stops on non-2xx, empty/identical body, empty cursor, or max (default 10, cap 50). '
+            + 'With savePath: one JSON line per page + summary; else bodies inline up to maxBody.',
+        },
         binary: { type: 'boolean', description: 'Fetch bytes (images, files) instead of text. Requires savePath. Runs from the extension so cross-origin image hosts work; add via:"page" if a host checks Referer.' },
         via: { type: 'string', enum: ['page', 'extension'], description: 'Where the request originates. Binary defaults to extension (no CORS limits); text always uses the page (carries session).' },
         savePath: { type: 'string', description: 'Absolute path to write to. Required with binary.' },
@@ -294,19 +303,21 @@ const TOOLS = [
   {
     name: 'query',
     description:
-      'Extract structured data by CSS selector — the tool for scraping lists and tables. ' +
-      'Pass `html:true` first to inspect the markup, then write `extract`: field name → sub-selector, ' +
-      'with "@attr" for attributes, e.g. {title:".name", link:"a@href"}.',
+      'Extract structured data by CSS selector (lists, tables), or FIND BY TEXT with `contains`: every visible ' +
+      'element whose text includes it, with a selector path and the ref it sits in — use it instead of eval to ' +
+      'check "is X on the page", read a status label, or find a dropdown option. For lists pass ' +
+      '`html:true` first to inspect markup, then `extract`: field → sub-selector, "@attr" for attributes, ' +
+      'e.g. {title:".name", link:"a@href"}.',
     inputSchema: {
       type: 'object',
       properties: {
+        contains: { type: 'string', description: 'Text to find (case-insensitive); selector then only scopes the search.' },
         selector: { type: 'string', description: 'CSS selector for the repeating row/card element.' },
         extract: { type: 'object', description: 'field → sub-selector (optionally "sel@attr"). Omit to get plain text per match.' },
         html: { type: ['boolean', 'number'], description: 'Return outerHTML of matches instead, to inspect structure. true = 1200 chars each.' },
         limit: { type: 'number', description: 'Max matches, default 100.' },
         tabId: TAB,
       },
-      required: ['selector'],
     },
   },
   {
@@ -314,7 +325,8 @@ const TOOLS = [
     description:
       'Your DEFAULT way to act — batch every step you can predict (on form wizards, nearly all). '
       + 'Each step is effect-checked, ONE snapshot returns at the end; every call you merge saves a full '
-      + 'model turn. Stops early on no-effect / failure / submit-pay-delete controls. Blocks (one level): '
+      + 'model turn. Stops early on no-effect / failure / submit-pay-delete controls. `read` {ref|find|selector, '
+      + 'attr?} or {contains} brings an observation back mid-batch. Blocks (one level): '
       + '`repeat` {steps,until,max} for pagination/load-more; `if` {cond,then,else} for optional banners; '
       + '`assert` {cond} stops unless the page matches. cond = {urlContains|selectorExists|textContains, '
       + 'not} (OR-ed). Inside repeat use find/selector, never ref. Elsewhere: ref until the page '
@@ -328,9 +340,11 @@ const TOOLS = [
           items: {
             type: 'object',
             properties: {
-              do: { type: 'string', enum: ['click', 'type', 'select', 'fill', 'key', 'wait', 'scroll', 'navigate', 'repeat', 'if', 'assert'] },
+              do: { type: 'string', enum: ['click', 'type', 'select', 'fill', 'key', 'wait', 'scroll', 'navigate', 'read', 'repeat', 'if', 'assert'] },
               ref: REF, find: FIND, selector: SEL,
               text: { type: 'string', description: 'for type' },
+              contains: { type: 'string', description: 'for read: find visible text' },
+              attr: { type: 'string', description: 'for read: also report this attribute (value, checked, href…)' },
               value: { type: 'string', description: 'for select' },
               key: { description: 'for key', anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
               fields: { type: 'array', items: { type: 'object' }, description: 'for fill' },
@@ -499,13 +513,21 @@ export async function startMcpServer({ client = 'unknown' } = {}) {
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const { name, arguments: args = {} } = req.params;
     try {
-      // learnings 是纯本地读写，不需要浏览器在线
+      // learnings 是纯本地读写，不需要浏览器在线。但要进审计：它不经过桥，
+      // 以前一条都不记，「LEARNINGS FIRST 到底有没有人遵守」就成了量不了的事。
       if (name === 'learnings') {
         const text = args.save != null ? saveLearnings(args.domain, args.save) : getLearnings(args.domain);
+        audit({ ev: 'cmd', id: `local:${Date.now()}`, cmd: 'learnings', client, sid: bridge.sessionId, params: { domain: args.domain, save: args.save != null ? `<${String(args.save).length}字>` : undefined } });
         return { content: [{ type: 'text', text }] };
       }
 
       if (!bridge.ws) await bridge.connect();
+
+      // 翻页在这一侧循环：审计里 fetch→fetch 相邻 386 次，agent 在一页一个回合地
+      // 手动翻。扩展只管发单次请求，翻页的循环、落盘、停机判定都不该经过模型。
+      if (name === 'fetch' && args.pages && !args.binary) {
+        return { content: [{ type: 'text', text: await fetchPages(bridge, args) }] };
+      }
 
       // upload 的文件由这一侧读，agent 只传路径——base64 不该经过它的 context
       if (name === 'upload') {
@@ -555,10 +577,17 @@ export async function startMcpServer({ client = 'unknown' } = {}) {
         return { content: [{ type: 'text', text: `已下载 ${Math.round((data.bytes || 0) / 1024)}KB → ${args.savePath}` }] };
       }
 
-      // 截图走 image content，其余全是文本
+      // 截图走 image content，其余全是文本。带 savePath 就落盘只报路径——
+      // 这个参数在 schema 里写了很久却从没实现过，agent 把绕法都写进 learnings 了。
       if (name === 'screenshot' && data.dataUrl) {
+        const b64 = data.dataUrl.split(',')[1];
+        if (args.savePath) {
+          fs.mkdirSync(path.dirname(args.savePath), { recursive: true });
+          fs.writeFileSync(args.savePath, Buffer.from(b64, 'base64'));
+          return { content: [{ type: 'text', text: `已保存截图 ${Math.round(b64.length * 3 / 4 / 1024)}KB → ${args.savePath}` }] };
+        }
         return {
-          content: [{ type: 'image', data: data.dataUrl.split(',')[1], mimeType: 'image/png' }],
+          content: [{ type: 'image', data: b64, mimeType: 'image/png' }],
         };
       }
       // 二进制只落盘、只报路径——把 base64 倒进 context 是纯粹的浪费
@@ -570,17 +599,85 @@ export async function startMcpServer({ client = 'unknown' } = {}) {
         fs.writeFileSync(args.savePath, Buffer.from(data.base64, 'base64'));
         return { content: [{ type: 'text', text: `已保存 ${Math.round(data.bytes / 1024)}KB (${data.ct}) → ${args.savePath}` }] };
       }
-      if (data.untrusted) {
-        return { content: [{ type: 'text', text: wrapUntrusted(data.text, data.meta) }] };
-      }
-      return { content: [{ type: 'text', text: typeof data === 'string' ? data : data.text ?? JSON.stringify(data) }] };
+      const body = data.untrusted
+        ? wrapUntrusted(data.text, data.meta)
+        : (typeof data === 'string' ? data : data.text ?? JSON.stringify(data));
+      return { content: [{ type: 'text', text: body + mismatchNote() }] };
     } catch (e) {
-      return { content: [{ type: 'text', text: hint(e) }], isError: true };
+      return { content: [{ type: 'text', text: hint(e) + mismatchNote() }], isError: true };
     }
   });
 
+  // 扩展和 CLI 版本对不上，以前只有 bridge.log 知道（22 条记录，没人看）。
+  // npx 会原地刷新扩展文件、Chrome 跑的还是旧 SW，新协议在旧扩展上就是
+  // 「莫名其妙的行为」。在回执里说一次——回执是唯一不被截断、一定有人读的通道。
+  let mismatchSaid = false;
+  function mismatchNote() {
+    if (mismatchSaid || !bridge.versionMismatch) return '';
+    mismatchSaid = true;
+    return `\n\n⚠️ Chrome 扩展是 v${bridge.extensionVersion}，CLI 是 v${VERSION}——两边协议可能对不上。`
+      + '让用户点扩展图标 → 「重连」；不行再去 chrome://extensions 点重载（npx 已把文件更新到位，Chrome 跑的还是旧的）。';
+  }
+
   await server.connect(new StdioServerTransport());
   return server;
+}
+
+// 自动翻页。页码型：改一个 query 参数递增；游标型：从上一页响应里按路径取下一个游标。
+// 停机判据都是确定性的：非 2xx、空体、和上一页一模一样、游标为空或没变、跑满 max。
+// 落盘是每页一行 JSON（url/status/body），body 能解析成 JSON 就存解析后的。
+const pathGet = (obj, p) => String(p || '').split('.').filter(Boolean).reduce((o, k) => (o == null ? undefined : o[k]), obj);
+const EMPTY_BODY = /^\s*(\[\s*\]|\{\s*\}|null)?\s*$/;
+
+export async function fetchPages(bridge, args) {
+  const pg = args.pages || {};
+  if (!pg.param && !pg.cursorParam) throw Object.assign(new Error('pages 需要 param（页码参数名）或 cursorParam（游标参数名）'), { code: 'INTERNAL' });
+  const max = Math.min(Math.max(Number(pg.max) || 10, 1), 50);
+  const base = new URL(args.url);
+  let n = Number(pg.from ?? (pg.param ? (base.searchParams.get(pg.param) ?? 1) : 0));
+  const step = Number(pg.step) || 1;
+  let cursor = pg.cursorParam ? (base.searchParams.get(pg.cursorParam) || '') : null;
+  const pagesOut = [];
+  let prev = null, stop = '';
+
+  for (let i = 0; i < max; i++) {
+    const url = new URL(base);
+    if (pg.param) url.searchParams.set(pg.param, String(n));
+    if (pg.cursorParam && cursor) url.searchParams.set(pg.cursorParam, cursor);
+    const data = await bridge.call('fetch', { url: url.toString(), init: args.init, maxBody: args.maxBody || 2000000, via: args.via }, { tabId: args.tabId });
+    const m = /^(\d+)\n\n([\s\S]*)$/.exec(data?.text || '');
+    const status = Number(m?.[1] || 0), body = m?.[2] ?? '';
+    if (!(status >= 200 && status < 300)) { stop = `第 ${i + 1} 页返回 ${status}，停下`; break; }
+    if (EMPTY_BODY.test(body)) { stop = `第 ${i + 1} 页是空的，翻到头了`; break; }
+    if (body === prev) { stop = `第 ${i + 1} 页和上一页一模一样，翻到头了（服务端多半把超出范围的页码钉在最后一页）`; break; }
+    let parsed;
+    try { parsed = JSON.parse(body); } catch { parsed = undefined; }
+    pagesOut.push({ url: url.toString(), status, body: parsed === undefined ? body : parsed, raw: body });
+    prev = body;
+    if (pg.cursorParam) {
+      const next = parsed === undefined ? '' : String(pathGet(parsed, pg.cursorPath) ?? '');
+      if (!next || next === 'null' || next === 'undefined' || next === cursor) { stop = `第 ${i + 1} 页之后游标为空，翻到头了`; break; }
+      cursor = next;
+    } else n += step;
+  }
+  if (!stop) stop = `跑满 max=${max} 页停下（可能还有更多：把 from 设成 ${pg.param ? n : '下一个游标'} 再来一次）`;
+
+  const kb = Math.round(pagesOut.reduce((s, p) => s + p.raw.length, 0) / 1024);
+  const head = `已抓 ${pagesOut.length} 页 · 共 ${kb}KB · ${stop}`;
+  if (args.savePath) {
+    fs.mkdirSync(path.dirname(args.savePath), { recursive: true });
+    fs.writeFileSync(args.savePath, pagesOut.map((p) => JSON.stringify({ url: p.url, status: p.status, body: p.body })).join('\n') + '\n');
+    const preview = pagesOut[0] ? pagesOut[0].raw.slice(0, 1500) : '';
+    return `${head} → ${args.savePath}（每行一页 JSON：url/status/body）\n\n` + wrapUntrusted(`第 1 页预览：\n${preview}${preview.length >= 1500 ? '…' : ''}`);
+  }
+  const cap = Number(args.maxBody) || 200000;
+  let out = '', used = 0;
+  for (const p of pagesOut) {
+    const chunk = `--- ${p.url} (${p.status}) ---\n${p.raw}\n`;
+    if (used + chunk.length > cap) { out += `\n…（超过 maxBody=${cap}，后面 ${pagesOut.length - pagesOut.indexOf(p)} 页没放进来；带 savePath 落盘能拿全）`; break; }
+    out += chunk; used += chunk.length;
+  }
+  return `${head}\n\n` + wrapUntrusted(out);
 }
 
 // 错误不只报「什么坏了」，还报「下一步该干嘛」——省掉 agent 一轮瞎试
@@ -589,18 +686,20 @@ function hint(e) {
     // 老话术是「确认 Chrome 开着、扩展已启用，然后重试」，它把人引向了错误的动作：
     // 绝大多数 NO_EXTENSION 其实是「Chrome 把扩展的后台进程回收了，几秒后自己回来」，
     // 而桥现在已经替你等过一轮了——还失败就说明真的不是等一下能解决的。
-    NO_EXTENSION: '扩展没连上，桥已经替你等过一轮了。别再重试同一条命令——'
-      + '让用户去 chrome://extensions 看 huashu-chrome 是否启用；改过扩展代码的话点一下重载。',
+    // 和 doctor、桥的 NO_EXT_MSG 同一套话：首选动作是弹窗里的「重连」。
+    // 老话术让人去 chrome://extensions，而插件从来没消失过——那条路的终点是「重装」，
+    // 重装恰好重启了扩展、连上了，于是反过来坐实了「插件消失了」这个误判（8-31 笔记）。
+    NO_EXTENSION: '扩展没连上桥，桥已经替你等过一轮了。别再重试同一条命令——'
+      + '让用户点浏览器工具栏的 huashu-chrome 图标 → 「重连」（插件没消失，只是连接断了）；Chrome 没开就先开。',
     STALE_SNAPSHOT: '页面已经变了，之前的 ref 全部作废。重新调用 snapshot，用新 ref 再点。',
     REF_NOT_FOUND: '这个 ref 在页面上找不到了。重新 snapshot。',
     NOT_INTERACTABLE: '元素当前不可点（被遮挡、隐藏或 disabled）。先 wait，或换一个目标。',
-    SITE_NOT_ALLOWED: '这个站点还没授权。让用户在扩展弹窗里点「允许本站」。',
     NEEDS_CONFIRM: '这是敏感操作，需要用户在浏览器里确认。把要做的事告诉用户，等他点确认。',
     DIALOG_BLOCKING: '页面上有 alert/confirm 弹窗挡着，所有浏览器命令都会卡住。让用户先手动关掉。',
     NO_TAB: '没有可用的标签页。先用 tabs(action:"new", url:…) 开一个。',
     TIMEOUT: '浏览器侧超时。页面可能还在加载——先 wait 再重试。',
-    NEEDS_L2: '这一步需要真实输入事件，但扩展还没拿到调试器权限。让用户点开 huashu-chrome 扩展图标，'
-      + '按一下「启用高保真模式」——只需一次，之后永久生效。',
+    NEEDS_L2: '这一步需要真实输入事件，但高保真模式被关了。让用户点开 huashu-chrome 扩展图标，'
+      + '在「高保真模式」那一栏点「开启」——只需一次。',
     L2_BUSY: '真实输入事件用不了（多半是用户自己开着 DevTools，一个标签页只允许一个调试器）。'
       + '已经用普通事件完成了；如果结果不对，让用户关掉 DevTools 再试。',
   };

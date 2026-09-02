@@ -18,11 +18,13 @@ const PROTOCOL = 1;
 const HELLO_TIMEOUT = 5000;
 const CMD_TIMEOUT = 30000;
 const IDLE_EXIT_MS = 30 * 60 * 1000; // 半小时没人用就自己退，别留僵尸进程
-const EXT_SILENCE_MS = 50000;        // 扩展每 15 秒一次心跳，连着三拍没到就是死了
+const EXT_SILENCE_MS = 50000;        // 扩展每 15 秒一次心跳，连着三拍没到就先探一下
+const EXT_PROBE_MS = 15000;          // 探了还不回，再等这么久才判死
+const ORPHAN_GRACE_MS = 15000;       // 扩展断开时在途命令的宽限：一个心跳周期，够它重连并补发回执
 
 // writeInfo=false 供测试用：不写 bridge.json，否则测试桥的 token 会盖掉
 // 真在跑的那个桥，用户所有 agent 会话当场断连。
-export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo = true } = {}) {
+export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo = true, orphanGraceMs = ORPHAN_GRACE_MS } = {}) {
   ensureHome();
 
   const agents = new Set();      // role=agent 的连接
@@ -59,9 +61,11 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
   const waiting = [];
   const WAIT_CAP = 64;                 // 扩展长期不在时别无限堆积
   const WAIT_MAX = 40000;              // 一个 30s alarm 周期 + 余量
-  const NO_EXT_MSG = '扩展没连上。Chrome 会回收扩展的后台进程，通常几秒内自己回来，'
-    + `所以桥已经替你等过一轮（最多 ${WAIT_MAX / 1000}s）。仍然没回来的话，多半是 Chrome 没开、`
-    + '扩展被停用，或者改过扩展代码后忘了去 chrome://extensions 点重载。';
+  // 话术和 doctor、mcp-server 的 hint 保持一致：首选动作是扩展弹窗里的「重连」，
+  // 不是去 chrome://extensions——插件从来没消失过，去那儿只会把人引向「重装」。
+  const NO_EXT_MSG = '扩展没连上桥。桥已经替你等过一轮'
+    + `（最多 ${WAIT_MAX / 1000}s），它还没回来。让用户点一下浏览器工具栏的 huashu-chrome 图标 → 「重连」`
+    + '（插件没消失，只是这条连接断了）；Chrome 没开就先开；改过扩展代码才需要去 chrome://extensions 重载。';
 
   let lastActivity = Date.now();
 
@@ -154,13 +158,25 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
       }
       if (extensions.delete(ws)) {
         log(`扩展断开（${extLabel(ws)}）`);
-        // 只失败**这条连接**承接的在途命令。别的实例还在正常干活，
-        // 一起清掉就是误伤——单槽时代不存在这个区分，多实例下必须有。
+        // 这条连接承接的在途命令**不立刻判死**，给一个心跳周期的宽限。
+        //
+        // 原先是当场回 NO_EXTENSION。可断线多半是瞬断（睡醒后看门狗互杀、
+        // 双腿替换、桥换代），扩展 1 秒内就带着同一个 instanceId 回来了，而那条
+        // 命令早已在页面上执行完、回执也存在扩展的发件箱里等着补发。当场判死的
+        // 后果是最坏的一种：点击已经生效，agent 收到「失败」，按提示重试
+        // 就是双击/重复下单——正是这个产品明说要消灭的静默失败。
+        // 宽限期里回执按 __k 回来照常配对（routeBack 不看它从哪条连接来）；
+        // 宽限用完还没回来，再按原来的话报错。别的实例的命令一概不动。
         for (const [k, p] of pending) {
-          if (p.ext !== ws) continue;
-          clearTimeout(p.timer);
-          pending.delete(k);
-          send(p.agent, { type: 'res', id: p.id, ok: false, error: { code: 'NO_EXTENSION', message: '扩展在命令执行中断开' } });
+          if (p.ext !== ws || p.orphanTimer) continue;
+          p.orphanTimer = setTimeout(() => {
+            if (!pending.has(k)) return;
+            clearTimeout(p.timer);
+            pending.delete(k);
+            send(p.agent, { type: 'res', id: p.id, ok: false, error: { code: 'NO_EXTENSION',
+              message: `扩展在命令执行中断开，${orphanGraceMs / 1000} 秒内没回来。这条命令可能已经在页面上生效了——`
+                + '重试前先 snapshot 看一眼，别把一次点击做成两次。' } });
+          }, orphanGraceMs);
         }
         // 一个都不剩了才算「扩展离线」
         if (!liveExtensions().length) broadcast({ type: 'event', event: 'extension_offline' });
@@ -298,6 +314,7 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
     const ms = Math.min(Math.max(Number(msg.timeout) || CMD_TIMEOUT, 1000), 600000);
     const key = `${ws.connId}:${msg.id}`;
     const timer = setTimeout(() => {
+      clearTimeout(pending.get(key)?.orphanTimer);
       pending.delete(key);
       send(ws, { type: 'res', id: msg.id, ok: false, error: { code: 'TIMEOUT', message: `扩展 ${Math.round(ms / 1000)}s 未响应` } });
     }, ms);
@@ -321,6 +338,7 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
     // 而 Chrome 是靠 WebSocket 的**收发**活动去续 service worker 的空闲计时的，
     // 单向发等于只续了一半。回一条 pong，让扩展那侧也有「收到」这个事件。
     if (msg.type === 'ping') return send(ws, { type: 'pong' });
+    if (msg.type === 'pong') return;   // 桥主动探活的回音，收到本身就是目的（lastRx 已刷新）
 
     // extension → agent
     if (msg.type === 'res') {
@@ -333,8 +351,12 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
       }
       if (!p) return; // 已超时，丢弃
       clearTimeout(p.timer);
+      clearTimeout(p.orphanTimer);   // 断线宽限期里补发回来的，正是宽限的意义
       pending.delete(key);
-      audit({ ev: 'res', id: key, cmd: p.cmd, ok: msg.ok, ms: Date.now() - p.startedAt, error: msg.error?.code });
+      // bytes：回执体积。回合空档中位从 5.3s 涨到 9.9s，怀疑是上下文变重，
+      // 而审计里没有任何一个字段能证实或证伪——没有量就没法治。
+      audit({ ev: 'res', id: key, cmd: p.cmd, ok: msg.ok, ms: Date.now() - p.startedAt, error: msg.error?.code,
+        bytes: msg.ok ? JSON.stringify(msg.data ?? '').length : undefined });
       const { __k, ...clean } = msg;
       send(p.agent, clean);
       return;
@@ -415,9 +437,19 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
     // 扩展那侧 readyState 还停在 1、send 也不报错，两边就这么各自以为
     // 对方还在，而 agent 收到的全是 NO_EXTENSION。主动切断是为了让扩展侧的
     // onclose 真的触发，它那条重连链才跑得起来。
+    //
+    // 但**先问一声再杀**。静默 50 秒最常见的原因不是半开，是机器睡了一觉：
+    // 9-2 上午 bridge.log 里 9 次「静默超时」逐条对上了 pmset 的暗唤醒记录，
+    // 每次都是桥先醒、看到 lastRx 过期、当场 terminate，而扩展本来 1 秒后就会
+    // 回心跳——白白断一次，在途命令跟着遭殃。发一条 ping，真半开的连接不会回，
+    // 再等一拍才判死；只是睡过头的，pong 一到 lastRx 就刷新了。
+    const now = Date.now();
     for (const e of liveExtensions()) {
-      if (Date.now() - e.lastRx > EXT_SILENCE_MS) {
-        log(`扩展静默超时，判定这条连接已死（${extLabel(e)}）`);
+      const silent = now - e.lastRx;
+      if (silent <= EXT_SILENCE_MS) { e.probedAt = 0; continue; }
+      if (!e.probedAt) { e.probedAt = now; send(e, { type: 'ping' }); continue; }
+      if (now - e.probedAt >= EXT_PROBE_MS) {
+        log(`扩展静默超时，探了 ${Math.round((now - e.probedAt) / 1000)}s 也没回音，判定这条连接已死（${extLabel(e)}）`);
         e.terminate();
       }
     }

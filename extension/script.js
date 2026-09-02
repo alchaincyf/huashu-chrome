@@ -38,6 +38,11 @@ export function validateScript(steps) {
         if (s?.ref && !s?.find) return `第 ${i + 1} 步 repeat 的子步用了 ref="${s.ref}"——循环里页面每轮都会变，改用 find（role+名字）或 selector`;
       }
     }
+    if (st.do === 'read') {
+      if (!st.ref && !st.find && !st.selector && !st.contains) {
+        return `第 ${i + 1} 步 read 没说读什么：给 ref / find / selector 读某个元素，或给 contains 按文本找`;
+      }
+    }
     if (st.do === 'if') {
       if (!st.cond) return `第 ${i + 1} 步 if 没写 cond`;
       for (const s of [...(st.then || []), ...(st.else || [])]) {

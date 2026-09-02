@@ -24,18 +24,24 @@
   // ---------- 可见性 ----------
 
   // getComputedStyle 是这里最贵的一次调用，可见性和可交互性共用它，别调两遍
-  function isVisible(el, s = getComputedStyle(el)) {
+  // anywhere：不管离视口多远。快照只收视口上下几屏内的元素（长列表页全收会撑爆），
+  // 但「页面上有没有这段文字」这种问题不该被视口限制——那正是 agent 写 eval 的场景。
+  function isVisible(el, s = getComputedStyle(el), anywhere = false) {
     if (!el.isConnected) return false;
     if (s.visibility === 'hidden' || s.display === 'none' || Number(s.opacity) < 0.02) return false;
     const r = el.getBoundingClientRect();
     if (r.width < 2 || r.height < 2) return false;
     // 视口外但能滚动到的，算可见——列表页大量元素在下面
-    if (r.bottom < -window.innerHeight * 2 || r.top > window.innerHeight * 3) return false;
+    if (!anywhere && offWindow(r)) return false;
     return true;
   }
+  const offWindow = (r) => r.bottom < -window.innerHeight * 2 || r.top > window.innerHeight * 3;
 
+  // disabled 的元素**照收**，在 state 里标 disabled。以前这里直接 return false，
+  // 于是「没有提交按钮」和「提交按钮被禁用」在快照里长得一模一样——而后者
+  // 是表单校验没过的最常见信号，agent 看不见它就只能写 eval 去摸。
+  // 点它会在 resolve 里被 NOT_INTERACTABLE 拦下，那句话比「找不到」有信息量。
   function isInteractive(el, s) {
-    if (el.disabled) return false;
     if (INTERACTIVE_TAGS.has(el.tagName)) {
       if (el.tagName === 'INPUT' && el.type === 'hidden') return false;
       if (el.tagName === 'A' && !el.getAttribute('href')) return false;
@@ -72,6 +78,8 @@
       el.getAttribute('title'),
       el.getAttribute('alt'),
       el.querySelector('img[alt]')?.getAttribute('alt'),
+      // 图标按钮的名字常常只写在 <svg><title> 里
+      el.querySelector('svg > title')?.textContent,
       el.tagName === 'INPUT' && ['submit', 'button', 'reset'].includes(el.type) ? el.value : '',
       // <select> 的 innerText 是它全部选项拼起来的一长串（"请选择 昆明 深圳"），
       // 当名字用只会把一行快照撑爆，而且看着像个多选控件。选项本来就在 state 里列了。
@@ -146,10 +154,36 @@
     }
   }
 
-  // 状态后缀：让 agent 一眼看出「填没填」「勾没勾」，省掉一轮试探
+  // 靠 class 表达的状态：PrimeNG 的 ui-state-active、Element 的 is-checked、
+  // 自家写的 .selected / .on。没有 role 也没有 aria-*，class 是它唯一的自述。
+  // 只认「状态词在末尾」的 token（is-checked、tab-active、toggle-on），
+  // 别把 button、onboarding 这类词里的 on 当成状态。
+  const STATE_CLASS = /(?:^|[-_])(checked|selected|active|open|current|pressed|on|off|expanded|collapsed)$/i;
+  function stateClass(el) {
+    const cls = String(el.className?.baseVal ?? el.className ?? '');
+    for (const t of cls.split(/\s+/)) if (t && STATE_CLASS.test(t)) return t;
+    return '';
+  }
+
+  // 无名元素的可辨识标识：图标按钮、自定义开关、卡片上的「×」都没有可访问名，
+  // 以前直接从快照里消失，agent 只能写 querySelector 去摸。给它一个
+  // id / data-testid / 首个 class，至少能被 selector 指到。
+  function idHint(el) {
+    const id = el.id || '';
+    if (id && id.length <= 40 && !/^[a-z0-9_-]{24,}$/i.test(id)) return `#${id}`;
+    const tid = el.getAttribute('data-testid') || el.getAttribute('data-test') || el.getAttribute('data-qa');
+    if (tid) return `[data-testid="${tid.slice(0, 40)}"]`;
+    const cls = String(el.className?.baseVal ?? el.className ?? '').trim().split(/\s+/)[0] || '';
+    if (cls && cls.length <= 40) return `.${cls}`;
+    return '';
+  }
+
+  const isDisabled = (el) => !!(el.disabled || el.matches?.(':disabled') || el.getAttribute('aria-disabled') === 'true');
+
+  // 状态后缀：让 agent 一眼看出「填没填」「勾没勾」「选中的是哪个」，省掉一轮试探
   function stateOf(el, role) {
     const bits = [];
-    if (role === 'checkbox' || role === 'radio' || role === 'switch') {
+    if (['checkbox', 'radio', 'switch', 'menuitemcheckbox', 'menuitemradio'].includes(role)) {
       const checked = el.checked ?? el.getAttribute('aria-checked') === 'true';
       bits.push(checked ? 'checked' : 'unchecked');
     }
@@ -171,7 +205,11 @@
       // 位数仍然有用：agent 能据此判断「填进去了没有」。
       if (!v) bits.push('empty');
       else if (isSecretField(el)) bits.push(`value: <${v.length} 位>`);
-      else bits.push(`value: "${v.length > 40 ? v.slice(0, 40) + '…' : v}"`);
+      else {
+        // 富文本编辑器里「现在写了什么」得看得全一点：40 字看不出一段正文填没填对
+        const cap = el.isContentEditable ? 200 : 40;
+        bits.push(`value: "${v.length > cap ? v.slice(0, cap) + '…' : v}"`);
+      }
     }
     if (role === 'combobox' && el.tagName === 'SELECT') {
       bits.push(`selected: "${el.options[el.selectedIndex]?.text || ''}"`);
@@ -179,7 +217,15 @@
       if (opts) bits.push(`options: ${opts}${el.options.length > 8 ? ' …' : ''}`);
     }
     if (el.getAttribute('aria-expanded')) bits.push(`expanded: ${el.getAttribute('aria-expanded')}`);
-    if (el.disabled || el.getAttribute('aria-disabled') === 'true') bits.push('disabled');
+    // tab 哪个是当前、option 哪个已选、toggle 按没按。以前只报 expanded，
+    // 「现在选中的是哪个」这个问题 agent 只能写 eval 去问。
+    for (const a of ['aria-selected', 'aria-pressed', 'aria-current']) {
+      const v = el.getAttribute(a);
+      if (v && v !== 'false') bits.push(`${a.slice(5)}${v === 'true' ? '' : ': ' + v}`);
+    }
+    const sc = stateClass(el);
+    if (sc) bits.push(`class: ${sc}`);
+    if (isDisabled(el)) bits.push('disabled');
     return bits.length ? ` (${bits.join(', ')})` : '';
   }
 
@@ -191,11 +237,18 @@
   function collectCandidates() {
     // 一阶段：收候选。同时遍历 open shadow root —— 现在大量站点把控件塞在里面
     const cands = [];
+    // 视口窗口之外还有多少可交互元素。以前一个字不提，agent 看着一份「完整」的
+    // 快照找不到底部的提交按钮，只能再拍一次或写 eval 去摸。
+    let off = 0;
     const walk = (root) => {
       for (const el of root.querySelectorAll('*')) {
         if (el.shadowRoot) walk(el.shadowRoot);
         const s = getComputedStyle(el);
-        if (!isInteractive(el, s) || !isVisible(el, s)) continue;
+        if (!isInteractive(el, s)) continue;
+        if (!isVisible(el, s)) {
+          if (isVisible(el, s, true)) off += 1;
+          continue;
+        }
         const semantic = INTERACTIVE_TAGS.has(el.tagName)
           || INTERACTIVE_ROLES.has(el.getAttribute('role'))
           || el.isContentEditable;
@@ -208,7 +261,7 @@
           weak: !semantic && !el.hasAttribute('onclick')
             && el.getAttribute('tabindex') === null && !el.getAttribute('role'),
         });
-        if (cands.length >= 400) return; // 极端长页的护栏
+        if (cands.length >= 400) { cands.truncated = true; return; } // 极端长页的护栏
       }
     };
     walk(document);
@@ -232,6 +285,8 @@
       if (has((o) => o.el !== el && el.contains(o.el))) return false;
       return true;
     });
+    keep.truncated = !!cands.truncated;
+    keep.offWindow = off;
     return keep;
   }
 
@@ -259,14 +314,25 @@
     // 某个老元素的号——那会让 agent 手里的 ref 悄悄指向别的东西。
     const rows = [];
     const taken = new Set();
+    let unnamed = 0, truncated = keep.truncated;
     for (const { el } of keep) {
       const role = roleOf(el);
       const name = accessibleName(el);
-      if (!name && role === 'button') continue; // 无名按钮多半是装饰性图标，滤掉省 token
+      let hint = '';
+      if (!name && role === 'button') {
+        // 无名按钮以前直接丢（「多半是装饰性图标」）。代价是图标按钮、自定义
+        // checkbox（PrimeNG 的 <div class="ui-chkbox">）、卡片上的「×」在快照里
+        // 根本不存在，agent 只能写 querySelector 去摸——v0.7 数据里那 129 次
+        // 「看」的 eval 有相当一部分是在摸这些。现在给个标识收进来，但封顶：
+        // 装饰性图标确实很多，40 个之后仍然丢。
+        hint = idHint(el);
+        if (!hint || unnamed >= 40) { if (hint) truncated = true; continue; }
+        unnamed += 1;
+      }
       const ref = prevRef.get(el) || null;
       if (ref) taken.add(ref);
-      rows.push({ el, role, name, ref });
-      if (rows.length >= 300) break;
+      rows.push({ el, role, name, ref, hint });
+      if (rows.length >= 300) { truncated = true; break; }
     }
     let next = 0;
     for (const row of rows) {
@@ -278,19 +344,26 @@
 
     const lines = [];
     let n = 0;
-    for (const { el, role, name, ref } of rows) {
+    for (const { el, role, name, ref, hint } of rows) {
       n += 1;
       // 存下当时的 role 和名字：ref 现在能跨快照使用，就必须防住
       // 「元素还在、语义换了」——列表刷新后复用同一个 DOM 节点，
       // [e5] 的「删除」很可能已经是另一条记录的删除按钮了。resolve 会比对。
+      // hint 只进显示不进 refMap：resolve 比对的是可访问名，无名元素的名字就是空。
       refMap.set(ref, { el, role, name });
-      lines.push(`[${ref}]  ${role.padEnd(9)} "${name}"${stateOf(el, role)}`);
+      const st = stateOf(el, role);
+      const tail = hint ? (st ? st.replace(/\)$/, `, ${hint})`) : ` (${hint})`) : st;
+      lines.push(`[${ref}]  ${role.padEnd(9)} "${name}"${tail}`);
     }
 
     const excerpt = mainText().slice(0, 1500);
     const alerts = collectAlerts();
-    const header = `# ${document.title} — ${location.href}\n[snapshot ${snapshotId}] ${n} 个可交互元素\n`
-      + (alerts.length ? `\n⚠️ 页面提示：\n${alerts.map((a) => '  · ' + a).join('\n')}\n` : '');
+    const overlays = collectOverlays();
+    const header = `# ${document.title} — ${location.href}\n[snapshot ${snapshotId}] ${n} 个可交互元素`
+      + (truncated ? '（已截断：元素太多，只列了一部分；要看别处的，先滚动到那里再拍）' : '')
+      + (keep.offWindow ? `（视口上下几屏之外还有 ${keep.offWindow} 个，scroll 过去再拍才看得到）` : '') + '\n'
+      + (alerts.length ? `\n⚠️ 页面提示：\n${alerts.map((a) => '  · ' + a).join('\n')}\n` : '')
+      + (overlays.length ? `\n🪟 浮层/对话框（盖在页面上，多半要先处理）：\n${overlays.map((a) => '  · ' + a).join('\n')}\n` : '');
     return {
       untrusted: true,
       meta: `url="${location.href}" snapshot="${snapshotId}"`,
@@ -341,6 +414,35 @@
     return { frames, overlays };
   }
 
+  // 弹窗/对话框单列一段。它们的文字以前只喂给 risk.js 判风控，不进快照——
+  // 而「页面上盖着一个弹窗」是 agent 最需要第一眼知道的事：不知道就会对着
+  // 被遮住的按钮反复点，或者写 eval 去找「关闭」。
+  // 判据比 challengeEvidence 窄：只认明确声明的 dialog，和 class 名自述是
+  // modal/popup/drawer 的固定浮层。sticky 导航条不算，那是页面的一部分。
+  const OVERLAY_CLASS = /modal|dialog|popup|drawer|overlay|mask|lightbox/i;
+  function collectOverlays() {
+    const out = [];
+    try {
+      const tops = new Set([
+        ...document.querySelectorAll('[role="dialog"],[role="alertdialog"],dialog[open]'),
+        ...Array.from(document.body?.children || []).filter((e) => {
+          if (e.shadowRoot || !OVERLAY_CLASS.test(String(e.className?.baseVal ?? e.className ?? ''))) return false;
+          const cs = getComputedStyle(e);
+          return cs.position === 'fixed' && cs.display !== 'none';
+        }),
+      ]);
+      for (const el of tops) {
+        if (out.length >= 4) break;
+        if (!isVisible(el)) continue;
+        // 外层浮层里套着真正的 dialog 时只报里面那个
+        if (el.querySelector('[role="dialog"],[role="alertdialog"]')) continue;
+        const t = (el.innerText || '').replace(/\s+/g, ' ').trim();
+        if (t) out.push(t.length > 200 ? t.slice(0, 200) + '…' : t);
+      }
+    } catch { /* 页面正在换页 */ }
+    return out;
+  }
+
   function collectAlerts() {
     const out = new Set();
     let nodes;
@@ -375,7 +477,10 @@
   function mainText() {
     const cand = document.querySelector('article, main, [role="main"], #js_content, .article-content, .post-content') || document.body;
     const clone = cand.cloneNode(true);
-    clone.querySelectorAll('script, style, nav, header, footer, aside, noscript, svg, form, iframe, [aria-hidden="true"]').forEach((n) => n.remove());
+    // form 不剥：以前剥了，于是表单页的字段标签、校验文案、说明文字全不在节选里，
+    // 而表单向导正是最需要「读一眼再决定」的那类页面。<select> 的选项文本会跟着
+    // 进来，是可接受的噪音。
+    clone.querySelectorAll('script, style, nav, header, footer, aside, noscript, svg, iframe, [aria-hidden="true"]').forEach((n) => n.remove());
     return (clone.innerText || '')
       .replace(/[\u200b-\u200f\u2060\ufeff\u00ad]/g, '')
       .replace(/[ \t]+\n/g, '\n')
@@ -526,7 +631,7 @@
         + '这一片内容被换掉了。重新 snapshot 再操作。');
     }
     if (!isVisible(el)) throw fail('NOT_INTERACTABLE', `${p.ref} 当前不可见`);
-    if (el.disabled) throw fail('NOT_INTERACTABLE', `${p.ref} 处于 disabled 状态`);
+    if (isDisabled(el)) throw fail('NOT_INTERACTABLE', `${p.ref} 处于 disabled 状态——多半是表单还没填完整或校验没过，看快照里的页面提示`);
     return el;
   }
 
@@ -995,7 +1100,9 @@
     if (bs && box) {
       const dKids = box.getElementsByTagName('*').length - bs.kids;
       if (dKids !== 0) strong.push(`目标区块 DOM ${dKids > 0 ? '+' : ''}${dKids} 节点`);
-      else if (!strong.length) {
+      // 只有「class 变了」时也算一次文本：那条几乎总是动画/激活态，真正的结果
+      // （文字换了、提示出来了）常在几百毫秒后才到，settle 正等着这里报出来
+      else if (!strong.length || (strong.length === 1 && strong[0] === '目标 class 变了')) {
         const dLen = renderedLen(box) - bs.len;
         if (Math.abs(dLen) >= 2) strong.push(`目标区块文本 ${dLen > 0 ? '+' : ''}${dLen} 字`);
       }
@@ -1671,7 +1778,87 @@
   // 结构化提取。存在的理由：eval 在有 CSP 的站点上直接废掉（小红书就禁了 unsafe-eval），
   // 而 read_text 会把表格的各列文本拼成「362223585554365」这种无法拆分的数字串。
   // selector 是数据不是代码，CSP 管不着它。
+  // 按文本找元素。审计里 eval→eval 542 次，相当一部分是 TreeWalker 找「含某文本的
+  // 节点」——读状态、验证某个值渲染出来没有、找自定义下拉里的某个选项。
+  // 那些节点多半不可交互（span/td/h2），快照收不到、find 也只看交互池，
+  // 所以这里单开一条路：返回能定位它的 selector 路径和它的文本，
+  // 以及它在哪个已编号元素里面（有的话），agent 下一步直接能点。
+  function cssPath(el) {
+    const parts = [];
+    for (let n = el, i = 0; n && n.nodeType === 1 && n !== document.body && i < 6; n = n.parentElement, i++) {
+      if (n.id && /^[A-Za-z][\w-]*$/.test(n.id)) { parts.unshift(`#${CSS.escape(n.id)}`); break; }
+      let s = n.tagName.toLowerCase();
+      const sib = n.parentElement ? [...n.parentElement.children].filter((c) => c.tagName === n.tagName) : [];
+      if (sib.length > 1) s += `:nth-of-type(${sib.indexOf(n) + 1})`;
+      parts.unshift(s);
+    }
+    return parts.join(' > ');
+  }
+
+  function refOfAncestor(el) {
+    for (const [r, rec] of refMap) if (rec.el === el || rec.el?.contains?.(el)) return r;
+    return '';
+  }
+
+  function queryByText(p) {
+    const want = norm(p.contains).toLowerCase();
+    if (!want) throw fail('INTERNAL', 'contains 不能为空');
+    const limit = Math.min(Number(p.limit) || 20, 100);
+    const roots = p.selector ? [...document.querySelectorAll(p.selector)] : [document.body];
+    const hits = [];
+    outer: for (const root of roots) {
+      // 输入框的值不在文本节点里，单独看一眼
+      for (const el of root.querySelectorAll('input,textarea')) {
+        if (String(el.value || '').toLowerCase().includes(want) && isVisible(el, undefined, true)) hits.push(el);
+        if (hits.length >= limit) break outer;
+      }
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        if (!norm(node.nodeValue).toLowerCase().includes(want)) continue;
+        const el = node.parentElement;
+        if (!el || /^(SCRIPT|STYLE|NOSCRIPT)$/.test(el.tagName) || !isVisible(el, undefined, true)) continue;
+        if (!hits.includes(el)) hits.push(el);
+        if (hits.length >= limit) break outer;
+      }
+    }
+    if (!hits.length) return { data: { untrusted: true, text: `页面上没有可见的「${p.contains}」（不查 shadow DOM 与 iframe 内部）` } };
+    const lines = hits.map((el) => {
+      const t = (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' ? el.value : el.innerText || '').replace(/\s+/g, ' ').trim();
+      const role = roleOf(el);
+      const st = INTERACTIVE_TAGS.has(el.tagName) || el.getAttribute('role') ? stateOf(el, role) : '';
+      const within = refOfAncestor(el);
+      return `${cssPath(el)}${st}  "${t.length > 160 ? t.slice(0, 160) + '…' : t}"${within ? `  ← 在 [${within}] 内` : ''}`;
+    });
+    return { data: { untrusted: true, text: `${hits.length} 处含「${p.contains}」（selector 路径 · 文本 · 所在的已编号元素）：\n${lines.join('\n')}` } };
+  }
+
+  // 读一个元素的状态/文本。act 的 read 步走这里：批处理以前只能「做」不能「看」，
+  // 中间想读一眼就得回模型一趟。目标可以是 ref / find / selector；
+  // 没给目标只给 contains 时退化成按文本找。
+  function doRead(p) {
+    if (!p.ref && !p.find && !p.selector) return queryByText({ ...p, limit: p.limit || 10 });
+    let el = null;
+    if (p.find) {
+      try { el = findEl(p.find); } catch (e) {
+        // 交互池里没有，可能是一段静态文本——按名字当文本再找一次
+        if (p.find.name && !p.find.role) return queryByText({ contains: p.find.name, limit: 5 });
+        throw e;
+      }
+    } else if (p.selector) el = document.querySelector(p.selector);
+    else el = refMap.get(p.ref)?.el;
+    if (!el || !el.isConnected) throw fail('REF_NOT_FOUND', `找不到 ${p.ref || p.selector}`);
+    const role = roleOf(el);
+    const bits = [`${role} "${accessibleName(el)}"${stateOf(el, role)}${isVisible(el, undefined, true) ? '' : ' (不可见)'}`];
+    if (p.attr) bits.push(`${p.attr}: ${JSON.stringify(readAttr(el, p.attr))}`);
+    const text = (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' ? '' : el.innerText || '').replace(/\s+/g, ' ').trim();
+    if (text) bits.push(`text: "${text.length > 400 ? text.slice(0, 400) + '…' : text}"`);
+    return { data: { untrusted: true, text: bits.join('\n') } };
+  }
+
   function doQuery(p) {
+    if (p.contains) return queryByText(p);
+    if (!p.selector) throw fail('INTERNAL', 'query 需要 selector 或 contains');
     const nodes = [...document.querySelectorAll(p.selector)].slice(0, p.limit || 100);
     if (p.html) {
       return { data: { untrusted: true, text: nodes.map((el, i) => `--- [${i}] ---\n` + el.outerHTML.slice(0, p.html === true ? 1200 : p.html)).join('\n\n') } };
@@ -1749,6 +1936,7 @@
           case 'ready': return sendResponse(await doReady(msg));
           case 'wait': return sendResponse(await doWait(msg));
           case 'query': return sendResponse(doQuery(msg));
+          case 'read': return sendResponse(doRead(msg));
           case 'upload': return sendResponse(doUpload(msg));
           case 'scroll': return sendResponse(await doScroll(msg));
           case 'history':

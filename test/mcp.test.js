@@ -42,8 +42,11 @@ test('agent 能通过 stdio 挂上 MCP server 并拿到工具表', async () => {
   //   18500 → 18800：标签页纪律（户口簿/label/多线显式 tabId）。tabs 工具的
   //   label 参数和多线规则必须住在不被截断的通道里——它防的正是「subagent
   //   抢槽、显式分页后标记消失」那类真实事故）
+  //   18800 → 19900：把「看」下沉——query 的 contains（按文本找）、act 的 read 步、
+  //   fetch 的 pages（自动翻页）。审计里 eval 占 22.7%、fetch→fetch 相邻 386 次，
+  //   这三样每一样都直接打在一个最大的回合池上，schema 里省不得）
   const total = tools.reduce((n, t) => n + t.description.length + JSON.stringify(t.inputSchema).length, 0);
-  assert.ok(total < 18800, `工具表膨胀到 ${total} 字符了，压回 18800 以内`);
+  assert.ok(total < 19900, `工具表膨胀到 ${total} 字符了，压回 19900 以内`);
 
   // click 必须强制要 snapshotId，否则 ref 防呆整套失效
   assert.deepEqual(tools.find((t) => t.name === 'type').inputSchema.required, ['text']);

@@ -1082,9 +1082,16 @@ async function execL2(id, cmd, params, loc) {
 
 // 轮询等页面反应。有变化就早停——快页面比原来固定的 400ms 更快，
 // 慢页面比它更稳，「更可靠」和「更快」在这里是同一个改动的两面。
+//
+// 有证据之后**不在第一拍就走**。框架的 hover/active/ripple class 常常先于异步
+// 请求落地——第一拍拍到「目标 class 变了」就返回，回来的快照是旧页面，agent
+// 只能再拍一次或写 eval 去核实（审计里 click→eval 109 次、snapshot→snapshot
+// 588 次，相当一部分是这么来的）。所以等证据集合连续两拍不再变化再返回：
+// 快页面多付 100ms，慢页面拿到的是落定后的样子。上限仍是 SETTLE_MS。
 async function settle(id, frameId, params, baseline, beforeUrl) {
   const deadline = Date.now() + SETTLE_MS;
   let last = { changed: false, parts: [] };
+  let prevKey = null;
   while (Date.now() < deadline) {
     await sleep(100);
     const url = (await chrome.tabs.get(id)).url;
@@ -1094,8 +1101,16 @@ async function settle(id, frameId, params, baseline, beforeUrl) {
       last = await toContent(id, { __hc: 'effect', baseline, ref: params.ref, selector: params.selector, find: params.find }, frameId);
     } catch {
       /* 页面正在换页时 content script 会短暂不在，下一轮再问 */
+      continue;
     }
-    if (last.changed) return last;
+    if (!last.changed) continue;
+    // 只有「目标 class 变了」这一条时再多等一会儿（到 500ms）：它几乎总是
+    // 动画/激活态，真正的结果多半还在路上。别的强证据两拍稳定就走。
+    const classOnly = last.parts.length === 1 && last.parts[0] === '目标 class 变了';
+    if (classOnly && Date.now() < deadline - SETTLE_MS + 500) { prevKey = null; continue; }
+    const key = last.parts.join('|');
+    if (key === prevKey) return last;
+    prevKey = key;
   }
   return last;
 }
@@ -1462,8 +1477,10 @@ function describeStep(st) {
     ? `${st.find.role ? st.find.role + ' ' : ''}「${st.find.name || st.find.selector || ''}」`
     : st.ref ? `[${st.ref}]`
     : st.selector ? `(${st.selector})`
+    : st.contains ? `含「${String(st.contains).slice(0, 30)}」`
     : '';
-  const extra = st.text !== undefined ? ` ←${String(st.text).length}字`
+  const extra = st.do === 'read' ? (st.attr ? ` @${st.attr}` : '')
+    : st.text !== undefined ? ` ←${String(st.text).length}字`
     : st.value !== undefined ? ` ←"${st.value}"`
     : st.check !== undefined ? (st.check ? ' 勾选' : ' 取消勾选')
     : st.key !== undefined ? ` ${[].concat(st.key).join('+')}`
@@ -1481,6 +1498,7 @@ function panelStep(st) {
   if (st.do === 'repeat') return `循环（≤${repeatMax(st)} 轮）`;
   if (st.do === 'if') return '条件分支';
   if (st.do === 'assert') return '检查页面状态';
+  if (st.do === 'read') return '读取页面';
   const t = st.find
     ? `「${st.find.name || st.find.selector || ''}」`
     : st.ref ? `[${st.ref}]`
@@ -1540,6 +1558,10 @@ const HANDLERS = {
   async snapshot(p, tabId, ctx) {
     const id = await resolveTab(tabId);
     const drift = await driftNote(id, ctx?.sid);
+    // 先等页面安静一小会儿再拍。以前直接拍，骨架屏/loading 态照拍不误，
+    // agent 拿到一份「什么都还没有」的快照只能再拍一次当轮询用
+    //（审计里同一 tab 连拍两次 588 回）。150ms 的静默窗口换掉那一整个回合。
+    await toContent(id, { __hc: 'ready', quiet: 150, budget: 800 }).catch(() => {});
     const snap = await guardCreds(id, await snapshotAll(id, p));
     return drift ? { ...snap, text: drift + '\n' + snap.text } : snap;
   },
@@ -1622,6 +1644,13 @@ const HANDLERS = {
           out.push(`✅ ${label}　${(r?.text || '').split('\n')[0]}`);
           return;
         }
+        // 观察步：批处理以前只能「做」不能「看」，中途想读一眼就得回模型一趟，
+        // 而那正是 act 要省掉的东西。读到的内容原样进回执。
+        if (cmd === 'read') {
+          const r = await toContent(id, { __hc: 'read', ...rest });
+          out.push(`📖 ${label}\n     ${String(r?.text || '').split('\n').join('\n     ')}`);
+          return;
+        }
 
         const r = await performCore(id, cmd, { ...rest, snapshotId: p.snapshotId },
           { blockSensitive: !p.allowSensitive }, ctx);
@@ -1653,8 +1682,12 @@ const HANDLERS = {
         }
         out.push(`✅ ${label}　效果：${r.ev.parts.join('；')}`);
         // 只有「结构性」变化才作废 ref：填个值、勾个框不影响编号，
-        // 而连续填表正是批处理最常见的用法，不该逼它们全用 find
-        if (r.navigated || r.ev.parts.some((s) => /节点|顶层|跳转|移除/.test(s))) {
+        // 而连续填表正是批处理最常见的用法，不该逼它们全用 find。
+        // 区块里多了三五个节点也不算——那是 ripple、下拉箭头、校验图标这类
+        // 小动静，以前一律当结构变化，一次点击动画就让整份 ref 剧本半途报废，
+        // agent 只好退回逐条调用。ref 本身有 resolve 的名字比对兜底，
+        // 真被换掉的元素照样会被拦住。
+        if (r.navigated || r.ev.parts.some((s) => /顶层|跳转|移除/.test(s) || (/区块 DOM [+-](\d+)/.exec(s)?.[1] | 0) >= 10)) {
           structureChanged = true;
         }
       } catch (e) {
@@ -1791,9 +1824,19 @@ const HANDLERS = {
     return (await toFrame(id, 'upload', p)).data;
   },
 
+  // 滚完顺手拍一份：视口一动，快照收的元素集合就变了，agent 下一步几乎必然
+  // 要重拍——省它一个回合
   async scroll(p, tabId) {
     const id = await resolveTab(tabId);
-    return toContent(id, { __hc: 'scroll', ...p });
+    const r = await toContent(id, { __hc: 'scroll', ...p });
+    const snap = await snapshotAll(id).catch(() => null);
+    return snap ? { ...snap, text: `${r?.text || ''}\n\n${snap.text}` } : r;
+  },
+
+  // 读一个元素的状态/文本，或按文本找元素。给 act 的 read 步用；也可单独调
+  async read(p, tabId) {
+    const id = await resolveTab(tabId);
+    return (await toFrame(id, 'read', p)).data;
   },
 
   // 看这个页面调了哪些接口、返回了什么。抓数据的首选入口。

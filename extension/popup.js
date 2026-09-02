@@ -1,20 +1,35 @@
 const dot = document.getElementById('dot');
 const state = document.getElementById('state');
 const btn = document.getElementById('btn');
+const conntip = document.getElementById('conntip');
 
-function render(connected) {
+// 版本号：用户自查「扩展和 CLI 是不是同一版」的唯一入口。npx 会原地刷新扩展文件，
+// Chrome 跑的却还是旧的，这种错位只有版本号能看出来。
+document.getElementById('ver').textContent = 'v' + chrome.runtime.getManifest().version;
+
+// 「上次收到桥的消息是几秒前」「桥版本几」——用户以前只看得到一盏灯，
+// 分不清是扩展断了、桥没起、还是终端根本没在跑。
+function render(connected, r = {}) {
   dot.classList.toggle('on', connected);
   state.textContent = connected ? '已连接终端' : '未连接';
   btn.disabled = connected;
-  btn.textContent = connected ? '一切正常' : '立即连接';
+  btn.textContent = connected ? '一切正常' : '重连';
+  const age = r.lastRx ? Math.round((Date.now() - r.lastRx) / 1000) : null;
+  const bits = [];
+  if (r.bridge) bits.push(`桥 v${r.bridge}${r.bridge !== chrome.runtime.getManifest().version ? '（和扩展版本不一致，去 chrome://extensions 重载一次）' : ''}`);
+  if (age !== null) bits.push(`${age} 秒前收到心跳`);
+  if (!connected && r.offscreenError) bits.push(`后台文档建不起来：${r.offscreenError}`);
+  if (!connected && age === null) bits.push('从没连上过：终端那边跑过 agent 了吗？桥由 agent 第一次调用时拉起');
+  conntip.textContent = bits.join(' · ');
+  conntip.hidden = !bits.length;
 }
 
-chrome.runtime.sendMessage({ __hcPopup: 'status' }, (r) => render(!!r?.connected));
+chrome.runtime.sendMessage({ __hcPopup: 'status' }, (r) => render(!!r?.connected, r || {}));
 
 btn.onclick = () => {
   btn.disabled = true;
   btn.textContent = '连接中…';
-  chrome.runtime.sendMessage({ __hcPopup: 'connect' }, (r) => render(!!r?.connected));
+  chrome.runtime.sendMessage({ __hcPopup: 'connect' }, (r) => render(!!r?.connected, r || {}));
 };
 
 // ---------- 高保真模式 ----------

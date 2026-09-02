@@ -125,7 +125,11 @@ function launcher(client) {
 
 // ---------- 主流程 ----------
 
-export async function install({ yes = false, only = null } = {}) {
+// yes 默认 true：README 承诺的是「一条命令」，而以前不加 --yes 只打印计划——
+// 新用户照着 README 跑完发现什么都没写，第二条命令才是真的。备份照做，
+// 「绝不静默改配置」靠的是先备份再写、每一处都打印出来，不是靠让人跑两遍。
+// 想只看不写，用 --dry-run。
+export async function install({ yes = true, only = null } = {}) {
   console.log('\nhuashu-chrome 安装\n');
 
   const all = knownAgents().filter((a) => a.file);
@@ -168,8 +172,7 @@ export async function install({ yes = false, only = null } = {}) {
   } else {
     console.log(`\n将修改 ${plan.length} 个配置文件，每个都会先备份成 <文件名>.bak-<时间戳>。`);
     if (!yes) {
-      console.log('\n确认无误就加 --yes 重跑：\n');
-      console.log(`    ${FROM_NPM ? 'npx huashu-chrome' : 'node ' + path.join(ROOT, 'src', 'cli.js')} install --yes\n`);
+      console.log('\n（--dry-run：只看不写。去掉它重跑就会写入）\n');
       printExtensionStep();
       return;
     }
@@ -290,6 +293,8 @@ button:disabled{opacity:.55;cursor:default}
   <li>打开页面右上角的<b>「开发者模式」</b>开关</li>
   <li>点<b>「加载已解压的扩展程序」</b>，选中这个文件夹：
     <div class="row"><input readonly value="${esc(extDir)}"><button data-copy>复制</button></div>
+    ${/[\\/]\.[^\\/]+[\\/]/.test(extDir) ? `<div class="tip">这个文件夹在隐藏目录里，选择框默认看不见它：
+      macOS 在选择框里按 <code>⌘⇧G</code> 粘贴路径回车；Windows 直接把路径粘进选择框顶部的地址栏。</div>` : ''}
   </li>
   <li>装好后扩展会自动连上终端，工具栏图标上的灰点会消失</li>
 </ol>

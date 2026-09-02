@@ -22,15 +22,16 @@
   .sess .page { color: #8a8f98; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>
 
-<h1>huashu-chrome</h1>
+<h1>huashu-chrome <span id="ver" style="font-weight:400;color:#8a8f98;font-size:11px"></span></h1>
 <div class="sub">让 AI agent 用你自己的浏览器</div>
 
 <div class="row">
   <span class="dot" id="dot"></span>
   <span class="state" id="state">检查中…</span>
 </div>
+<div class="tip" id="conntip" style="margin-top:6px"></div>
 
-<button id="btn">立即连接</button>
+<button id="btn">重连</button>
 
 <div class="row" style="margin-top:10px">
   <span class="dot" id="l2dot"></span>
@@ -53,6 +54,7 @@
   标签页归进同色标签组——你随时知道哪一页有主、是谁、在干什么。
 </div>
 
-<div class="tip" id="tip">连不上时终端跑 <code>huashu-chrome doctor</code></div>
+<div class="tip" id="tip">连不上时终端跑 <code>huashu-chrome doctor</code>。
+  插件不会「消失」——断的只是它到终端的那条连接，点上面的「重连」即可，不必去 chrome://extensions 重装。</div>
 
 <script src="popup.js"></script>

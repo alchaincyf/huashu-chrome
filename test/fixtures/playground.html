@@ -182,6 +182,37 @@
   </p>
 </section>
 
+<section id="s14">
+  <h2>14. 状态感知：快照要报出「现在是什么样」</h2>
+  <p>
+    <button id="disabledSubmit" disabled>提交（禁用）</button>
+    <small>disabled 的按钮要进快照并标 disabled，不能凭空消失</small>
+  </p>
+  <div role="tablist">
+    <button role="tab" id="tabA" aria-selected="true">概览</button>
+    <button role="tab" id="tabB" aria-selected="false">详情</button>
+  </div>
+  <p>
+    <div id="chk" class="ui-chkbox is-checked" tabindex="0">自定义勾选框（靠 class 表达状态）</div>
+  </p>
+  <p>
+    <button id="iconClose" aria-hidden="false"><svg width="12" height="12"><path d="M1 1L11 11M11 1L1 11" stroke="#000"/></svg></button>
+    <small>无名图标按钮：以前直接从快照消失</small>
+  </p>
+  <p>
+    <button id="slowBtn">慢反应按钮</button> <b id="slowOut">未完成</b>
+    <small>点下去先加 class，350ms 后才改文字——效果证据不能在第一拍就走</small>
+  </p>
+  <p>
+    <button id="openDlg">打开对话框</button>
+  </p>
+  <div id="dlg" role="dialog" class="hidden" style="position:fixed;left:30%;top:30%;background:#fff;border:1px solid #333;padding:1rem;z-index:500">
+    <p>确定要清空购物车吗？</p>
+    <button id="dlgClose">关闭对话框</button>
+  </div>
+  <p>状态文字：<span id="statusText">订单状态：待付款</span></p>
+</section>
+
 <script>
 // 跨源 iframe：localhost 和 127.0.0.1 是不同的源，端口跟随当前页面，换端口也能跑
 document.getElementById('xframe').src =
@@ -307,4 +338,15 @@ document.querySelectorAll('.del').forEach((b) => {
 });
 document.getElementById('delAll').onclick =
   () => { document.getElementById('delOut').textContent = '删了全部'; };
+
+// ---- 14. 状态感知 ----
+document.getElementById('slowBtn').onclick = function () {
+  this.classList.add('pressed');                       // 框架的 ripple/active 就是这一拍
+  // 用一次真实的网络往返模拟「请求落地才改 DOM」。不用 setTimeout：后台标签页的
+  // 定时器会被 Chrome 对齐到整秒甚至更久，350ms 根本到不了；网络回调不受那条节流管
+  fetch('delay?ms=350').then(() => { document.getElementById('slowOut').textContent = '已经完成了（异步）'; });
+};
+document.getElementById('openDlg').onclick = () => document.getElementById('dlg').classList.remove('hidden');
+document.getElementById('dlgClose').onclick = () => document.getElementById('dlg').classList.add('hidden');
+document.getElementById('chk').onclick = function () { this.classList.toggle('is-checked'); };
 </script>

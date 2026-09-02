@@ -35,8 +35,8 @@ npx huashu-chrome install
 ```
 
 一条命令：自动检测这台机器上装了哪些 agent、写好各自的 MCP 配置（动手前先备份，
-已配过的自动跳过），然后弹出引导页带你装扩展——**装扩展这一下必须你自己点，
-浏览器不允许脚本代劳**。
+已配过的自动跳过；只想看不想写加 `--dry-run`），然后弹出引导页带你装扩展——
+**装扩展这一下必须你自己点，浏览器不允许脚本代劳**。
 
 **它认得出哪些 agent**，分三层：
 
@@ -57,8 +57,8 @@ Windows / macOS / Linux 的配置路径都已适配。
 npx huashu-chrome doctor
 ```
 
-看到「握手正常 · Chrome 扩展在线」就成了。桥进程由 agent 首次调用时自动拉起，
-你不用手动开任何东西。
+看到「握手正常 · Chrome 扩展在线」就成了。桥进程由 agent 首次调用时自动拉起
+（doctor 发现桥没跑也会先拉一个再探），你不用手动开任何东西。
 
 <details>
 <summary>手动配置（不想让 install 碰你的配置文件）</summary>
@@ -95,20 +95,20 @@ args = ["-y", "huashu-chrome", "mcp", "--client", "codex"]
 | 工具 | 干什么 |
 |---|---|
 | `network` | 看页面调了哪些接口、返回什么。字段名是站方写的，不用猜哪个数字是哪个指标 |
-| `fetch` | 带着你的 cookie 调接口。改分页参数一次拿完，省掉几十次滚动；`binary` 取图片 |
+| `fetch` | 带着你的 cookie 调接口。`pages` 一次调用翻完所有页（页码或游标），落盘成每行一页的 JSONL；`binary` 取图片 |
 | `download` | 大文件走浏览器原生下载，不占内存、不弹系统保存框 |
 
 **操作层（要做事，以及读文章）**
 
 | 工具 | 干什么 |
 |---|---|
-| `snapshot` | 把当前页拍成带 ref 编号的可交互元素清单，一页通常 1–2k token |
+| `snapshot` | 把当前页拍成带 ref 编号的可交互元素清单（含 value / checked / selected / expanded / disabled 和靠 class 表达的状态），弹窗和页面提示单列，一页通常 1–2k token |
 | `fill` | **一次填完整张表**并提交。10 个字段一个来回，不是十个 |
 | `click` `type` `select` | 按 ref 操作，返回操作后的新快照 |
 | `key` | Esc / Tab / Enter / 方向键 / `ctrl+a`，可传数组一次按一串 |
 | `navigate` `tabs` `wait` `scroll` | 导航、标签页、等待、滚动加载 |
 | `read_text` | 正文提取成 markdown，去掉导航页脚广告和头像图 |
-| `query` | 按 CSS selector 结构化提取，用于没有可用接口的站点 |
+| `query` | 按 CSS selector 结构化提取，用于没有可用接口的站点；`contains` 按文本找元素——「页面上有没有这句话」「这个状态字现在是什么」不必再写 eval |
 | `upload` | 把本地文件塞进网页的上传框——系统文件对话框是扩展够不着的，这是唯一的路 |
 | `eval` | 跑一段 JS。在页面自己的世界里求值，所以受**页面** CSP 管，大站会拦 |
 
@@ -116,7 +116,7 @@ args = ["-y", "huashu-chrome", "mcp", "--client", "codex"]
 
 | 工具 | 干什么 |
 |---|---|
-| `act` | 一次调用跑完多步。登录、多步表单、向导流程——agent 只要知道接下来要做什么，就一次说完。每步执行后自动验效果，出问题立刻停，最后只回一份快照 |
+| `act` | 一次调用跑完多步。登录、多步表单、向导流程——agent 只要知道接下来要做什么，就一次说完。每步执行后自动验效果，出问题立刻停，最后只回一份快照。中途想看一眼用 `read` 步，观察结果随回执一起回来 |
 
 **人**
 
@@ -128,7 +128,7 @@ args = ["-y", "huashu-chrome", "mcp", "--client", "codex"]
 
 | 工具 | 干什么 |
 |---|---|
-| `screenshot` | 只在版式本身就是问题时用。开了高保真模式可以直接截后台标签页，不打断你 |
+| `screenshot` | 只在版式本身就是问题时用。开了高保真模式可以直接截后台标签页，不打断你；`savePath` 落盘不进上下文 |
 
 这套顺序不用你教给 agent——MCP server 在握手时就把它作为 `instructions` 下发了。
 
@@ -395,13 +395,14 @@ offscreen 万一建不起来，扩展不能整个哑掉。
 ## 排错
 
 ```bash
-npx huashu-chrome doctor        # 一条命令查完整条链路
-npx huashu-chrome audit -n 50   # 看 agent 到底点了什么
+npx huashu-chrome doctor            # 一条命令查完整条链路
+npx huashu-chrome audit -n 50       # 看 agent 到底点了什么
+npx huashu-chrome audit --stats     # 真实 agent 的用法统计：回合空档、哪类调用最多、哪些连着出现
 ```
 
 | 症状 | 原因 | 处理 |
 |---|---|---|
-| `NO_EXTENSION` | 扩展没连上桥 | 确认 Chrome 开着；改过扩展代码要去 `chrome://extensions` 重载 |
+| `NO_EXTENSION` | 扩展到桥的那条连接断了（插件本身没消失） | 点工具栏的 huashu-chrome 图标 → 「重连」；Chrome 没开就先开；只有改过扩展代码才需要去 `chrome://extensions` 重载 |
 | `NEEDS_L2` | 这一步要真实输入事件，但没授权 | 点开扩展图标，按一下「启用高保真模式」 |
 | `L2_BUSY` | 调试器被占用 | 多半是你自己开着 DevTools——一个标签页只允许一个调试器。已自动降级 |
 | `STALE_SNAPSHOT` | 页面变了，ref 全作废 | 正常现象，agent 会自己重拍 |

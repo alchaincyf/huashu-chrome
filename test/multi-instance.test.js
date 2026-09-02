@@ -18,7 +18,8 @@ const URL = `ws://127.0.0.1:${PORT}`;
 let bridge;
 
 before(async () => {
-  bridge = startBridge({ port: PORT, token: TOKEN, writeInfo: false });
+  // orphanGraceMs：断线在途命令的宽限。生产是 15 秒，测试里等不起，压到 300ms
+  bridge = startBridge({ port: PORT, token: TOKEN, writeInfo: false, orphanGraceMs: 300 });
   await bridge.ready;
 });
 after(() => bridge.close());
@@ -129,7 +130,8 @@ test('一个实例断开 —— 只失败它承接的命令，另一个照常干
   a.ws.close();
   const r = await res;
   assert.equal(r.id, 'c-orphan');
-  assert.equal(r.error.code, 'NO_EXTENSION', 'a 承接的在途命令要立刻失败');
+  assert.equal(r.error.code, 'NO_EXTENSION', 'a 承接的在途命令宽限期过后要失败');
+  assert.match(r.error.message, /可能已经在页面上生效/, '要提醒 agent 别把一次点击做成两次');
 
   // b 还在，桥不该认为「扩展离线」——新命令要能正常发出去
   g.ws.send(JSON.stringify({ type: 'cmd', id: 'c-after', cmd: 'status', params: {} }));
@@ -137,6 +139,30 @@ test('一个实例断开 —— 只失败它承接的命令，另一个照常干
   assert.equal(b.cmds.length, 1, 'a 断开不该影响 b 接活');
 
   b.ws.close(); g.ws.close();
+  await settle();
+});
+
+test('瞬断宽限 —— 扩展在宽限期内带着回执回来，agent 拿到的是真结果不是 NO_EXTENSION', async () => {
+  const a = await ext({ instanceId: 'inst-blip' });
+  await settle();
+  const g = await agent('s-blip');
+  g.ws.send(JSON.stringify({ type: 'cmd', id: 'c-blip', cmd: 'status', params: {} }));
+  await settle(200);
+  assert.equal(a.cmds.length, 1);
+  const k = a.cmds[0].__k;
+
+  // 命令在途时连接断了（睡醒后看门狗互杀、双腿替换……），扩展 100ms 后带着
+  // 同一个 instanceId 回来，把存在发件箱里的回执按 __k 补发
+  const res = nextOf(g.ws, 'res');
+  a.ws.close();
+  await settle(100);
+  const a2 = await ext({ instanceId: 'inst-blip' });
+  a2.ws.send(JSON.stringify({ type: 'res', id: 'c-blip', __k: k, ok: true, data: { text: 'late but real' } }));
+  const r = await res;
+  assert.equal(r.ok, true, `宽限期内补发的回执要原样送达，收到的是：${JSON.stringify(r)}`);
+  assert.equal(r.data.text, 'late but real');
+
+  a2.ws.close(); g.ws.close();
   await settle();
 });
 

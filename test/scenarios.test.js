@@ -24,6 +24,11 @@ let server, server6, c, mainTab;
 
 const handler = (req, res) => {
   const p = (req.url || '/').split('?')[0].replace(/^\//, '') || 'playground.html';
+  // 靶场里「请求落地才改 DOM」的模拟：延迟 ms 毫秒再回
+  if (p === 'delay') {
+    const ms = Number(new URL(req.url, 'http://x').searchParams.get('ms')) || 300;
+    return setTimeout(() => { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('ok'); }, ms);
+  }
   // /settings/tokens 端的还是 creds.html，只是换一个「站点风格」的地址：
   // 凭据页的 URL 判定认的是路径段（真实站点就长这样），文件名形式的
   // /creds.html 命不中它 —— 不给一个这样的入口，URL 那一层就没法测。
@@ -540,7 +545,7 @@ test('act 一次跑完多步，只回一份快照', async () => {
       { do: 'click', find: { role: 'checkbox', name: '我同意条款' } },
     ],
   });
-  assert.match(r.text, /act 完成 3\/3/);
+  assert.match(r.text, /act 完成（顶层 3\/3/);
   assert.equal(await val('document.getElementById("phone").value'), '"13800138000"');
   assert.equal(await val('document.getElementById("agree").checked'), 'true');
   // 中间那些快照正是批处理省下来的东西：整个返回里只能有一份
@@ -557,7 +562,7 @@ test('act 停在提交/支付类动作前，不代做', async () => {
       { do: 'click', find: { role: 'button', name: '提交订单' } },
     ],
   });
-  assert.match(r.text, /act 停在第 4 步 3\/4/);
+  assert.match(r.text, /act 停在第 4 步（顶层 3\/4/);
   assert.match(r.text, /批处理不代做/);
   // 真的没提交出去——这道闸门存在的全部意义
   assert.equal(await val('document.getElementById("payOut").textContent'), '"未提交"');
@@ -571,7 +576,7 @@ test('act 里某步没效果就停下，不让后面的步骤建立在错误前�
       { do: 'click', selector: '#triggerErr' },
     ],
   });
-  assert.match(r.text, /act 停在第 1 步 0\/2/);
+  assert.match(r.text, /act 停在第 1 步（顶层 0\/2/);
   // 第二步没跑，所以校验错误不该出现
   assert.equal(await val('document.getElementById("errBox").className'), '"hidden"');
 });
@@ -609,7 +614,7 @@ test('不改变结构的连续动作可以全程用 ref', async () => {
       { do: 'type', ref: refOf('收件人'), text: '花叔' },
     ],
   });
-  assert.match(r.text, /act 完成 2\/2/);
+  assert.match(r.text, /act 完成（顶层 2\/2/);
   assert.equal(await val('document.getElementById("who").value'), '"花叔"');
 });
 
@@ -1030,4 +1035,98 @@ test('多线并行时的缺省槽调用被当面提醒，且有冷却', async ()
   } finally {
     c2.close();
   }
+});
+
+// ---------- 状态感知：快照要能回答「现在是什么样」 ----------
+//
+// 审计里 eval 占真实调用 22.7%，其中 65% 在读状态或按文本找节点——
+// 全是快照回答不了的问题。下面每一条对应一类被迫写 eval 的场景。
+
+// 第 14 节在页面底部，快照只收视口上下几屏内的元素——先滚过去。
+// scroll 现在自带一份快照，省掉那次单独的 snapshot。
+const bottom = async () => { await go(); return c.call('scroll', { to: 'bottom' }); };
+
+test('视口外还有可交互元素时快照会说出来', async () => {
+  await go();
+  const snap = await c.call('snapshot', {});
+  assert.match(snap.text, /视口上下几屏之外还有 \d+ 个/);
+});
+
+test('disabled 的按钮进快照并标 disabled，点它时说清原因', async () => {
+  const snap = await bottom();
+  const m = /\[(e\d+)\]\s+button\s+"提交（禁用）" \([^)]*disabled\)/.exec(snap.text);
+  assert.ok(m, '禁用按钮没进快照或没标 disabled：\n' + (snap.text.match(/.*提交（禁用）.*/) || ['(无)'])[0]);
+  await assert.rejects(
+    () => c.call('click', { ref: m[1], snapshotId: snap.snapshotId }),
+    (e) => e.code === 'NOT_INTERACTABLE' && /disabled/.test(e.message));
+});
+
+test('aria-selected / class 表达的状态进快照', async () => {
+  const snap = await bottom();
+  assert.match(snap.text, /tab\s+"概览" \(selected\)/, '当前 tab 没标 selected');
+  assert.doesNotMatch(snap.text, /tab\s+"详情" \([^)]*selected/, 'aria-selected=false 不该报');
+  assert.match(snap.text, /"自定义勾选框（靠 class 表达状态）" \([^)]*class: is-checked/, 'class 状态没报');
+});
+
+test('无名图标按钮不再从快照里消失，带 id 标识', async () => {
+  const snap = await bottom();
+  const m = /\[(e\d+)\]\s+button\s+"" \(#iconClose\)/.exec(snap.text);
+  assert.ok(m, '无名图标按钮没进快照');
+  // 旧编号仍能点：hint 只进显示，不进名字比对
+  const r = await c.call('click', { ref: m[1], snapshotId: snap.snapshotId });
+  assert.ok(!r.isError, JSON.stringify(r).slice(0, 300));
+});
+
+test('对话框单列一段，agent 第一眼就知道页面被盖住了', async () => {
+  await go();
+  await c.call('click', { selector: '#openDlg' });
+  const snap = await c.call('snapshot', {});
+  assert.match(snap.text, /🪟 浮层\/对话框[\s\S]*确定要清空购物车吗/);
+  await c.call('click', { selector: '#dlgClose' });
+  const after = await c.call('snapshot', {});
+  assert.doesNotMatch(after.text, /🪟 浮层/);
+});
+
+test('效果证据等异步变化落定，不在第一拍的 class 变化上就走', async () => {
+  await go();
+  const r = await c.call('click', { selector: '#slowBtn' });
+  // 第一拍只有「目标 class 变了」；350ms 后文字才到。以前这里只报 class，
+  // 回来的快照是旧页面，agent 只能再拍一次或写 eval 核实。
+  assert.match(r.text, /目标区块文本 \+/, '异步落地的文字没进效果证据：\n' + r.text.split('\n').slice(0, 4).join('\n'));
+});
+
+test('query 按文本找到非交互元素，给出 selector 路径', async () => {
+  await go();
+  const r = await c.call('query', { contains: '待付款' });
+  assert.match(r.text, /#statusText\s+"订单状态：待付款"/);
+  const miss = await c.call('query', { contains: '这段文字页面上没有' });
+  assert.match(miss.text, /没有可见的/);
+});
+
+test('act 的 read 步把中间观察带回来，不用回模型一趟', async () => {
+  await go();
+  const r = await c.call('act', {
+    steps: [
+      { do: 'click', selector: '#openDlg' },
+      { do: 'read', contains: '清空购物车' },
+      { do: 'read', selector: '#tabA', attr: 'aria-selected' },
+      { do: 'click', selector: '#dlgClose' },
+    ],
+  });
+  assert.match(r.text, /act 完成（顶层 4\/4/);
+  assert.match(r.text, /📖 read 含「清空购物车」[\s\S]*?#dlg > p\s+"确定要清空购物车吗/);
+  assert.match(r.text, /aria-selected: "true"/);
+});
+
+test('act 里小动静（区块 +几个节点）不作废 ref', async () => {
+  const snap = await bottom();
+  const ref = (name) => new RegExp(`\\[(e\\d+)\\]\\s+\\S+\\s+"${name}"`).exec(snap.text)?.[1];
+  const r = await c.call('act', {
+    snapshotId: snap.snapshotId,
+    steps: [
+      { do: 'click', ref: ref('打开对话框') },     // 对话框是 display 切换，区块 DOM 节点数不变
+      { do: 'click', ref: ref('自定义勾选框（靠 class 表达状态）') },   // 只改 class
+    ],
+  });
+  assert.match(r.text, /act 完成（顶层 2\/2/, r.text.split('\n').slice(0, 6).join('\n'));
 });
