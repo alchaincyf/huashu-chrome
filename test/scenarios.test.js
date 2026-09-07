@@ -783,7 +783,7 @@ test('普通页面不会被误判成凭据页', async () => {
 
 // ---------- v0.4：多 agent 连接级隔离 ----------
 //
-// 2026-08-26 的真实事故：两个 agent 会话同时干活，一个操控签证页、一个操控小红书。
+// 2026-08-26 的真实事故：两个 agent 会话同时干活，各自操控一个站的后台。
 // 「受控 tab」是全机唯一的全局单值，一个会话的 tabs(new/select) 会把另一个会话的
 // 缺省调用拽到自己的页面上。现在每个会话有自己的槽（agentTab:<sessionId>）。
 
@@ -1009,11 +1009,11 @@ test('显式 tabId 驱动的页面也有归属：自己看是 +，别人看是 �
 test('label 进出生证、进 list，出生证报 tabId', async () => {
   const c2 = await mkUnique('test-label');
   try {
-    const r = await c2.call('tabs', { action: 'new', url: PAGE + '?labeled=1', label: '陈云飞-签证表' });
-    assert.match(r.text, /「陈云飞-签证表」/, '出生证要带 label');
+    const r = await c2.call('tabs', { action: 'new', url: PAGE + '?labeled=1', label: '客户资料-录入' });
+    assert.match(r.text, /「客户资料-录入」/, '出生证要带 label');
     assert.match(r.text, new RegExp(`tabId:${r.tabId}`), '出生证要报显式 tabId 的用法');
     const list = await c2.call('tabs', { action: 'list' });
-    assert.match(list.text, new RegExp(`\\[${r.tabId}\\][^\\n]*「陈云飞-签证表」`), 'list 里要能按 label 找回这页');
+    assert.match(list.text, new RegExp(`\\[${r.tabId}\\][^\\n]*「客户资料-录入」`), 'list 里要能按 label 找回这页');
     await c2.call('tabs', { action: 'close', tabId: r.tabId });
   } finally {
     c2.close();

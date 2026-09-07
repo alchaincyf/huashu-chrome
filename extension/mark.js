@@ -373,7 +373,7 @@
     const who = document.createElement('span'); who.className = 'who'; who.textContent = o.label;
     const sep = document.createElement('span'); sep.className = 'sep'; sep.textContent = '·';
     const what = document.createElement('span'); what.className = 'what';
-    // 空闲时 label 比进程短码有信息量得多：「陈云飞-签证表」 vs 「p48291」
+    // 空闲时 label 比进程短码有信息量得多：「客户资料-录入」 vs 「p48291」
     what.textContent = act ? act.text : (tabLabel || o.code);
     chip.append(av, who, sep, what);
     chip.addEventListener('click', () => setExpanded(true));

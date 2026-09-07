@@ -198,7 +198,7 @@ const TOOLS = [
         action: { type: 'string', enum: ['list', 'new', 'select', 'close'] },
         url: { type: 'string' },
         tabId: TAB,
-        label: { type: 'string', description: 'With new/select: what this tab is for ("visa form — Chen"). Shown in list, page panel, and to the user.' },
+        label: { type: 'string', description: 'With new/select: what this tab is for ("CRM import — batch 2"). Shown in list, page panel, and to the user.' },
         focus: { type: 'boolean', description: 'Also bring the tab to the foreground. Interrupts the user — off by default.' },
       },
       required: ['action'],

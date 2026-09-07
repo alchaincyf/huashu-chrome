@@ -82,7 +82,7 @@ test('不炸在循环引用和奇怪输入上', () => {
 // 但 2026-08-26 翻日志发现，密码是从另一条路进去的——`ask` 的 prompt。
 // 那不是输入框，是 agent 写给人看的一段话，原文长这样：
 //
-//   「TLScontact 登录页已打开，邮箱和密码我都填好了（alchaincyf@gmail.com / <密码>），
+//   「登录页已打开，邮箱和密码我都填好了（someone@example.com / <密码>），
 //     现在只剩验证码这一步，图片我读不了，得你亲手点。」
 //
 // 键名脱敏对它结构性无效：字段叫 prompt，而 prompt 的全部价值就是那段话本身，
@@ -95,14 +95,14 @@ test('不炸在循环引用和奇怪输入上', () => {
 // 所以这里改成按词切：只挖掉长得像凭据的那几个词，正文一个字不动。
 test('ask 的 prompt 里写在正文中的密码被挖掉，话还看得懂', () => {
   const out = redact({
-    prompt: '登录页已打开，邮箱和密码我都填好了（alchaincyf@gmail.com / 027565FranceTLS!），'
+    prompt: '登录页已打开，邮箱和密码我都填好了（someone@example.com / 918273SiteAuth!），'
           + '现在只剩图片验证码这一步，得你亲手点。',
   });
-  assert.doesNotMatch(out.prompt, /027565France/, '密码原文进了审计日志');
+  assert.doesNotMatch(out.prompt, /918273Site/, '密码原文进了审计日志');
   // 正文必须还在——否则 ask 的审计就没意义了
   assert.match(out.prompt, /图片验证码/);
   assert.match(out.prompt, /得你亲手点/);
-  assert.match(out.prompt, /alchaincyf@gmail\.com/, '邮箱是身份不是凭据，脱掉就查不出谁在操作');
+  assert.match(out.prompt, /someone@example\.com/, '邮箱是身份不是凭据，脱掉就查不出谁在操作');
 });
 
 test('随机生成的新密码同样挖得掉', () => {
@@ -126,13 +126,13 @@ test('正文脱敏不能吃掉定位信息：URL、路径、选择器、代码',
   // 审计的核心价值是「agent 去过哪、点了什么」，这些必须原样留下
   const out = redact({
     prompt: '在 https://video.twimg.com/amplify_video/2085812345678/vid/1280x720.mp4 上，'
-          + '存到 /Users/alchain/Documents/写作/_X采集/2026-08-25/media/2085812345678.mp4',
+          + '存到 /data/exports/2026-08-25/media/2085812345678.mp4',
     expr: 'document.querySelectorAll("input[name=is_author]")',
     url: 'https://registry.npmjs.org/huashu-chrome',
     selector: '#submit-btn-2026',
   });
   assert.match(out.prompt, /amplify_video\/2085812345678/, 'URL 被脱敏吃掉了');
-  assert.match(out.prompt, /_X采集\/2026-08-25/, '文件路径被脱敏吃掉了');
+  assert.match(out.prompt, /exports\/2026-08-25/, '文件路径被脱敏吃掉了');
   assert.equal(out.expr, 'document.querySelectorAll("input[name=is_author]")');
   assert.equal(out.url, 'https://registry.npmjs.org/huashu-chrome');
   assert.equal(out.selector, '#submit-btn-2026');
