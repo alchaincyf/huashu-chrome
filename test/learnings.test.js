@@ -45,8 +45,9 @@ test('保存写进本机目录，get 时与出厂经验合并展示', () => {
 });
 
 test('新站点保存后立即可查', () => {
-  saveLearnings('https://www.zhihu.com/question/1', '回答正文接口是 answers/v2');
-  const out = getLearnings('zhihu.com');
+  // 刻意用一个永远不会有出厂经验的域名——换成真站点，哪天它进了 docs/经验/ 这条就假失败
+  saveLearnings('https://www.newsite.example/question/1', '回答正文接口是 answers/v2');
+  const out = getLearnings('newsite.example');
   assert.doesNotMatch(out, /## 出厂经验/);
   assert.match(out, /answers\/v2/);
 });

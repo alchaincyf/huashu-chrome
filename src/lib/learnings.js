@@ -19,6 +19,7 @@ const ALIAS = {
   'twitter.com': 'x.com',
   'larksuite.com': 'feishu.cn',
   'qpic.cn': 'weixin.qq.com',
+  'weibo.com': 'weibo.cn',
 };
 
 // 'https://my.feishu.cn/base/x?y=1' → 'my.feishu.cn'

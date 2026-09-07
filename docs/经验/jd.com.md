@@ -32,3 +32,16 @@ commentInfoList          评价原文
 
 ⚠️ **京东全站没有「累计销量」字段**。搜索页和商品页都只有评价数。
 任何「已售 N 件」的说法要么来自别的平台，要么是推算——**别把评价数当销量报**。
+
+## 2026-08-28 补充（一次图书搜索实战）
+
+- **`searchWare` 会被推荐流复用**：搜索页加载完会再发一条同 `functionId` 的请求
+  （keyword 是「猜你喜欢」那类词），而且响应往往**更大**（实测 391KB vs 真搜索的 37KB）。
+  `network body:"searchWare" index:0` 大概率拿到的是推荐流不是你的搜索结果。
+  先 `network match:"searchWare"` 列一遍，按 URL 里的 keyword 挑对那条再取 body。
+- **`maxBody` 比响应小会静默截断**，JSON 解析报 `Unterminated string`。
+  `match` 列表里已经显示每条响应的 KB 数，**按它设 `maxBody`，别猜**。
+- 搜索响应里几个容易读错的字段：
+  - `data.pageInfo.resultCount` 是全站结果总数，用来判断「是不是只有这几家在卖」
+  - `d30ItemUvDesc` 是「近 30 天 N 人看过」= 浏览 UV，**既不是销量也不是评价数**
+  - `comment=0` 时的 `good:100` / `averageScore:5` 是**默认值**，不是真好评率
