@@ -9,6 +9,11 @@ dist/
 素材/
 截屏*.png
 Screenshot*.png
+自检_*.png
+
+# 本地实验产物，别跟着 add -A 出门
+豆瓣热门影视-*/
+site-explainer/
 
 # 过程记录：规划稿、迭代日志、素材。仓库只放能让人安装和调用的东西
 _notes/
