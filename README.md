@@ -63,6 +63,8 @@ CLI 是入口（install / mcp / doctor），MCP server 是 agent 的接口，本
 | 往飞书多维表格加记录 | 网格是 canvas，DOM 里根本没有行。第一次从零摸索花了 281 次调用 / 54 分钟，照笔记走 10 轮以内 | [feishu.cn](docs/经验/feishu.cn.md) |
 | 采集 X 的搜索结果 | 请求签名造不出来（一律 403），只能驱动页面自己发；而且**后台标签页里 React 完全不渲染** | [x.com](docs/经验/x.com.md) |
 | 读一篇 ResearchGate 上 403 的论文 | 走 Google 学术自己的 HTML 缓存 | [scholar.google.com](docs/经验/scholar.google.com.md) |
+| 完成已授权的App Store提审 | 上传成功、可供审核、等待审核是不同阶段；内购要与版本同批，提交超时先查回执再决定是否重试 | [appstoreconnect.apple.com](docs/经验/appstoreconnect.apple.com.md) |
+| 补齐新iCloud功能的生产数据结构 | 开发环境只有Users且零差异，可能是模型根本没初始化；生成schema、部署并读回Production字段 | [icloud.developer.apple.com](docs/经验/icloud.developer.apple.com.md) |
 | 在 Chrome 应用商店后台改文案 | ❌ **做不到**：商店页是浏览器保护页，任何扩展都注入不了。笔记里写清了这堵墙长什么样、报错认哪一句 | [chrome.google.com](docs/经验/chrome.google.com.md) |
 
 最后一行是故意留的。**能干什么和干不了什么同样重要**——出厂经验里有好几条是负面结论，
@@ -233,8 +235,8 @@ act 停在第 4 步 3/4：
 
 `learnings` 工具就是干这个的，经验分两层：
 
-- **出厂经验**：随 npm 包分发（[`docs/经验/`](docs/经验/)），装上就有。当前 21 个站——
-  上面那张表里的 8 个，加上淘宝、微信公众号、搜狗微信搜索、微博、知乎、豆瓣、脉脉、
+- **出厂经验**：随 npm 包分发（[`docs/经验/`](docs/经验/)），装上就有。当前 23 个站——
+  上面那张表里的 10 个，加上淘宝、微信公众号、搜狗微信搜索、微博、知乎、豆瓣、脉脉、
   大麦、即刻、腾讯文档、Ollama，以及两个 canvas 游戏（`sudoku.com` / `flappybird.io`，
   它们是「棋盘不在 DOM 里」这类页面的样板）。已验证的接口名、墙、坑，
   每条都标了实测日期。升级版本就拿到新经验。
