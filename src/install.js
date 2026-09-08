@@ -37,10 +37,15 @@ const expand = (p) => p
   .split('/').join(path.sep);
 
 function knownAgents() {
-  return SPEC.agents.map((a) => ({
-    ...a,
-    file: a.paths.map(expand).find((f) => fs.existsSync(f)) || null,
-  }));
+  return SPEC.agents.map((a) => {
+    const file = a.paths.map(expand).find((f) => fs.existsSync(f)) || null;
+    // 个别 agent 的 MCP 配置文件默认不存在（首次 install 才会建）。
+    // 这时不能只看 paths 有没有命中——装没装要用一个「装了必在」的标志目录来判断
+    // （如 ZCode 的 ~/.zcode）。装了就把首个候选路径当配置文件，稍后新建。
+    const installed =
+      file || (a.create && a.ifDir && fs.existsSync(expand(a.ifDir))) || null;
+    return { ...a, file: installed ? file || expand(a.paths[0]) : null };
+  });
 }
 
 // 自动发现：在 home 的点目录里翻常见的 MCP 配置文件名。
@@ -179,10 +184,17 @@ export async function install({ yes = true, only = null } = {}) {
     let ok = 0;
     for (const t of plan) {
       try {
-        const backup = `${t.file}.bak-${Date.now()}`;
-        fs.copyFileSync(t.file, backup);
+        const isNew = !fs.existsSync(t.file);
+        if (isNew) {
+          // 配置文件原本不存在（ZCode 这类走兼容路径的 agent），第一次 install 才建。
+          // 没有「原文件」可备份，确保父目录在就直接写。
+          fs.mkdirSync(path.dirname(t.file), { recursive: true });
+        } else {
+          const backup = `${t.file}.bak-${Date.now()}`;
+          fs.copyFileSync(t.file, backup);
+          console.log(`  ✅ ${t.name}（原文件已备份为 ${path.basename(backup)}）`);
+        }
         t.kind === 'json' ? writeJson(t) : writeToml(t);
-        console.log(`  ✅ ${t.name}（原文件已备份为 ${path.basename(backup)}）`);
         ok++;
       } catch (e) {
         console.log(`  ❌ ${t.name}：${e.message}`);
@@ -210,17 +222,18 @@ function alreadyConfigured(t) {
   try {
     return fs.readFileSync(t.file, 'utf8').includes('huashu-chrome');
   } catch {
+    // 文件不存在（要新建的）或读不了，都算没配过
     return false;
   }
 }
 
 function writeJson(t) {
-  const raw = fs.readFileSync(t.file, 'utf8');
-  let cfg;
+  let cfg = {};
   try {
-    cfg = JSON.parse(raw);
+    // 配置文件可能不存在（首次 install 才建的 agent，如 ZCode）——从空对象开始
+    cfg = JSON.parse(fs.readFileSync(t.file, 'utf8'));
   } catch (e) {
-    throw new Error(`这个文件不是合法 JSON（${e.message}），不敢动它`);
+    if (e.code !== 'ENOENT') throw new Error(`这个文件不是合法 JSON（${e.message}），不敢动它`);
   }
   cfg.mcpServers = cfg.mcpServers || {};
   cfg.mcpServers['huashu-chrome'] = launcher(t.client);

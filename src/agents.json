@@ -9,7 +9,12 @@
     "  client  传给 MCP server 的 --client，用于审计日志区分是谁在调",
     "  kind    json（{mcpServers:{}}，绝大多数）或 toml（[mcp_servers.x]，目前只有 Codex）",
     "  paths   候选路径，按顺序取第一个存在的。~ 是 home，$APPDATA 按平台展开",
-    "          （Windows→%APPDATA%，macOS→~/Library/Application Support，Linux→~/.config）"
+    "          （Windows→%APPDATA%，macOS→~/Library/Application Support，Linux→~/.config）",
+    "  ifDir   可选：用于判断 agent 是否真的装了。个别 agent 的 MCP 配置文件默认不存在",
+    "          （如 ZCode 走 ~/.agents/mcp.json 兼容路径，文件要首次 install 才建），",
+    "          光看路径存在与否会漏判，所以用这个标志目录（装了必在）来判断。",
+    "  create  可选（配合 ifDir）：paths 里的文件都不存在且 ifDir 存在时，install 会新建",
+    "          第一个路径的配置文件，而不是跳过。"
   ],
   "agents": [
     { "name": "Claude Code", "client": "claude-code", "kind": "json", "paths": ["~/.claude.json", "~/.claude/mcp.json"] },
@@ -20,6 +25,8 @@
     { "name": "Windsurf", "client": "windsurf", "kind": "json", "paths": ["~/.codeium/windsurf/mcp_config.json"] },
     { "name": "Cline (VS Code)", "client": "cline", "kind": "json", "paths": ["$APPDATA/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json"] },
     { "name": "Roo Code", "client": "roo", "kind": "json", "paths": ["$APPDATA/Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/mcp_settings.json"] },
+
+    { "name": "ZCode", "client": "zcode", "kind": "json", "ifDir": "~/.zcode", "create": true, "paths": ["~/.agents/mcp.json"] },
 
     { "name": "WorkBuddy", "client": "workbuddy", "kind": "json", "paths": ["~/.workbuddy/.mcp.json"] },
     { "name": "CodeBuddy", "client": "codebuddy", "kind": "json", "paths": ["~/.codebuddy/mcp.json"] },

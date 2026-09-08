@@ -91,10 +91,10 @@ npx huashu-chrome install
 
 **它认得出哪些 agent**，分三层：
 
-1. **已知表** —— `src/agents.json` 列了 20 个：Claude Code、Codex CLI、Cursor、
-   Gemini CLI、Windsurf、Cline、Roo Code、Claude Desktop，以及 WorkBuddy、CodeBuddy、
-   Kimi Code、通义灵码、MiniMax Mavis、Trae、豆包、千问 / Qwen Code、Qoder、
-   DeepSeek、iFlow、OpenClaw。加一个只要往数组里加一行，不用改代码 —— 欢迎 PR。
+1. **已知表** —— `src/agents.json` 列了 21 个：Claude Code、Codex CLI、Cursor、
+   Gemini CLI、Windsurf、Cline、Roo Code、Claude Desktop、ZCode，以及 WorkBuddy、
+   CodeBuddy、Kimi Code、通义灵码、MiniMax Mavis、Trae、豆包、千问 / Qwen Code、
+   Qoder、DeepSeek、iFlow、OpenClaw。加一个只要往数组里加一行，不用改代码 —— 欢迎 PR。
 2. **自动发现** —— 没列出来的也能认出来。`install` 会扫 home 下的点目录，
    凡是内容里有 `mcpServers` 的配置文件都算数。实测所有主流产品都守这个惯例
    （Codex 的 TOML 是唯一异类），所以下个月新冒出来的 agent 不用等更新也能配上。
