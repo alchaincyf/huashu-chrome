@@ -1285,16 +1285,26 @@
   //
   // 一个字段失败不中止整批——中止的话 agent 只知道「第 3 个挂了」，
   // 前两个填没填、后面几个动没动全靠猜。宁可全跑完，逐条报告。
+  function fillFormOf(el) {
+    // 原生 form 为 null 也是确定结果，不能用祖先表单覆盖它。
+    if ('form' in el) return el.form;
+    // 自定义元素可能通过 ElementInternals 关联表单，不能用祖先猜测归属。
+    if (el.localName.includes('-') || el.hasAttribute('is')) return null;
+    return el.closest('form');
+  }
+
   function doFill(p) {
     const fields = Array.isArray(p.fields) ? p.fields : [];
     if (!fields.length) throw fail('INTERNAL', 'fields 不能为空');
     if (fields.length > 60) throw fail('INTERNAL', `一次最多 60 个字段，收到 ${fields.length} 个`);
 
-    const done = [], failed = [];
+    const done = [], failed = [], owners = [];
+    const autoSubmit = p.submit && !p.submitRef;
     for (const f of fields) {
       const spec = { ...f, snapshotId: p.snapshotId };
       try {
         const el = resolve(spec);
+        if (autoSubmit) owners.push({ el, form: fillFormOf(el) });
         const label = f.ref || f.selector;
         // 前一个字段的输入可能触发重渲染，把后面的元素换掉。ref 指向的旧节点
         // 还在 refMap 里，但已经脱离文档——resolve 会报出来，这里如实归到失败里。
@@ -1325,13 +1335,27 @@
     let submitted = '';
     if (p.submit && !failed.length) {
       // 有字段没填成还照样提交，等于替用户交了一份残表——这是不可逆的对外动作。
-      const form = document.querySelector('form');
-      const btn = p.submitRef
-        ? resolve({ ref: p.submitRef, snapshotId: p.snapshotId })
-        : document.querySelector('button[type=submit],input[type=submit]');
-      if (btn) { btn.click(); submitted = '，已点击提交'; }
-      else if (form) { form.requestSubmit?.(); submitted = '，已提交表单'; }
-      else submitted = '，但没找到提交按钮';
+      if (p.submitRef) {
+        const btn = resolve({ ref: p.submitRef, snapshotId: p.snapshotId });
+        btn.click();
+        submitted = '，已点击提交';
+      } else {
+        const form = owners[0].form;
+        if (owners.some(({ form }) => !form)) {
+          submitted = '，已跳过自动提交：部分字段没有所属表单，请指定 submitRef';
+        } else if (owners.some(({ form: owner }) => owner !== form)) {
+          submitted = '，已跳过自动提交：字段属于不同表单，请指定 submitRef';
+        } else if (!form.isConnected || owners.some(({ el, form: owner }) =>
+          !el.isConnected || fillFormOf(el) !== owner)) {
+          submitted = '，已跳过自动提交：填写期间字段或表单已移除，或归属已变化，请重新 snapshot';
+        } else {
+          // form 属性允许按钮在表单外，也允许表单内的按钮属于另一张表。
+          const btn = [...Node.prototype.getRootNode.call(form).querySelectorAll('button[type=submit],input[type=submit]')]
+            .find((button) => button.form === form);
+          if (btn) { btn.click(); submitted = '，已点击提交'; }
+          else { form.requestSubmit?.(); submitted = '，已提交表单'; }
+        }
+      }
     } else if (p.submit && failed.length) {
       submitted = '，因有字段失败已跳过提交（不替你交一份残表）';
     }
