@@ -114,7 +114,7 @@ const TOOLS = [
     description:
       'Fill a whole form in ONE call, all refs from the same snapshot. Field: {ref, text} for inputs, ' +
       '{ref, value} for <select>, {ref, check} for checkbox/radio. submit:true submits after ' +
-      '(skipped if any field failed).',
+      '(skipped if any field failed). Without submitRef, mixed/missing/changed form ownership skips submission.',
     inputSchema: {
       type: 'object',
       properties: {

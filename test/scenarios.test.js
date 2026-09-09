@@ -149,6 +149,149 @@ test('一次 fill 填完整张表，并如实回报每个字段', async () => {
   assert.equal(await val('document.getElementById("nat-agree").checked'), 'true');
 });
 
+test('fill 自动提交只使用所填字段的所属表单', async (t) => {
+  const cases = [
+    { name: '后面的表单：单字段', fields: ['loginUser'], button: 'fillLoginSubmit', form: 'fillLogin' },
+    { name: '后面的表单：多个字段', fields: ['loginUser', 'loginPw'], button: 'fillLoginSubmit', form: 'fillLogin' },
+    { name: '不同表单的字段', fields: ['nat-name', 'loginUser'], skip: /不同表单/ },
+    { name: '没有所属表单', fields: ['fillUnowned'], skip: /没有所属表单/ },
+    { name: '有归属和无归属混合', fields: ['loginUser', 'fillUnowned'], skip: /没有所属表单/ },
+    {
+      name: 'form 属性覆盖祖先表单', fields: ['nat-name'], button: 'fillLoginSubmit', form: 'fillLogin',
+      setup: `document.getElementById('nat-name').setAttribute('form', 'fillLogin')`,
+    },
+    {
+      name: '表单外的字段通过 form 属性关联', fields: ['fillUnowned'], button: 'fillLoginSubmit', form: 'fillLogin',
+      setup: `document.getElementById('fillUnowned').setAttribute('form', 'fillLogin')`,
+    },
+    {
+      name: '原生 form 为 null 时不能退回祖先', fields: ['loginUser'], skip: /没有所属表单/,
+      setup: `document.getElementById('loginUser').setAttribute('form', 'missing-form')`,
+    },
+    ...['natform', 'missing-form'].map((formId) => ({
+      name: `自定义编辑器不猜测祖先归属：form=${formId}`, fields: ['fillCustomEditor'], skip: /没有所属表单/,
+      setup: `customElements.define('fill-owned-editor', class extends HTMLElement {
+          static formAssociated = true;
+          constructor() { super(); this.internals = this.attachInternals(); }
+        });
+        document.getElementById('fillLogin').insertAdjacentHTML('afterbegin',
+          '<fill-owned-editor id="fillCustomEditor" contenteditable="true" aria-label="fillCustomEditor" form="${formId}">原文</fill-owned-editor>');
+        const editor = document.getElementById('fillCustomEditor');
+        if ('form' in editor || editor.internals.form !== document.getElementById('${formId}')) {
+          throw new Error('自定义编辑器的原生归属前提不成立');
+        }`,
+    })),
+    {
+      name: '带 is 的编辑器不猜测祖先归属', fields: ['fillCustomizedEditor'], skip: /没有所属表单/,
+      setup: `document.getElementById('fillLogin').insertAdjacentHTML('afterbegin',
+        '<div is="fill-custom-editor" id="fillCustomizedEditor" contenteditable="true" aria-label="fillCustomizedEditor">原文</div>')`,
+    },
+    ...['name', 'id'].map((attribute) => ({
+      name: `控件 ${attribute}=getRootNode 不遮蔽自动提交`, fields: ['loginUser'],
+      button: 'fillLoginSubmit', form: 'fillLogin',
+      setup: `document.getElementById('fillLogin').insertAdjacentHTML('beforeend',
+        '<input ${attribute}="getRootNode">')`,
+    })),
+    {
+      name: '按钮按 form 归属筛选，包含表单外按钮', fields: ['loginUser'], button: 'fillExternalSubmit', form: 'fillLogin',
+      setup: `document.getElementById('fillLoginSubmit').setAttribute('form', 'natform');
+        document.getElementById('fillLogin').insertAdjacentHTML('afterend',
+          '<button id="fillExternalSubmit" type="submit" form="fillLogin">外部提交</button>')`,
+    },
+    {
+      name: '表单前的关联按钮优先于表单内按钮', fields: ['loginUser'], button: 'fillExternalSubmit', form: 'fillLogin',
+      setup: `document.getElementById('fillLogin').insertAdjacentHTML('beforebegin',
+        '<button id="fillExternalSubmit" type="submit" form="fillLogin">外部提交</button>')`,
+    },
+    {
+      name: '所属表单没有匹配按钮时 requestSubmit', fields: ['loginUser'], form: 'fillLogin',
+      setup: `document.getElementById('fillLoginSubmit').remove()`,
+    },
+    {
+      name: '显式 submitRef 仍覆盖混合和缺失归属', fields: ['nat-name', 'loginUser', 'fillUnowned'],
+      submitRef: 'fillLoginSubmit', button: 'fillLoginSubmit', form: 'fillLogin',
+    },
+    { name: 'submit 为 false 时不点击 submitRef', fields: ['loginUser'], submit: false, submitRef: 'fillLoginSubmit' },
+    { name: '字段失败时仍跳过显式提交', fields: ['loginUser', 'missing-ref'], submitRef: 'fillLoginSubmit', skip: /字段失败/ },
+    {
+      name: '后一个字段的事件改变前一个字段的归属', fields: ['loginUser', 'loginPw'], skip: /归属已变化/,
+      setup: `document.getElementById('loginPw').addEventListener('change', () =>
+        document.getElementById('loginUser').setAttribute('form', 'natform'))`,
+    },
+    {
+      name: '输入事件移除字段后不能提交', fields: ['loginUser'], skip: /归属已变化/,
+      setup: `document.getElementById('loginUser').addEventListener('change', e => e.target.remove())`,
+    },
+    {
+      name: '无原生 form 属性的编辑器使用祖先表单', fields: ['fillEditor'], button: 'fillLoginSubmit', form: 'fillLogin',
+      setup: `document.getElementById('fillLogin').insertAdjacentHTML('afterbegin',
+        '<div id="fillEditor" contenteditable="true" aria-label="fillEditor">原文</div>')`,
+    },
+  ];
+  for (const scenario of cases) {
+    await t.test(scenario.name, async () => {
+      await go();
+      await c.call('eval', { expr: `(() => {
+        const first = document.getElementById('natform');
+        const login = document.getElementById('loginUser').form;
+        login.id = 'fillLogin';
+        first.querySelector('button').id = 'fillFirstSubmit';
+        login.querySelector('button').id = 'fillLoginSubmit';
+        // 两张表放进同一视口，ref 测试不受靶场后续增加区块影响。
+        document.body.prepend(first, login);
+        first.insertAdjacentHTML('beforebegin', '<input id="fillUnowned" aria-label="fillUnowned">');
+        for (const id of ['nat-name', 'loginUser', 'loginPw', 'fillLoginSubmit']) {
+          document.getElementById(id).setAttribute('aria-label', id);
+        }
+        // 第一张表必须合法：否则点错按钮会被 required 拦住，掩盖错误提交。
+        document.getElementById('nat-name').value = 'control';
+        window.__fillEvents = { clicks: [], forms: [], submitters: [] };
+        document.addEventListener('click', e => {
+          if (e.target.matches('button[type=submit],input[type=submit]')) {
+            window.__fillEvents.clicks.push(e.target.id);
+          }
+        }, true);
+        document.addEventListener('submit', e => {
+          e.preventDefault();
+          window.__fillEvents.forms.push(e.target.id);
+          window.__fillEvents.submitters.push(e.submitter?.id || null);
+        }, true);
+        ${scenario.setup || ''};
+        window.__fillTargets = ${JSON.stringify(scenario.fields)}
+          .map(id => document.getElementById(id)).filter(Boolean);
+      })()` });
+      const snap = await c.call('snapshot', {});
+      const ref = (name) => {
+        if (name === 'missing-ref') return 'e999999';
+        const m = new RegExp(`\\[(e\\d+)\\]\\s+\\S+\\s+"${name}"`).exec(snap.text);
+        assert.ok(m, `快照里找不到「${name}」`);
+        return m[1];
+      };
+      const result = await c.call('fill', {
+        snapshotId: snap.snapshotId,
+        fields: scenario.fields.map(id => ({ ref: ref(id), text: 'filled' })),
+        submit: scenario.submit !== false,
+        ...(scenario.submitRef ? { submitRef: ref(scenario.submitRef) } : {}),
+      });
+      assert.ok(!result.isError, JSON.stringify(result));
+      const filled = scenario.fields.filter(id => id !== 'missing-ref').length;
+      assert.match(result.text, new RegExp(`已填 ${filled}/${scenario.fields.length}`));
+      if (scenario.button) assert.match(result.text, /已点击提交/);
+      assert.deepEqual(JSON.parse(await val('window.__fillTargets.map(el => el.value ?? el.textContent)')),
+        Array(filled).fill('filled'));
+      assert.deepEqual(JSON.parse(await val('window.__fillEvents')), {
+        clicks: scenario.button ? [scenario.button] : [],
+        forms: scenario.form ? [scenario.form] : [],
+        submitters: scenario.form ? [scenario.button || null] : [],
+      });
+      if (scenario.skip) {
+        assert.match(result.text, /跳过.*提交/);
+        assert.match(result.text, scenario.skip);
+      }
+    });
+  }
+});
+
 test('file input 在快照里标成 file，不是 textbox', async () => {
   await go();
   const snap = await c.call('snapshot', {});
