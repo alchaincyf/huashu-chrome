@@ -31,14 +31,27 @@ function makeSessionId(client) {
 export class BridgeClient {
   // sessionId 可以由调用方指定：宿主如果自己有一个稳定的会话标识，那个比
   // 从 ppid 猜出来的更准。不指定就用默认那套。
-  constructor({ client = 'unknown', sessionId } = {}) {
+  constructor({ client = 'unknown', sessionId, label } = {}) {
     this.client = client;
+    this.label = label;
+    this.pinnedSid = !!sessionId;
     this.sessionId = sessionId || makeSessionId(client);
     this.ws = null;
     this.seq = 0;
     this.waiting = new Map();
     this.extensionOnline = false;
     this.onEvent = () => {};
+  }
+
+  // 宿主的真名要到 MCP initialize 之后才知道（见 src/lib/host.js），而桥要到
+  // 第一条命令才连——中间这段窗口允许改口。连上之后 sid 已经在扩展那边认领了
+  // 标签页，再改就是换了个人，所以连上后一律拒绝。
+  identify(client, label) {
+    if (this.ws) return false;
+    this.client = client;
+    this.label = label;
+    if (!this.pinnedSid) this.sessionId = makeSessionId(client);
+    return true;
   }
 
   async connect({ timeoutMs = 15000 } = {}) {
@@ -77,7 +90,7 @@ export class BridgeClient {
       const t = setTimeout(() => { ws.close(); fail(new Error('握手超时')); }, 4000);
 
       ws.onerror = fail;
-      ws.onopen = () => ws.send(JSON.stringify({ type: 'hello', role: 'agent', token: info.token, client: this.client, sessionId: this.sessionId, v: 1 }));
+      ws.onopen = () => ws.send(JSON.stringify({ type: 'hello', role: 'agent', token: info.token, client: this.client, label: this.label, sessionId: this.sessionId, v: 1 }));
       ws.onmessage = (ev) => {
         const msg = JSON.parse(ev.data);
         if (msg.type === 'welcome') {

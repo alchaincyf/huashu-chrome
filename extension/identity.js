@@ -16,8 +16,10 @@
 //
 // 3. **agent 显示名不维护第二张表。** src/agents.json 里那张表的承诺是
 //    「加一个 agent 只要加一行，不用改代码」，在扩展侧再抄一份就把它作废了。
-//    这里只做一次机械美化：claude-code → Claude Code。对绝大多数 slug 都对，
-//    错了也只是大小写不好看，不影响识别。
+//    显示名由 MCP server 侧查那张表后随 hello 带过来（桥转发时叫 label），
+//    这里只对它做一次机械美化：claude-code → Claude Code，而「Codex CLI」
+//    「OpenClaw」这类已经是显示名的字符串原样通过（test/identity.test.js 守着）。
+//    老桥不带 label 时拿到的是 slug，美化错了也只是大小写不好看，不影响识别。
 
 // 圆形一组在前：只有一两个会话时（绝大多数时候）优先落在辨识度最高的圆点上。
 // group 是 Chrome 标签组的颜色名（tabGroups API 只认它那 9 个名字，不认 hex）——
@@ -67,10 +69,11 @@ function hash32(s) {
   return h >>> 0;
 }
 
-// claude-code → Claude Code
+// claude-code → Claude Code；已经带大写的是显示名（iFlow、OpenClaw），原样通过
 export function prettyClient(client) {
   const c = String(client || '').trim();
   if (!c || c === 'unknown') return 'AI agent';
+  if (/[A-Z]/.test(c)) return c;
   return c.split(/[-_\s]+/).filter(Boolean)
     .map((w) => w[0].toUpperCase() + w.slice(1))
     .join(' ');

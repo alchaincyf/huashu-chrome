@@ -238,10 +238,13 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
       agents.add(ws);
       ws.helloed = true;
       ws.client = msg.client || 'unknown';
+      // label 是宿主的显示名（「Codex CLI」），由 MCP server 从握手里认出来；
+      // client 仍是审计和 sid 用的 slug。老客户端不带 label，扩展侧退回美化 slug。
+      ws.label = typeof msg.label === 'string' && msg.label ? msg.label.slice(0, 40) : undefined;
       // 会话身份由 agent 自己带来，跨桥重启稳定。老客户端不带，退回连接序号——
       // 行为和以前一样（桥一重启就丢槽），但至少不会串到别人的槽上。
       ws.sid = msg.sessionId || `conn:${ws.connId}`;
-      log(`agent 已连接：${ws.client}（会话 ${ws.sid}）`);
+      log(`agent 已连接：${ws.label || ws.client}（${ws.client}，会话 ${ws.sid}）`);
       const ext = primary();
       send(ws, {
         type: 'welcome', bridge: VERSION, v: PROTOCOL,
@@ -330,8 +333,8 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
     audit({ ev: 'cmd', id: key, cmd: msg.cmd, client: ws.client, sid: ws.sid, params: redact(msg.params) });
     // sid 盖章：扩展据此维护每个会话自己的受控 tab 槽（多 agent 并发隔离）。
     // live 是此刻还连着的会话，扩展拿它判断某个标签页「还有没有主」。
-    // client 是给人看的：页面上的控制标记要写出「Claude Code」而不是一串 sid。
-    send(target, { ...msg, __k: key, sid: ws.sid, client: ws.client, live: liveSessions() });   // __k 原样带回，用于精确路由
+    // client / label 是给人看的：页面上的控制标记要写出「Codex CLI」而不是一串 sid。
+    send(target, { ...msg, __k: key, sid: ws.sid, client: ws.client, label: ws.label, live: liveSessions() });   // __k 原样带回，用于精确路由
   }
 
   function routeBack(ws, msg) {

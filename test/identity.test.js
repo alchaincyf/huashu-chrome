@@ -47,6 +47,13 @@ test('client 名做机械美化，不维护第二张 agent 表', () => {
   assert.equal(prettyClient('unknown'), 'AI agent');
 });
 
+test('agents.json 里的显示名经过美化后原样不动', () => {
+  // 桥盖的 label 就是这张表里的 name，扩展拿到后仍会过一遍 prettyClient——
+  // 表里哪天出现「Roo-Code」这种带连字符的名字，这里会先于用户看见它被拆坏。
+  const spec = JSON.parse(fs.readFileSync(path.join(EXT, '..', 'src', 'agents.json'), 'utf8'));
+  for (const a of spec.agents) assert.equal(prettyClient(a.name), a.name);
+});
+
 test('client 缺省时从 sid 前缀推出来', () => {
   assert.equal(identityOf('gemini:p5').label, 'Gemini');
 });

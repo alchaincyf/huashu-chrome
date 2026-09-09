@@ -1734,8 +1734,49 @@
   // 文件上传。网页只认「用户选了文件」这个事件，而扩展碰不到系统文件对话框——
   // 唯一的路是自己造一个 File，塞进 input.files 再触发 change。
   // DataTransfer 是唯一能合法给 FileList 赋值的方式。
+  // 「该投给哪个 input」这件事有两个调用方：base64 路径的 doUpload，和走 CDP 的
+  // uploadTarget（大文件不经过桥，只把 selector 交出去）。抽出来是为了两条路
+  // 永远挑中同一个 input——两边各写一份的话，小文件和大文件会投到不同的框里。
+  function findFileInput(p) {
+    if (p.selector) return document.querySelector(p.selector);
+    return [...document.querySelectorAll('input[type=file]')].find((el) => {
+      const acc = el.getAttribute('accept') || '';
+      return !acc || acc.split(',').some((a) => {
+        a = a.trim();
+        return a === '*/*' || (a.endsWith('/*') ? (p.type || '').startsWith(a.slice(0, -1)) : (a.startsWith('.') ? p.name.toLowerCase().endsWith(a) : a === p.type));
+      });
+    });
+  }
+
+  // 给 CDP 上传探路：找到目标 input，打一个一次性属性，把选择器交回去。
+  // CDP 的 DOM.setFileInputFiles 只认 selector，而页面上常有多个同 accept 的 input
+  // （公众号那个页面就有两个），不打标记就没法保证 CDP 那侧选中的是同一个。
+  function doUploadTarget(p) {
+    const input = findFileInput(p);
+    // 没有 input 的编辑器（X Article、Notion）只能拖放，而拖放需要文件字节 —— 让上游回落
+    if (!input || input.tagName !== 'INPUT') return { data: { drop: true } };
+    const mark = 'hc' + Math.random().toString(36).slice(2, 10);
+    input.setAttribute('data-hc-fi', mark);
+    return { data: { selector: `input[data-hc-fi="${mark}"]`, accept: input.getAttribute('accept') || '' } };
+  }
+
   function doUpload(p) {
-    const bin = atob(p.base64);
+    let bin;
+    try {
+      bin = atob(p.base64);
+    } catch (e) {
+      // 2026-09-09 在 Tripo3D Studio 上抓到过一次真实复现（连 185 字节的
+      // 极简测试 PNG 都触发），没能锁定根因——base64 由 Node 侧
+      // fs.readFileSync().toString('base64') 生成，理论上不该畸形。
+      // 先把诊断信息焊进错误里，下次复现能直接从这条消息定位，不用再
+      // 从桥的消息路由一路盲猜到这儿。
+      const b = p.base64;
+      throw fail('INTERNAL',
+        `atob 解码失败：${e.message}。诊断——类型=${typeof b}，`
+        + `长度=${b == null ? 'null/undefined' : b.length}，`
+        + `开头=${JSON.stringify(String(b).slice(0, 24))}，`
+        + `结尾=${JSON.stringify(String(b).slice(-24))}。`);
+    }
     const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     const file = new File([bytes], p.name, { type: p.type || 'application/octet-stream' });
@@ -1745,16 +1786,7 @@
     // 是最难查的那种失败。
     if (p.dropSelector) return dropFile(file, p, bytes.length);
 
-    // 优先用调用方指定的 input；否则找页面上第一个能收这类文件的
-    const input = p.selector
-      ? document.querySelector(p.selector)
-      : [...document.querySelectorAll('input[type=file]')].find((el) => {
-          const acc = el.getAttribute('accept') || '';
-          return !acc || acc.split(',').some((a) => {
-            a = a.trim();
-            return a === '*/*' || (a.endsWith('/*') ? (p.type || '').startsWith(a.slice(0, -1)) : (a.startsWith('.') ? p.name.toLowerCase().endsWith(a) : a === p.type));
-          });
-        });
+    const input = findFileInput(p);
     // 没有 file input 不等于不能上传：越来越多的编辑器（X 的 Article、Notion、语雀）
     // 只监听拖放，页面上根本不存在 <input type=file>。之前这里直接报错，
     // 等于把「往文章里插图」这一整类任务判了死刑。
@@ -1773,7 +1805,7 @@
   // 才调 preventDefault 来「认领」这次拖放，没有它 drop 会被当成浏览器的默认行为
   // （在新标签页打开这个文件）而不是页面的上传。
   function dropFile(file, p, bytes, hinted) {
-    const target = hinted
+    let target = hinted
       || (p.dropSelector && document.querySelector(p.dropSelector))
       || document.querySelector('[class*="drop" i],[class*="upload" i],[contenteditable="true"],[role="textbox"]')
       || document.activeElement
@@ -1782,6 +1814,26 @@
       throw fail('REF_NOT_FOUND',
         '页面上既没有 file input，也找不到可以拖放的目标。先点开上传入口让它出现，'
         + '或用 selector（指定 input）/ dropSelector（指定拖放区）明确告诉我往哪儿放。');
+    }
+
+    // 2026-09-09 Tripo3D Studio 实测踩过的坑：很多站点的上传区是「一个
+    // opacity-0 的隐形 <input type=file> 精确覆盖在自定义样式的可视 dropzone
+    // 上面」。把 drop 发给外层容器，容器的 dragover 监听器会 preventDefault
+    // （看起来像接住了），但真正处理 change/drop 的是那个隐形 input——容器
+    // 从不转发 dataTransfer.files，上传因此静默失败，返回值却说「已拖放」。
+    // 当年只能靠 agent 手动 eval 打 id、把 dropSelector 精确指到那个 input
+    // 才绕过去。这里把这一步收进来自动做：目标不是 file input 本身时，
+    // 找它内部与它面积最接近（多半就是精确覆盖）的 file input 顶替上去。
+    if (target.tagName !== 'INPUT' || target.type !== 'file') {
+      const nested = target.querySelectorAll ? [...target.querySelectorAll('input[type=file]')] : [];
+      if (nested.length === 1) {
+        target = nested[0];
+      } else if (nested.length > 1) {
+        const tArea = target.getBoundingClientRect().width * target.getBoundingClientRect().height;
+        target = nested
+          .map((el) => { const r = el.getBoundingClientRect(); return { el, diff: Math.abs(r.width * r.height - tArea) }; })
+          .sort((a, b) => a.diff - b.diff)[0].el;
+      }
     }
 
     const dt = new DataTransfer();
@@ -2009,6 +2061,7 @@
           case 'read': return sendResponse(doRead(msg));
           case 'expect': return sendResponse(doExpect(msg));
           case 'upload': return sendResponse(doUpload(msg));
+          case 'uploadTarget': return sendResponse(doUploadTarget(msg));
           case 'scroll': return sendResponse(await doScroll(msg));
           case 'history':
             if (msg.action === 'back') history.back();

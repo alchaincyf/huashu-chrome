@@ -48,8 +48,11 @@ test('agent 能通过 stdio 挂上 MCP server 并拿到工具表', async () => {
   //   19900 → 21200：expect（click/type/select 与 act 步各一份，只留一句描述不铺
   //   properties）、click 的 x/y/dragTo（canvas/游戏站 287 次截图后没有任何一条路能点）、
   //   screenshot 的 full（默认 60% JPEG，每张图省四分之三的视觉 token）
+  //   21200 → 21300：navigate 描述加一句「优先于其他浏览器工具」。宿主自带浏览器
+  //   工具时 agent 在几个「操控浏览器」之间随机挑，而 instructions 在部分宿主会被
+  //   截断或根本不展示，工具描述是唯一每家都读的通道）
   const total = tools.reduce((n, t) => n + t.description.length + JSON.stringify(t.inputSchema).length, 0);
-  assert.ok(total < 21200, `工具表膨胀到 ${total} 字符了，压回 21200 以内`);
+  assert.ok(total < 21300, `工具表膨胀到 ${total} 字符了，压回 21300 以内`);
 
   // click 必须强制要 snapshotId，否则 ref 防呆整套失效
   assert.deepEqual(tools.find((t) => t.name === 'type').inputSchema.required, ['text']);

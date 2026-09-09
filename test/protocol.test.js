@@ -226,6 +226,37 @@ const helloAgent = async (name, sessionId) => {
   return a;
 };
 
+test('hello 里的 label 随每条命令盖给扩展；不带就不盖', async () => {
+  const ext = open({ origin: 'chrome-extension://label' });
+  ext.on('open', () => ext.send(JSON.stringify({ type: 'hello', role: 'extension', extId: 'label', v: 1 })));
+  await firstMessage(ext);
+
+  const a1 = open();
+  a1.on('open', () => a1.send(JSON.stringify({ type: 'hello', role: 'agent', token: TOKEN, client: 'codex', label: 'Codex CLI', v: 1 })));
+  await firstMessage(a1);
+  const a2 = await helloAgent('old-client');
+
+  const seen = [];
+  ext.on('message', (d) => {
+    const m = JSON.parse(d.toString());
+    if (m.type !== 'cmd') return;
+    seen.push(m);
+    ext.send(JSON.stringify({ type: 'res', id: m.id, __k: m.__k, ok: true, data: {} }));
+  });
+  const r1 = nextRes(a1);
+  a1.send(JSON.stringify({ type: 'cmd', id: 'c1', cmd: 'snapshot', params: {} }));
+  await r1;
+  const r2 = nextRes(a2);
+  a2.send(JSON.stringify({ type: 'cmd', id: 'c1', cmd: 'snapshot', params: {} }));
+  await r2;
+
+  assert.equal(seen[0].client, 'codex');
+  assert.equal(seen[0].label, 'Codex CLI');
+  assert.equal(seen[1].client, 'old-client');
+  assert.equal(seen[1].label, undefined, '老客户端不带 label，桥不该替它编一个');
+  ext.close(); a1.close(); a2.close();
+});
+
 test('桥给每条命令盖章 sid：每会话稳定、会话间互异，且不回泄给 agent', async () => {
   const ext = open({ origin: 'chrome-extension://stamp' });
   ext.on('open', () => ext.send(JSON.stringify({ type: 'hello', role: 'extension', extId: 'stamp', v: 1 })));

@@ -295,7 +295,9 @@ async function onMessage(msg) {
     // await 而不是 void：标记那一侧只信 storage 里的名单（见 syncMark 上的说明），
     // 这里必须保证「本命令携带的名单已落盘」先于命令完成后的刷新，否则新会话的
     // 第一条命令刷标记时会读到没有自己的旧名单——正是当年那个落盘竞态
-    await noteSession(msg.sid, msg.client, msg.live);
+    // 显示名优先用桥盖的 label（宿主自报的真名，见 src/lib/host.js）；
+    // 老桥不盖 label 就退回 client slug，identity.js 会把它机械美化。
+    await noteSession(msg.sid, msg.label || msg.client, msg.live);
     // 缺省 tabId 在这里统一解析成具体 tabId（会话级槽），handler 拿到的永远是实值。
     // ctx 只在本函数内现场传——SW 里两条命令的 await 会交错，绝不能用模块级变量存「当前消息」
     const ctx = { sid: msg.sid, live: msg.live, adopted: false };
@@ -1945,6 +1947,36 @@ const HANDLERS = {
 
   async upload(p, tabId) {
     const id = await resolveTab(tabId);
+
+    // 有本机路径就先走 CDP：DOM.setFileInputFiles 传的是路径，浏览器自己读盘。
+    // 桥只搬得动几十 MB —— 一支 300MB 的视频编成 base64 是 400MB 字符串，
+    // 桥会当场断开，而断开后当前这个 agent 会话是连不回来的（2026-09-08 实测）。
+    // 拖放那条路必须有文件字节，不在此列。
+    //
+    // `!p.base64` 这个额外条件是 2026-09-09 补的：没有它，MCP 侧的重试（CDP
+    // 失败后带着 base64 再调一次 upload）会在这儿把 CDP 那套流程完整地
+    // 重跑一遍——doUploadTarget 再打一次标记、setFileInput 再拿着同一个理由
+    // 再失败一次，纯属重复劳动。更糟的是 Tripo3D Studio 上实测复现过一次
+    // content.js 那侧 atob(p.base64) 报「不是合法编码」，而这个 base64 是
+    // Node 侧 fs.readFileSync().toString('base64') 刚生成的，理论上不该畸形——
+    // 加这个 guard 之后重试请求会直接跳过 CDP、走最简单的那条路径，
+    // 这一类因为「同一个 tab 短时间内被两套逻辑各摸一遍」触发的诡异态就没有
+    // 复现的机会了。content.js 里也补了诊断信息，万一以后还能在别处摸到，
+    // 报错会直接说清楚 base64 长什么样，不用再像这次一样从头盲猜。
+    if (p.path && !p.dropSelector && !p.base64) {
+      try {
+        const t = (await toFrame(id, 'uploadTarget', p)).data;
+        if (t?.selector) {
+          await cdp.setFileInput(id, t.selector, [p.path]);
+          const kb = Math.round((p.bytes || 0) / 1024);
+          return { text: `已投入 ${p.name}（${kb >= 1024 ? (kb / 1024).toFixed(1) + 'MB' : kb + 'KB'}）到 ${t.accept ? 'accept="' + t.accept + '"' : ''} input` };
+        }
+      } catch (e) {
+        // CDP 不可用（调试器被占、页面是 chrome:// 之类）不算失败，回落到 base64
+        if (!p.base64) return { needBytes: true, reason: String(e?.message || e) };
+      }
+      if (!p.base64) return { needBytes: true, reason: '页面上没有 file input，要走拖放' };
+    }
     return (await toFrame(id, 'upload', p)).data;
   },
 

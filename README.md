@@ -131,6 +131,9 @@ args = ["-y", "huashu-chrome", "mcp", "--client", "codex"]
 { "mcpServers": { "huashu-chrome": { "command": "npx", "args": ["-y", "huashu-chrome", "mcp"] } } }
 ```
 
+`--client` 可以不写、写错也没关系：页面右下角和审计日志里显示的是宿主在 MCP 握手里
+自报的身份（Claude Code / Codex CLI / Gemini CLI / OpenClaw …），这个参数只在宿主没报时兜底。
+
 扩展：`npx huashu-chrome extension` 打印目录，然后 `chrome://extensions`
 → 开发者模式 → 加载已解压的扩展程序。
 
