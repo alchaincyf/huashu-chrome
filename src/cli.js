@@ -6,6 +6,7 @@
 //   extension  打印扩展路径和加载步骤
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readBridgeInfo, DEFAULT_PORT, HOME, AUDIT_FILE, LOG_FILE } from './lib/paths.js';
 
@@ -101,6 +102,10 @@ switch (cmd) {
 
   case 'extension':
     printExtension();
+    // --reveal：在访达 / 资源管理器里选中扩展文件夹，用户拖进 chrome://extensions 就装好了。
+    // 引导页故意不放本机路径（它每台机器都不一样，还常常躺在 npx 缓存里），
+    // 「路径」这件事交给终端和文件管理器，页面只教手势。
+    if (has('--reveal')) revealExtensionDir();
     break;
 
   case 'audit': {
@@ -323,14 +328,27 @@ function probe(info) {
 function printExtension() {
   const dir = path.join(ROOT, 'extension');
   console.log(`
-扩展加载步骤（开发期用「加载已解压的扩展程序」，上架后从商店装）
+装扩展有两条路：
 
-  1. Chrome 打开  chrome://extensions
-  2. 右上角打开「开发者模式」
-  3. 点「加载已解压的扩展程序」，选这个目录：
+  A. 商店一键装（推荐）：https://chromewebstore.google.com/detail/foiljmaplphdfimfcnfdpekhdnfbgfbf
 
-     ${dir}
+  B. 手动加载（改过扩展代码、或商店打不开时）
+     1. Chrome 打开  chrome://extensions ，右上角打开「开发者模式」
+     2. 把这个文件夹拖到那一页上（或点「加载已解压的扩展程序」选中它）：
 
-  4. 装好后扩展会自动连桥。跑 huashu-chrome doctor 应该看到「Chrome 扩展在线」
+        ${dir}
+
+        加 --reveal 会直接在访达 / 资源管理器里选中它，拖过去就行。
+
+装好后扩展会自动连桥。跑 huashu-chrome doctor 应该看到「Chrome 扩展在线」
 `);
+}
+
+function revealExtensionDir() {
+  const dir = path.join(ROOT, 'extension');
+  try {
+    if (process.platform === 'darwin') spawn('open', ['-R', dir], { detached: true, stdio: 'ignore' }).unref();
+    else if (process.platform === 'win32') spawn('explorer', ['/select,' + dir], { detached: true, stdio: 'ignore' }).unref();
+    else spawn('xdg-open', [path.dirname(dir)], { detached: true, stdio: 'ignore' }).unref();
+  } catch { /* 打不开就算了，路径已经印在上面 */ }
 }

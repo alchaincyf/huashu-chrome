@@ -161,11 +161,14 @@ export async function install({ yes = true, only = null } = {}) {
 
   console.log('检测到这些 agent：');
   const plan = [];
+  // rows 给引导页的「随附清单」：终端刚做完的事，让用户在页面上也看得见
+  const rows = [];
   for (const t of found) {
     const done = alreadyConfigured(t);
     const tag = t.discovered ? ' (自动发现)' : '';
     console.log(`  ${done ? '·' : '+'} ${pad(t.name + tag, 26)} ${done ? '已配置，跳过' : '将写入 MCP 配置'}`);
     if (!done) plan.push(t);
+    else rows.push({ name: t.name, ok: true, written: false, status: '已配置 · 未改动' });
   }
 
   if (!plan.length) {
@@ -184,17 +187,19 @@ export async function install({ yes = true, only = null } = {}) {
         fs.copyFileSync(t.file, backup);
         t.kind === 'json' ? writeJson(t) : writeToml(t);
         console.log(`  ✅ ${t.name}（原文件已备份为 ${path.basename(backup)}）`);
+        rows.push({ name: t.name, ok: true, written: true, status: '已写入 · 已备份' });
         ok++;
       } catch (e) {
         console.log(`  ❌ ${t.name}：${e.message}`);
         console.log(`     手动加进 ${t.file} 也可以，格式见 README`);
+        rows.push({ name: t.name, ok: false, written: false, status: '写入失败 · 见终端' });
       }
     }
     if (ok) console.log(`\n${ok} 个 agent 配好了。它们需要重启一次才会加载新的 MCP server。`);
   }
 
   printExtensionStep();
-  const guide = writeGuide();
+  const guide = writeGuide(rows);
   console.log(`  引导页已生成并尝试打开：${guide}`);
   openInBrowser(guide);
   console.log('\n装完扩展后跑 `huashu-chrome doctor` 验证。');
@@ -205,7 +210,8 @@ export async function install({ yes = true, only = null } = {}) {
 
 function printExtensionStep() {
   console.log('\n还差一步：装 Chrome 扩展');
-  console.log('  （浏览器不允许脚本代装扩展，这一下必须你自己点）');
+  console.log(`  商店一键安装：${STORE_URL}`);
+  console.log('  （浏览器不允许脚本代装扩展，这一下必须你自己点；引导页里有图）');
 }
 
 // ---------- 配置读写 ----------
@@ -261,65 +267,45 @@ export function extensionId() {
 }
 
 // ---------- 扩展引导页 ----------
+//
+// 模板住在 src/guide.html（设计稿见 design-demos/，2026-09-09 选定「说明书」方向）。
+// 这一页给的是「agent 替他跑完 install 之后弹出来的那个人」看的：主路径是商店
+// 一键安装，开发者手动加载收在附录里。页面里**不放任何本机绝对路径**——
+// 手动加载那步让用户回终端跑 `extension --reveal`，文件夹自己在访达里选中。
+const STORE_URL = 'https://chromewebstore.google.com/detail/foiljmaplphdfimfcnfdpekhdnfbgfbf';
 
-function writeGuide() {
+function writeGuide(rows = []) {
   const dir = path.join(os.tmpdir(), 'huashu-chrome');
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, 'install.html');
-  const extDir = path.join(ROOT, 'extension');
-  const id = extensionId();
   const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
 
-  fs.writeFileSync(file, `<!doctype html><html lang="zh-CN"><meta charset="utf-8">
-<title>安装 huashu-chrome 扩展</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-:root{color-scheme:light dark}
-body{max-width:660px;margin:7vh auto;padding:0 24px;font:15px/1.75 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif}
-h1{font-size:23px;margin:0 0 4px}.sub{color:#8a8f98;margin-bottom:34px}
-ol{padding-left:22px}li{margin-bottom:20px}
-code{background:color-mix(in srgb,currentColor 10%,transparent);padding:2px 6px;border-radius:5px;font-size:13px}
-.row{display:flex;gap:8px;align-items:center;margin-top:9px}
-.row input{flex:1;min-width:0;padding:9px 11px;font:12px ui-monospace,Menlo,Consolas,monospace;border:1px solid color-mix(in srgb,currentColor 22%,transparent);border-radius:8px;background:transparent;color:inherit}
-button{padding:9px 14px;font:inherit;font-size:13px;border:0;border-radius:8px;background:#2563eb;color:#fff;cursor:pointer;white-space:nowrap}
-button:disabled{opacity:.55;cursor:default}
-.tip{margin-top:10px;padding:13px 15px;border-radius:10px;background:color-mix(in srgb,currentColor 7%,transparent);font-size:13px;color:#8a8f98}
-.done{margin-top:34px;padding:16px 18px;border-radius:12px;border:1px solid color-mix(in srgb,currentColor 18%,transparent)}
-</style>
-<h1>装上 huashu-chrome 扩展</h1>
-<div class="sub">终端那边已经配好了，只差浏览器这一下</div>
-<ol>
-  <li>把这个地址粘到浏览器地址栏，回车：
-    <div class="row"><input readonly value="chrome://extensions"><button data-copy>复制</button></div>
-    <div class="tip">网页不允许直接跳到 <code>chrome://</code> 开头的地址，只能你自己粘。<br>
-      Edge 用 <code>edge://extensions</code>，Brave 用 <code>brave://extensions</code>。</div>
-  </li>
-  <li>打开页面右上角的<b>「开发者模式」</b>开关</li>
-  <li>点<b>「加载已解压的扩展程序」</b>，选中这个文件夹：
-    <div class="row"><input readonly value="${esc(extDir)}"><button data-copy>复制</button></div>
-    ${/[\\/]\.[^\\/]+[\\/]/.test(extDir) ? `<div class="tip">这个文件夹在隐藏目录里，选择框默认看不见它：
-      macOS 在选择框里按 <code>⌘⇧G</code> 粘贴路径回车；Windows 直接把路径粘进选择框顶部的地址栏。</div>` : ''}
-  </li>
-  <li>装好后扩展会自动连上终端，工具栏图标上的灰点会消失</li>
-</ol>
-<div class="done">
-  <b>验证一下</b><div class="row"><input readonly value="npx huashu-chrome doctor"><button data-copy>复制</button></div>
-  <div class="tip" style="margin-top:9px">看到「握手正常 · Chrome 扩展在线」就成了。<br>
-  ${id ? `扩展 ID 固定为 <code>${esc(id)}</code>，换机器也一样。` : ''}
-  之后上架 Chrome 商店，前三步会变成点一下「添加至 Chrome」。</div>
-  <div class="tip" style="margin-top:14px;display:flex;align-items:center;gap:12px;justify-content:space-between">
-    <span>觉得有用？一个 star 是对这个开源项目最直接的支持。</span>
-    <a href="${REPO}" target="_blank" rel="noopener"><button type="button">⭐ GitHub 上 star</button></a>
-  </div>
-</div>
-<script>
-document.querySelectorAll('[data-copy]').forEach(b=>b.onclick=async()=>{
-  const v=b.previousElementSibling.value;
-  try{await navigator.clipboard.writeText(v)}catch{b.previousElementSibling.select();document.execCommand('copy')}
-  const t=b.textContent;b.textContent='已复制';b.disabled=true;
-  setTimeout(()=>{b.textContent=t;b.disabled=false},1400);
-});
-</script></html>`);
+  const version = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
+  const icon = fs.readFileSync(path.join(ROOT, 'extension', 'icons', 'icon128.png')).toString('base64');
+  let sites = 0;
+  try { sites = fs.readdirSync(path.join(ROOT, 'docs', '经验')).filter((f) => f.endsWith('.md')).length; } catch { /* 没带 docs 就不报数 */ }
+
+  const CHECK = '<svg width="16" height="16" viewBox="0 0 16 16"><path class="ac" d="M2.5 8.4 6.2 12 13.5 4"/></svg>';
+  const CROSS = '<svg width="16" height="16" viewBox="0 0 16 16"><path class="ln2" d="M4 4 12 12 M12 4 4 12"/></svg>';
+  const ok = rows.filter((r) => r.ok).length;
+  const agentRows = rows.length
+    ? rows.map((r) => `      <div class="agent">${r.ok ? CHECK : CROSS}<span class="nm">${esc(r.name)}</span><span class="st">${esc(r.status)}</span></div>`).join('\n')
+    : `      <div class="agent">${CROSS}<span class="nm">没找到已知 agent 的配置</span><span class="st">手动配置片段在终端里</span></div>`;
+  const written = rows.filter((r) => r.written).length;
+  const foot = rows.length
+    ? `${written ? `${written} 份配置文件已写入，各自留了原文件备份；` : ''}${ok - written ? `${ok - written} 个之前就配好了，没动。` : ''}这一栏是终端刚做完的事，你不用管。`.replace(/；$/, '。')
+    : '终端没在这台机器上找到任何 agent 的 MCP 配置，把终端里打印的那段 JSON 填进你 agent 的配置文件即可。';
+
+  const html = fs.readFileSync(path.join(ROOT, 'src', 'guide.html'), 'utf8')
+    .replaceAll('{{ICON}}', icon)
+    .replaceAll('{{VERSION}}', esc(version))
+    .replaceAll('{{EXT_ID}}', esc(extensionId() || '（本地构建，无固定 ID）'))
+    .replaceAll('{{SITE_COUNT}}', sites ? String(sites) : '二十多')
+    .replaceAll('{{AGENT_COUNT}}', `${ok} / ${rows.length}`)
+    .replaceAll('{{AGENT_ROWS}}', agentRows)
+    .replaceAll('{{AGENT_FOOT}}', esc(foot))
+    .replaceAll('https://chromewebstore.google.com/detail/foiljmaplphdfimfcnfdpekhdnfbgfbf', STORE_URL);
+  fs.writeFileSync(file, html);
   return file;
 }
 

@@ -466,6 +466,16 @@ const TOOLS = [
       },
     },
   },
+  {
+    name: 'reload',
+    description:
+      'Reload the huashu-chrome extension (chrome.runtime.reload()) so an updated build takes effect — ' +
+      'no manual chrome://extensions visit needed. ~2s; bridge auto-reconnects, tabs keep state. ' +
+      'DISRUPTIVE: the extension is shared by every tab and every other agent session on this machine — ' +
+      'anything mid-flight elsewhere gets cut. Only call right after installing/updating, or when ' +
+      '\`doctor\`/a version-mismatch warning says to — never speculatively.',
+    inputSchema: { type: 'object', properties: {} },
+  },
 ];
 
 // 发给 agent 一次的策略。渐进式披露的第一层：只放「宪法」，细节住在工具描述里。

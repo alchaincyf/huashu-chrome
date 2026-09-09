@@ -72,14 +72,23 @@ CLI 是入口（install / mcp / doctor），MCP server 是 agent 的接口，本
 
 ## 为什么需要它
 
-浏览器控制这件事，现在的格局是：
+浏览器控制这件事，现在的格局是：能拿到你真实登录态的，多半只给自家客户端用；
+对任何 agent 开放的，多半开的是一个干净的、没登录的浏览器。huashu-chrome 两头都要。
 
-| | 能拿到你的真实登录态吗 | 你的终端 agent 能用吗 |
-|---|---|---|
-| Claude in Chrome | ✅ | 只在 Anthropic 自家客户端里（付费订阅可用，API key / Bedrock 用户不行），别家 agent 接不上 |
-| Codex for Chrome | ✅ | ❌ 只有 Codex app UI 能用，CLI 拿不到扩展后端（[openai/codex#26820](https://github.com/openai/codex/issues/26820)，2026-09 仍开着） |
-| chrome-devtools-mcp | ❌ Chrome 136 起封了默认 profile 的远程调试 | ✅ |
-| **huashu-chrome** | ✅ | ✅ 任何支持 MCP 的 agent |
+| | **huashu-chrome** | Claude in Chrome | ChatGPT 扩展（Codex） | Playwright MCP | chrome-devtools-mcp | Browser Use |
+|---|---|---|---|---|---|---|
+| 用你日常的 Chrome，带真实登录态 | ✅ 就是眼前这个 | ✅ | ✅ | ⚠️ 要走扩展模式 | ⚠️ Chrome 144+ 逐次授权 | ⚠️ Harness 接管才行 |
+| 任何支持 MCP 的 agent 都能接 | ✅ 20+ 家通用 | ❌ 只限 Anthropic 客户端 | ❌ Codex CLI 用不了 | ✅ | ✅ | ✅ |
+| 不改启动参数、不开调试端口 | ✅ 装个扩展就行 | ✅ | ✅ | ⚠️ 扩展模式才免 | ❌ 要开远程调试 | ❌ 装 Chromium 或开远程调试 |
+| 多个 agent 同时干活互不抢页 | ✅ 每会话一槽，撞车当场拦 | ⚠️ 每会话一标签组 | ？官方未说明 | ✅ 每客户端一标签组 | ⚠️ 靠实验开关 | ⚠️ 共用一条道会抢 |
+| 出厂带站点经验，越用越快 | ✅ 二十多站实测笔记＋本机回流 | ❌ | ⚠️ 只有通用记忆 | ❌ | ❌ | ⚠️ 有，默认关闭 |
+| 验证码、扫码、付款交还给人 | ✅ `ask` 工具，付款闸在扩展里 | ✅ 遇到就暂停 | ⚠️ 只确认敏感动作 | ❌ | ❌ | ⚠️ 云端版才有 |
+| 看得见谁在控哪一页 | ✅ 标签组＋描边＋驾驶舱 | ✅ 彩色标签组 | ？官方未说明 | ⚠️ 按客户端命名标签组 | ❌ | ⚠️ 标题加个标记 |
+
+核查日期 2026-09-09，每一格都对着官方文档或官方仓库填的，完整八方案矩阵和每格来源见
+[docs/对比.md](docs/对比.md)。两句公道话：Playwright MCP 的扩展模式也能拿到登录态、
+也有按客户端隔离，它缺的是站点经验和人工交接；Claude in Chrome 遇到验证码也会停下等你，
+它的问题是只给 Anthropic 自家客户端用。
 
 ## 安装
 
@@ -97,6 +106,8 @@ npx huashu-chrome install
    Gemini CLI、Windsurf、Cline、Roo Code、Claude Desktop，以及 WorkBuddy、CodeBuddy、
    Kimi Code、通义灵码、MiniMax Mavis、Trae、豆包、千问 / Qwen Code、Qoder、
    DeepSeek、iFlow、OpenClaw。加一个只要往数组里加一行，不用改代码 —— 欢迎 PR。
+   不只是编程 agent：WorkBuddy、千问办公、豆包工作这类办公 agent，只要能配本地 MCP，
+   同样接得上——它们最常干的「查后台数据、填表、跨站搬运」正是登录态最要紧的活。
 2. **自动发现** —— 没列出来的也能认出来。`install` 会扫 home 下的点目录，
    凡是内容里有 `mcpServers` 的配置文件都算数。实测所有主流产品都守这个惯例
    （Codex 的 TOML 是唯一异类），所以下个月新冒出来的 agent 不用等更新也能配上。

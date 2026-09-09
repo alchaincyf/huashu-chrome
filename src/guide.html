@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>huashu-chrome · 安装说明书</title>
+<style>
+:root{
+  --paper:#f6f4ee;
+  --card:#fbfaf6;
+  --white:#fffefa;
+  --ink:#29261e;
+  --ink2:#6b6558;
+  --ink3:#8c8577;
+  --line:#e7e3d7;
+  --line2:#c9c4b4;
+  --acc:#f97316;
+  --accd:#c2410c;
+  --grid:rgba(41,38,30,.05);
+  --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Noto Sans SC","Microsoft YaHei",sans-serif;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background-color:var(--paper);
+  background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradient(90deg,var(--grid) 1px,transparent 1px);
+  background-size:24px 24px;
+  color:var(--ink);
+  font-family:var(--sans);
+  font-size:15px;
+  line-height:1.7;
+  -webkit-font-smoothing:antialiased;
+}
+.sheet{max-width:1240px;margin:0 auto;padding:0 40px 64px}
+a{color:inherit}
+h1,h2,h3,h4{margin:0;font-weight:700;letter-spacing:-.01em}
+p{margin:0}
+
+/* ---------- 通用零件 ---------- */
+.mono{font-family:var(--mono)}
+.tag{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink3)}
+.rule{flex:1;height:1px;background:var(--line);min-width:16px}
+.note{font-size:13px;line-height:1.75;color:var(--ink2)}
+.hl{color:var(--accd);font-weight:600}
+
+/* ---------- 抬头 ---------- */
+.masthead{display:flex;align-items:flex-end;gap:18px;padding:34px 0 14px}
+.markbox{width:56px;height:56px;border:2px solid var(--ink);border-radius:4px;flex:none;background:var(--white);padding:5px}
+.ico{width:100%;height:100%;background:url(data:image/png;base64,{{ICON}}) center/contain no-repeat}
+.masthead h1{font-size:26px;line-height:1.1}
+.masthead .sub{font-family:var(--mono);font-size:12px;letter-spacing:.16em;color:var(--ink2);margin-top:5px}
+.masthead .doc{margin-left:auto;text-align:right;font-family:var(--mono);font-size:11px;line-height:1.9;color:var(--ink3);letter-spacing:.06em}
+.dblrule{border-top:2px solid var(--ink);border-bottom:1px solid var(--ink);height:4px}
+
+/* ---------- HERO ---------- */
+.hero{display:grid;grid-template-columns:1.5fr 1fr;gap:40px;padding:38px 0 44px;align-items:start}
+.hero h2{font-size:32px;line-height:1.35;letter-spacing:-.02em;max-width:19em}
+.hero .lead{margin-top:16px;font-size:15px;color:var(--ink2);max-width:34em;line-height:1.85}
+.enclosed{border:1px solid var(--line);background:var(--card);border-radius:3px;padding:18px 20px 16px}
+.enclosed .hd{display:flex;align-items:center;gap:10px;padding-bottom:10px;border-bottom:1px solid var(--line)}
+.agent{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px dotted var(--line)}
+.agent:last-of-type{border-bottom:0}
+.agent .nm{font-size:14px;font-weight:600}
+.agent .st{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--ink3)}
+.enclosed .ft{font-size:12px;color:var(--ink3);border-top:1px solid var(--line);padding-top:10px;margin-top:6px;line-height:1.6}
+
+/* ---------- 章节头 ---------- */
+.sec{display:flex;align-items:center;gap:14px;margin:14px 0 22px}
+.sec .no{font-family:var(--mono);font-size:12px;letter-spacing:.14em;color:var(--acc);font-weight:600}
+.sec h3{font-size:19px}
+.sec .meta{font-family:var(--mono);font-size:11px;color:var(--ink3);letter-spacing:.08em}
+
+/* ---------- 图解卡 ---------- */
+.steps{display:grid;grid-template-columns:repeat(3,1fr);gap:22px}
+.card{border:1px solid var(--line);background:var(--card);border-radius:3px;padding:20px 22px 22px;display:flex;flex-direction:column}
+.card .cno{display:flex;align-items:baseline;gap:10px;padding-bottom:12px;border-bottom:1px solid var(--line)}
+.card .cno b{font-family:var(--mono);font-size:42px;line-height:.9;font-weight:700;letter-spacing:-.03em}
+.card .cno .f{font-family:var(--mono);font-size:11px;color:var(--ink3);letter-spacing:.1em;margin-left:auto}
+.fig{position:relative;background:var(--white);border:1px solid var(--line);border-radius:3px;margin:16px 0 14px;padding:8px}
+.fig svg{display:block;width:100%;height:auto}
+.pin{position:absolute;background:url(data:image/png;base64,{{ICON}}) center/contain no-repeat}
+.pin.grey{filter:grayscale(1) opacity(.55)}
+.card h4{font-size:16px;margin-bottom:6px}
+.card .note{flex:1}
+.act{margin-top:16px}
+
+/* 按钮 */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;font-family:var(--sans);font-size:14px;font-weight:600;
+  border-radius:3px;padding:11px 18px;text-decoration:none;cursor:pointer;border:2px solid var(--ink);background:none;color:var(--ink)}
+.btn-primary{background:var(--acc);border-color:var(--acc);color:#fff;width:100%;font-size:15px;padding:13px 18px}
+.btn-primary:hover{background:var(--accd);border-color:var(--accd)}
+.btn-ghost{border-color:var(--line2);font-weight:500;font-size:13px;padding:8px 14px}
+.btn-ghost:hover{border-color:var(--ink)}
+.btn .k{font-family:var(--mono);font-size:12px}
+.urlline{font-family:var(--mono);font-size:11px;color:var(--ink3);margin-top:9px;word-break:break-all;line-height:1.6}
+
+/* 验证卡 */
+.verify{grid-column:1/-1;display:grid;grid-template-columns:1.25fr 1fr;gap:32px;align-items:center}
+.verify .left{min-width:0}
+.verify h4{font-size:17px}
+
+/* ---------- FIG 大图 ---------- */
+.figwrap{display:grid;grid-template-columns:1.55fr 1fr;gap:34px;align-items:start;
+  border:1px solid var(--line);background:var(--card);border-radius:3px;padding:26px 28px 22px}
+.figwrap .stage{background:var(--white);border:1px solid var(--line);border-radius:3px;padding:10px}
+.figcap{font-family:var(--mono);font-size:11px;color:var(--ink3);letter-spacing:.06em;margin-top:12px}
+.legend{list-style:none;margin:0;padding:0}
+.legend li{display:flex;gap:12px;padding:0 0 18px}
+.bdg{flex:none;width:24px;height:24px;border-radius:50%;background:var(--ink);color:var(--white);
+  font-family:var(--mono);font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;margin-top:2px}
+.legend .tx{font-size:14px;line-height:1.7}
+.legend .tx i{display:block;font-style:normal;font-size:12.5px;color:var(--ink2);margin-top:2px}
+.notebox{display:flex;gap:12px;border-top:1px solid var(--line);padding-top:16px}
+.notebox .sq{flex:none;width:24px;height:24px;border:2px solid var(--ink);border-radius:3px;font-family:var(--mono);font-size:9px;font-weight:700;
+  display:flex;align-items:center;justify-content:center;letter-spacing:.02em}
+
+/* ---------- 附录 ---------- */
+details{border:1px solid var(--line);background:var(--card);border-radius:3px;margin-top:14px}
+summary{list-style:none;cursor:pointer;padding:16px 20px;display:flex;align-items:center;gap:14px}
+summary::-webkit-details-marker{display:none}
+summary .apx{font-family:var(--mono);font-size:12px;letter-spacing:.14em;color:var(--acc);font-weight:600}
+summary .ttl{font-size:15px;font-weight:600}
+summary .sig{font-size:13px;color:var(--ink3)}
+summary .pm{margin-left:auto;width:22px;height:22px;border:2px solid var(--ink);border-radius:3px;position:relative;flex:none}
+summary .pm::before,summary .pm::after{content:"";position:absolute;background:var(--ink);left:50%;top:50%;transform:translate(-50%,-50%)}
+summary .pm::before{width:10px;height:2px}
+summary .pm::after{width:2px;height:10px}
+details[open] summary .pm::after{display:none}
+.apxbody{padding:4px 20px 24px;border-top:1px solid var(--line)}
+.substeps{display:grid;grid-template-columns:repeat(4,1fr);gap:18px;margin-top:20px}
+.sub .sno{font-family:var(--mono);font-size:12px;font-weight:700;letter-spacing:.1em;color:var(--ink)}
+.sub .fig{margin:10px 0 12px}
+.sub h5{margin:0 0 5px;font-size:14px;font-weight:600}
+.sub .note{font-size:12.5px}
+.warn{margin-top:18px;border-left:3px solid var(--acc);padding:2px 0 2px 14px;font-size:13px;color:var(--ink2);line-height:1.75}
+
+/* ---------- 规格表 ---------- */
+table{width:100%;border-collapse:collapse;margin-top:18px;font-size:14px}
+thead th{font-family:var(--mono);font-size:11px;letter-spacing:.1em;color:var(--ink3);text-transform:uppercase;
+  text-align:left;font-weight:600;padding:0 14px 10px;border-bottom:2px solid var(--ink)}
+tbody td{padding:14px;border-bottom:1px solid var(--line);vertical-align:top;line-height:1.6}
+tbody th{padding:14px;border-bottom:1px solid var(--line);text-align:left;font-weight:600;font-size:14px;white-space:nowrap}
+tbody tr.me th,tbody tr.me td{background:rgba(249,115,22,.06);border-bottom:0}
+tbody tr.me th{color:var(--accd);box-shadow:inset 3px 0 0 var(--acc)}
+table.spec{font-size:13px;table-layout:fixed}
+table.spec thead th{padding:10px 8px;font-size:10px;letter-spacing:.06em;text-transform:none;line-height:1.4;vertical-align:bottom}
+table.spec thead th.me,table.spec tbody td.me{background:rgba(249,115,22,.06)}
+table.spec thead th.me{color:var(--accd)}
+table.spec tbody th{white-space:normal;padding:12px 10px 12px 0;font-size:13px;line-height:1.5}
+table.spec tbody td{padding:12px 8px;line-height:1.5}
+table.spec .mk{align-items:flex-start;gap:6px}
+table.spec .mk svg{margin-top:1px}
+.legend{display:flex;flex-wrap:wrap;gap:18px;margin-top:14px;font-size:12px;color:var(--ink3)}
+.mk{display:inline-flex;align-items:center;gap:8px}
+.mk svg{flex:none}
+
+/* ---------- 页脚 ---------- */
+.star{display:flex;align-items:center;gap:28px;border:2px solid var(--ink);border-radius:3px;background:var(--card);padding:22px 26px;margin-top:16px}
+.star .tx{font-size:15px;line-height:1.7}
+.star .tx b{display:block;font-size:16px}
+.star .btn{margin-left:auto;flex:none;border-color:var(--acc);color:var(--accd)}
+.star .btn:hover{background:var(--acc);color:#fff;border-color:var(--acc)}
+.colophon{display:flex;flex-wrap:wrap;gap:8px 26px;align-items:center;margin-top:26px;padding-top:16px;border-top:1px solid var(--ink);
+  font-family:var(--mono);font-size:11px;color:var(--ink3);letter-spacing:.05em}
+.colophon .sep{color:var(--line2)}
+
+/* ---------- SVG 图形语言 ---------- */
+svg .ln{fill:none;stroke:#29261e;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+svg .ln2{fill:none;stroke:#c9c4b4;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+svg .ac{fill:none;stroke:#f97316;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+svg .fw{fill:#fffefa}
+svg .fp{fill:#f6f4ee}
+svg .fg{fill:#e7e3d7}
+svg .fg2{fill:#ece8dd}
+svg .fi{fill:#29261e}
+svg .fa{fill:#f97316}
+svg .fl{fill:#b8b2a0}
+svg text{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Noto Sans SC",sans-serif;font-size:13px;fill:#29261e}
+svg text.m{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-size:12px;letter-spacing:.02em}
+svg text.s{font-size:12px;fill:#6b6558}
+svg text.w{fill:#fffefa}
+svg text.tp{fill:#f6f4ee}
+svg text.tm{fill:#d9d4c6}
+svg text.td{fill:#a8a29e}
+svg text.tc{fill:#ded8c9}
+svg text.o{fill:#c2410c}
+svg text.b{font-weight:700}
+
+@media (max-width:1120px){
+  .steps{grid-template-columns:repeat(2,1fr)}
+  .figwrap{grid-template-columns:1fr}
+  .substeps{grid-template-columns:repeat(2,1fr)}
+}
+@media (max-width:820px){
+  .sheet{padding:0 22px 48px}
+  .hero,.steps,.verify{grid-template-columns:1fr}
+  .substeps{grid-template-columns:1fr}
+  .hero h2{font-size:26px}
+  .star{flex-wrap:wrap}
+  .star .btn{margin-left:0;width:100%}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+
+  <!-- ============ 抬头 ============ -->
+  <header class="masthead">
+    <div class="markbox"><div class="ico"></div></div>
+    <div>
+      <h1>huashu-chrome</h1>
+      <div class="sub">安装说明书 · INSTALLATION MANUAL</div>
+    </div>
+    <div class="doc">
+      DOC. HC—{{VERSION}}<br>
+      SEC.01 – SEC.03 · APX. A/B
+    </div>
+  </header>
+  <div class="dblrule"></div>
+
+  <section class="hero">
+    <div>
+      <h2>终端那边已经配好了，<br>只差浏览器这一下。</h2>
+      <p class="lead">你的 agent 刚刚替你写完了 MCP 配置。剩下的只有一件事：把 Chrome 扩展装上。装上之后它会自动连上本机的桥，你的 agent 就能操控你自己日常在用的这个 Chrome——带着全部登录态。</p>
+      <p class="lead" style="margin-top:10px">下面三步，约 40 秒。每一步都配了图，图上圈出来的地方就是你要点的地方。</p>
+    </div>
+    <aside class="enclosed">
+      <div class="hd"><span class="tag">随附清单 · Enclosed</span><span class="rule"></span><span class="tag">{{AGENT_COUNT}}</span></div>
+{{AGENT_ROWS}}
+      <p class="ft">{{AGENT_FOOT}}</p>
+    </aside>
+  </section>
+
+  <!-- ============ SEC.01 装扩展 ============ -->
+  <div class="sec"><span class="no">SEC.01</span><h3>装上扩展</h3><span class="rule"></span><span class="meta">3 STEPS · ≈40s</span></div>
+
+  <div class="steps">
+
+    <!-- 01 -->
+    <article class="card">
+      <div class="cno"><b>01</b><span class="f">FIG.1.1</span></div>
+      <div class="fig">
+        <svg viewBox="0 0 326 176" role="img" aria-label="Chrome 应用商店里的 huashu-chrome 页面">
+          <rect class="fw ln" x="7" y="9" width="312" height="158" rx="4"/>
+          <path class="ln2" d="M7 45H319"/>
+          <circle class="fl" cx="24" cy="27" r="3.5"/><circle class="fl" cx="37" cy="27" r="3.5"/><circle class="fl" cx="50" cy="27" r="3.5"/>
+          <rect class="ln2" x="66" y="17" width="238" height="20" rx="4"/>
+          <text class="m s" x="76" y="31">chromewebstore.google.com/…</text>
+          <rect class="fw ln" x="26" y="62" width="274" height="86" rx="4"/>
+          <text class="b" x="88" y="86">huashu-chrome</text>
+          <text class="m s" x="88" y="103">扩展程序 · huasheng.ai</text>
+          <rect class="fa" x="186" y="112" width="98" height="26" rx="4"/>
+          <text class="w" x="235" y="129" text-anchor="middle" font-size="12">添加至 Chrome</text>
+          <path class="fi" d="M170 118 L170 142 L176 136 L180 147 L186 145 L182 134 L189 134 Z"/>
+          <path class="fw" d="M170 118 L170 142 L176 136 L180 147 L186 145 L182 134 L189 134 Z" fill="none" stroke="#fffefa" stroke-width="1.5"/>
+        </svg>
+        <div class="pin" style="left:12.9%;top:41.5%;width:12.6%;aspect-ratio:1"></div>
+      </div>
+      <h4>打开商店页</h4>
+      <p class="note">点下面这个按钮，商店页在新标签页里打开。认准发布者是 <span class="mono">huasheng.ai</span>、图标是右边这个卡通头像。</p>
+      <div class="act">
+        <a class="btn btn-primary" href="https://chromewebstore.google.com/detail/foiljmaplphdfimfcnfdpekhdnfbgfbf" target="_blank" rel="noopener">添加至 Chrome ↗</a>
+        <p class="urlline">chromewebstore.google.com/detail/foiljmaplphdfimfcnfdpekhdnfbgfbf</p>
+      </div>
+    </article>
+
+    <!-- 02 -->
+    <article class="card">
+      <div class="cno"><b>02</b><span class="f">FIG.1.2</span></div>
+      <div class="fig">
+        <svg viewBox="0 0 326 176" role="img" aria-label="Chrome 的添加扩展确认弹窗">
+          <rect class="fp ln2" x="7" y="9" width="312" height="34" rx="4"/>
+          <rect class="ln2" x="250" y="18" width="16" height="16" rx="3"/>
+          <rect class="ln2" x="276" y="18" width="16" height="16" rx="3"/>
+          <path class="ln2" d="M258 26h0"/>
+          <path class="fw" d="M262 46 L270 56 L254 56 Z"/>
+          <path class="ln" d="M254 56 L262 46 L270 56"/>
+          <rect class="fw ln" x="36" y="56" width="254" height="102" rx="4"/>
+          <text class="b" x="52" y="80">要添加「huashu-chrome」吗？</text>
+          <rect class="fg" x="52" y="92" width="176" height="7" rx="3"/>
+          <rect class="fg" x="52" y="106" width="140" height="7" rx="3"/>
+          <rect class="fa" x="52" y="124" width="112" height="26" rx="4"/>
+          <text class="w" x="108" y="141" text-anchor="middle" font-size="12">添加扩展程序</text>
+          <rect class="ln2" x="176" y="124" width="60" height="26" rx="4"/>
+          <text class="s" x="206" y="141" text-anchor="middle">取消</text>
+        </svg>
+      </div>
+      <h4>点「添加扩展程序」</h4>
+      <p class="note">Chrome 会在右上角弹一个确认框，把它要的权限列给你看。点橙色那颗按钮，几秒就装完了。</p>
+      <div class="act"><p class="note" style="font-size:12.5px;color:var(--ink3)">权限只用于操控你打开的标签页，不上传任何数据。</p></div>
+    </article>
+
+    <!-- 03 -->
+    <article class="card">
+      <div class="cno"><b>03</b><span class="f">FIG.1.3</span></div>
+      <div class="fig">
+        <svg viewBox="0 0 326 176" role="img" aria-label="工具栏图标上的灰点消失">
+          <text class="m s" x="14" y="26">TOOLBAR · 装完之后</text>
+          <rect class="fp ln2" x="14" y="52" width="122" height="56" rx="4"/>
+          <rect class="ln2" x="26" y="66" width="26" height="26" rx="4"/>
+          <circle cx="97" cy="96" r="7.5" fill="#a8a29e" stroke="#fffefa" stroke-width="2.5"/>
+          <text class="s" x="14" y="132">灰点 = 还没连上桥</text>
+          <path class="ln" d="M152 80 H182"/>
+          <path class="ln" d="M174 73 L182 80 L174 87"/>
+          <rect class="fw ac" x="198" y="52" width="114" height="56" rx="4"/>
+          <rect class="ln2" x="210" y="66" width="26" height="26" rx="4"/>
+          <text class="o m" x="198" y="132">在线 · 桥已连上</text>
+          <path class="ac" d="M198 140 H286"/>
+        </svg>
+        <div class="pin grey" style="left:19.9%;top:38.4%;width:9.5%;aspect-ratio:1"></div>
+        <div class="pin" style="left:76.4%;top:38.4%;width:9.5%;aspect-ratio:1"></div>
+      </div>
+      <h4>看工具栏：灰点消失</h4>
+      <p class="note">装好后图标出现在工具栏。图标右下角有灰点，说明还没连上本机的桥；灰点消失、图标恢复正常，就是接通了。</p>
+      <div class="act"><p class="note" style="font-size:12.5px;color:var(--ink3)">图标被 Chrome 收进了拼图菜单？点拼图图标，把 huashu-chrome 钉出来。</p></div>
+    </article>
+
+    <!-- 04 验证 -->
+    <article class="card verify">
+      <div class="left">
+        <div class="cno"><b>04</b><span class="f">FIG.1.4 · 验证</span></div>
+        <div class="fig">
+          <svg viewBox="0 0 560 168" role="img" aria-label="终端里 doctor 命令的成功输出">
+            <rect x="0" y="0" width="560" height="168" rx="4" fill="#29261e"/>
+            <text class="m tp" x="22" y="34">$ npx huashu-chrome doctor</text>
+            <text class="m td" x="22" y="62">桥</text>
+            <rect x="22" y="76" width="9" height="9" fill="#8c8577"/>
+            <text class="m tm" x="42" y="85">pid 41287 · 端口 8899 · 起于 14:32:07</text>
+            <rect x="22" y="104" width="9" height="9" fill="#f97316"/>
+            <text class="m w" x="42" y="113">握手正常 · Chrome 扩展在线 (v{{VERSION}})</text>
+            <rect x="22" y="132" width="9" height="9" fill="#8c8577"/>
+            <text class="m tm" x="42" y="141">扩展目录 · 已就位</text>
+          </svg>
+        </div>
+      </div>
+      <div>
+        <h4>跑一次体检，确认整套跑通</h4>
+        <p class="note" style="margin-top:8px">回到终端，敲这条命令。看到 <span class="hl">「握手正常 · Chrome 扩展在线」</span>就成了——MCP server、本机的桥、Chrome 扩展三段都通了，可以直接让 agent 开始干活。</p>
+        <p class="note" style="margin-top:10px;color:var(--ink3);font-size:12.5px">没看到？点工具栏的 huashu-chrome 图标 →「重连」，几秒后再跑一次。</p>
+        <div class="act">
+          <button class="btn btn-ghost" data-copy="npx huashu-chrome doctor"><span class="k">npx huashu-chrome doctor</span><span class="lbl">复制</span></button>
+        </div>
+      </div>
+    </article>
+
+  </div>
+
+  <!-- ============ SEC.02 装好后长什么样 ============ -->
+  <div class="sec" style="margin-top:52px"><span class="no">SEC.02</span><h3>装好后长什么样</h3><span class="rule"></span><span class="meta">FIG.2 · 可见性</span></div>
+
+  <div class="figwrap">
+    <div>
+      <div class="stage">
+        <svg viewBox="0 0 720 440" role="img" aria-label="被 agent 操控中的 Chrome 窗口示意">
+          <!-- 窗口 -->
+          <rect class="fp ln" x="6" y="6" width="708" height="428" rx="6"/>
+          <circle class="fl" cx="28" cy="30" r="4"/><circle class="fl" cx="44" cy="30" r="4"/><circle class="fl" cx="60" cy="30" r="4"/>
+          <!-- 标签组 -->
+          <rect class="fa" x="80" y="16" width="52" height="28" rx="4"/>
+          <text class="w b" x="106" y="35" text-anchor="middle" font-size="14">花叔</text>
+          <rect class="fw ac" x="136" y="14" width="132" height="32" rx="4"/>
+          <text x="152" y="35">小红书后台</text>
+          <rect class="ln2" x="276" y="14" width="160" height="32" rx="4"/>
+          <text class="s" x="292" y="35">你自己的其他标签…</text>
+          <!-- 内容区 + 四边描边 -->
+          <rect x="16" y="60" width="688" height="364" rx="4" fill="#fffefa" stroke="#f97316" stroke-width="3"/>
+          <!-- 浮条 -->
+          <rect class="fw ac" x="196" y="80" width="330" height="38" rx="4"/>
+          <text class="o" x="361" y="105" text-anchor="middle" font-size="15">需要人帮忙：验证码 / 扫码 / 付款确认</text>
+          <!-- 页面骨架 -->
+          <rect class="fg" x="56" y="150" width="270" height="16" rx="2"/>
+          <rect class="fg2" x="56" y="188" width="430" height="10" rx="2"/>
+          <rect class="fg2" x="56" y="210" width="372" height="10" rx="2"/>
+          <rect class="fg2" x="56" y="232" width="412" height="10" rx="2"/>
+          <rect class="fg2" x="56" y="272" width="146" height="44" rx="4"/>
+          <rect class="fg2" x="220" y="272" width="146" height="44" rx="4"/>
+          <!-- 光标 + 呼吸泛光 -->
+          <circle cx="306" cy="300" r="31" fill="none" stroke="#f97316" stroke-width="2" opacity=".3"/>
+          <circle cx="306" cy="300" r="20" fill="none" stroke="#f97316" stroke-width="2" opacity=".6"/>
+          <path class="fi" d="M297 283 L297 320 L306 311 L313 326 L321 322 L314 308 L325 308 Z"/>
+          <path d="M297 283 L297 320 L306 311 L313 326 L321 322 L314 308 L325 308 Z" fill="none" stroke="#fffefa" stroke-width="1.5"/>
+          <!-- 驾驶舱 -->
+          <rect x="440" y="286" width="248" height="122" rx="4" fill="#29261e"/>
+          <text class="tc" x="458" y="312" font-size="13">正在做什么</text>
+          <rect x="546" y="303" width="124" height="10" rx="2" fill="#f97316"/>
+          <text class="tc" x="458" y="342" font-size="13">准备做什么</text>
+          <rect x="546" y="333" width="124" height="10" rx="2" fill="#57534e"/>
+          <text class="tc" x="458" y="372" font-size="13">最近时间线</text>
+          <rect x="546" y="363" width="124" height="10" rx="2" fill="#57534e"/>
+          <!-- 圆标 -->
+          <g>
+            <circle cx="136" cy="14" r="13" fill="#29261e" stroke="#f6f4ee" stroke-width="2"/>
+            <text class="m w b" x="136" y="18" text-anchor="middle" font-size="12">A</text>
+          </g>
+          <g>
+            <circle cx="16" cy="60" r="13" fill="#29261e" stroke="#f6f4ee" stroke-width="2"/>
+            <text class="m w b" x="16" y="64" text-anchor="middle" font-size="12">B</text>
+          </g>
+          <g>
+            <circle cx="440" cy="286" r="13" fill="#29261e" stroke="#f6f4ee" stroke-width="2"/>
+            <text class="m w b" x="440" y="290" text-anchor="middle" font-size="12">C</text>
+          </g>
+          <g>
+            <circle cx="196" cy="80" r="13" fill="#29261e" stroke="#f6f4ee" stroke-width="2"/>
+            <text class="m w b" x="196" y="84" text-anchor="middle" font-size="12">D</text>
+          </g>
+        </svg>
+      </div>
+      <p class="figcap">FIG.2 — 被 agent 操控中的 Chrome：人眼看得见的四个信号</p>
+    </div>
+
+    <div>
+      <ul class="legend">
+        <li><span class="bdg">A</span><span class="tx">被操控的标签页会进一个彩色标签组<i>组名「花叔」，组色就是这次会话的身份色——同时开两个 agent 也分得清谁在动哪个。</i></span></li>
+        <li><span class="bdg">B</span><span class="tx">页面四边同色描边 + 呼吸泛光的箭头光标<i>光标滑到哪，就是它正在动哪。描边一收，说明这一页它松手了。</i></span></li>
+        <li><span class="bdg">C</span><span class="tx">右下角驾驶舱<i>正在做什么 / 准备做什么 / 最近时间线。不用猜它在想什么。</i></span></li>
+        <li><span class="bdg">D</span><span class="tx">需要人帮忙时弹浮条<i>验证码、扫码、付款确认这类只能你来的事，它停下来等你，你处理完它接着走。</i></span></li>
+      </ul>
+      <div class="notebox">
+        <span class="sq">NB</span>
+        <span class="tx note">新标签页一律在后台打开，<span class="hl">不抢你的焦点</span>。它干它的，你该干嘛干嘛——这是这个扩展从第一行代码起就守着的规矩。</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 附录 A ============ -->
+  <div class="sec" style="margin-top:52px"><span class="no">APPENDIX</span><h3>附录</h3><span class="rule"></span><span class="meta">A. 手动加载 · B. 规格对比</span></div>
+
+  <details>
+    <summary>
+      <span class="apx">附录 A</span>
+      <span class="ttl">开发者手动加载</span>
+      <span class="sig">商店打不开，或者你已经 clone 了仓库——四步，看图就够</span>
+      <span class="pm"></span>
+    </summary>
+    <div class="apxbody">
+      <div class="substeps">
+
+        <div class="sub">
+          <div class="sno">A.1</div>
+          <div class="fig">
+            <svg viewBox="0 0 236 104" role="img" aria-label="在地址栏粘贴 chrome://extensions">
+              <text class="m s" x="8" y="18">地址栏 · 只能你自己粘</text>
+              <rect class="fw ln" x="8" y="32" width="220" height="34" rx="4"/>
+              <circle class="ln2" cx="28" cy="49" r="7"/>
+              <text class="m" x="46" y="53">chrome://extensions</text>
+              <path class="ac" d="M8 78 H126"/>
+            </svg>
+          </div>
+          <h5>打开扩展管理页</h5>
+          <p class="note">网页不许直接跳 <span class="mono">chrome://</span> 开头的地址，只能你自己粘进地址栏。Edge 用 <span class="mono">edge://extensions</span>，Brave 用 <span class="mono">brave://extensions</span>。</p>
+          <div class="act"><button class="btn btn-ghost" data-copy="chrome://extensions"><span class="lbl">复制地址</span></button></div>
+        </div>
+
+        <div class="sub">
+          <div class="sno">A.2</div>
+          <div class="fig">
+            <svg viewBox="0 0 236 104" role="img" aria-label="打开右上角的开发者模式开关">
+              <rect class="fw ln2" x="8" y="12" width="220" height="80" rx="4"/>
+              <text class="s" x="20" y="40" font-size="12">开发者模式</text>
+              <rect class="fa" x="164" y="26" width="48" height="24" rx="4"/>
+              <circle cx="200" cy="38" r="8" fill="#fffefa"/>
+              <rect class="fg" x="20" y="62" width="120" height="8" rx="2"/>
+              <rect class="fg" x="20" y="76" width="86" height="8" rx="2"/>
+            </svg>
+          </div>
+          <h5>右上角打开「开发者模式」</h5>
+          <p class="note">开关在这一页的右上角。打开它，页面上会多出一行按钮。</p>
+        </div>
+
+        <div class="sub">
+          <div class="sno">A.3</div>
+          <div class="fig">
+            <svg viewBox="0 0 236 104" role="img" aria-label="点击加载已解压的扩展程序按钮">
+              <rect class="fw ln2" x="8" y="12" width="220" height="80" rx="4"/>
+              <rect class="fw ac" x="16" y="34" width="140" height="28" rx="4"/>
+              <text class="o" x="86" y="52" text-anchor="middle" font-size="11">加载已解压的扩展程序</text>
+              <rect class="ln2" x="164" y="34" width="30" height="28" rx="4"/>
+              <rect class="ln2" x="200" y="34" width="26" height="28" rx="4"/>
+              <path class="fi" d="M96 62 L96 84 L102 78 L106 88 L112 86 L108 76 L115 76 Z"/>
+            </svg>
+          </div>
+          <h5>点「加载已解压的扩展程序」</h5>
+          <p class="note">左起第一颗按钮。点开会弹出文件选择框。</p>
+        </div>
+
+        <div class="sub">
+          <div class="sno">A.4</div>
+          <div class="fig">
+            <svg viewBox="0 0 236 108" role="img" aria-label="终端打开扩展文件夹，拖到扩展页上">
+              <rect class="fw ln" x="8" y="6" width="220" height="40" rx="4"/>
+              <text class="m" x="16" y="22" style="font-size:10px">$ npx huashu-chrome \</text>
+              <text class="m" x="16" y="38" style="font-size:10px">    extension --reveal</text>
+              <path class="ln" d="M14 60 H42 L47 66 H94 V96 H14 Z"/>
+              <text class="m s" x="54" y="84" text-anchor="middle" font-size="8">extension</text>
+              <path class="ac" d="M106 78 H146 M138 71 L146 78 L138 85"/>
+              <rect class="fw ac" x="156" y="56" width="72" height="44" rx="4"/>
+              <text class="o" x="192" y="75" text-anchor="middle" font-size="9">扩展管理页</text>
+              <text class="m s" x="192" y="90" text-anchor="middle" font-size="8">拖到这里</text>
+            </svg>
+          </div>
+          <h5>把扩展文件夹拖进来</h5>
+          <p class="note">回终端跑 <span class="mono">npx huashu-chrome extension --reveal</span>，扩展文件夹会在访达 / 资源管理器里被选中。把它拖到扩展管理页上就装好了；或者在 A.3 弹出的选择框里选中它。这一页不放路径——它在你自己的终端里。</p>
+          <div class="act"><button class="btn btn-ghost" data-copy="npx huashu-chrome extension --reveal"><span class="lbl">复制命令</span></button></div>
+        </div>
+
+      </div>
+      <p class="warn">手动加载的扩展 ID 和商店版一致：<span class="mono">{{EXT_ID}}</span>。装完同样回终端跑一次 <span class="mono">npx huashu-chrome doctor</span>。改过扩展代码的话，回 <span class="mono">chrome://extensions</span> 点一次「重新加载」，再刷新目标页面。</p>
+    </div>
+  </details>
+
+  <!-- ============ 附录 B 规格表 ============ -->
+  <details open>
+    <summary>
+      <span class="apx">附录 B</span>
+      <span class="ttl">规格对比：为什么是它</span>
+      <span class="sig">同类方案在七条硬指标上的差别</span>
+      <span class="pm"></span>
+    </summary>
+    <div class="apxbody">
+      <table class="spec">
+        <thead>
+          <tr><th style="width:19%"></th><th class="me">huashu-chrome</th><th>Claude in Chrome</th><th>ChatGPT 扩展（Codex）</th><th>Playwright MCP</th><th>chrome-devtools-mcp</th><th>Browser Use</th></tr>
+        </thead>
+        <tbody>
+          <tr><th>用你日常的 Chrome，带真实登录态</th><td class="me"><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ac" cx="9" cy="9" r="7.5"/><path class="ac" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>就是眼前这个</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>要走扩展模式</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>Chrome 144+ 逐次授权</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>Harness 接管才行</span></td></tr>
+          <tr><th>任何支持 MCP 的 agent 都能接</th><td class="me"><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ac" cx="9" cy="9" r="7.5"/><path class="ac" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>20+ 家通用</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg>只限 Anthropic 客户端</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg>Codex CLI 用不了</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg></span></td></tr>
+          <tr><th>不改启动参数、不开调试端口</th><td class="me"><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ac" cx="9" cy="9" r="7.5"/><path class="ac" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>装个扩展就行</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>扩展模式才免</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg>要开远程调试</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg>装 Chromium 或开远程调试</span></td></tr>
+          <tr><th>多个 agent 同时干活互不抢页</th><td class="me"><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ac" cx="9" cy="9" r="7.5"/><path class="ac" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>每会话一槽，撞车当场拦</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>每会话一标签组</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><text x="9" y="13" text-anchor="middle" font-size="11" fill="#a8a29e" font-family="ui-monospace,Menlo,Consolas,monospace">?</text></svg>官方未说明</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>每客户端一标签组</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>靠实验开关</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>共用一条道会抢</span></td></tr>
+          <tr><th>出厂带站点经验，越用越快</th><td class="me"><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ac" cx="9" cy="9" r="7.5"/><path class="ac" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>{{SITE_COUNT}} 站实测笔记＋本机回流</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>只有通用记忆</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>有，默认关闭</span></td></tr>
+          <tr><th>验证码、扫码、付款交还给人</th><td class="me"><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ac" cx="9" cy="9" r="7.5"/><path class="ac" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>ask 工具，付款闸在扩展里</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>遇到就暂停</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>只确认敏感动作</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>云端版才有</span></td></tr>
+          <tr><th>看得见谁在控哪一页</th><td class="me"><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ac" cx="9" cy="9" r="7.5"/><path class="ac" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>标签组＋描边＋驾驶舱</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>彩色标签组</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><text x="9" y="13" text-anchor="middle" font-size="11" fill="#a8a29e" font-family="ui-monospace,Menlo,Consolas,monospace">?</text></svg>官方未说明</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>按客户端命名标签组</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>标题加个标记</span></td></tr>
+        </tbody>
+      </table>
+      <p class="legend"><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>具备</span><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>部分具备 / 有前置条件</span><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg>不具备</span><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><text x="9" y="13" text-anchor="middle" font-size="11" fill="#a8a29e" font-family="ui-monospace,Menlo,Consolas,monospace">?</text></svg>官方未说明</span></p>
+      <p class="warn">核查日期 2026-09-09，每一格都对着官方文档或官方仓库填的；完整八方案矩阵和每格来源见仓库里的 <a href="https://github.com/alchaincyf/huashu-chrome/blob/master/docs/对比.md" target="_blank" rel="noopener">docs/对比.md</a>。Playwright MCP 的扩展模式也能拿到登录态、也有按客户端隔离——它缺的是站点经验和人工交接。</p>
+    </div>
+  </details>
+
+  <!-- ============ 页脚 ============ -->
+  <div class="sec" style="margin-top:52px"><span class="no">END</span><h3>联系我们</h3><span class="rule"></span><span class="meta">OPEN SOURCE · MIT</span></div>
+
+  <div class="star">
+    <div class="tx">
+      <b>觉得有用？</b>
+      一个 star 是对这个开源项目最直接的支持。这东西是一个人写的，star 是它继续更新下去的理由。
+    </div>
+    <a class="btn" href="https://github.com/alchaincyf/huashu-chrome" target="_blank" rel="noopener">去 GitHub 点个 star ↗</a>
+  </div>
+
+  <footer class="colophon">
+    <span>huashu-chrome {{VERSION}}</span><span class="sep">·</span>
+    <span>扩展 ID {{EXT_ID}}</span><span class="sep">·</span>
+    <a href="https://www.huasheng.ai/huashu-chrome/" target="_blank" rel="noopener">huasheng.ai/huashu-chrome</a><span class="sep">·</span>
+    <a href="https://github.com/alchaincyf/huashu-chrome" target="_blank" rel="noopener">github.com/alchaincyf/huashu-chrome</a><span class="sep">·</span>
+    <span>作者 花叔</span>
+  </footer>
+
+</div>
+
+<script>
+function copyText(t){
+  try{ if(navigator.clipboard && window.isSecureContext){ navigator.clipboard.writeText(t); return; } }catch(e){}
+  var ta=document.createElement('textarea');
+  ta.value=t; ta.setAttribute('readonly','');
+  ta.style.cssText='position:fixed;top:0;left:0;opacity:0';
+  document.body.appendChild(ta); ta.select();
+  try{ document.execCommand('copy'); }catch(e){}
+  document.body.removeChild(ta);
+}
+document.addEventListener('click', function(e){
+  var b = e.target.closest('[data-copy]');
+  if(!b) return;
+  copyText(b.getAttribute('data-copy'));
+  var s = b.querySelector('.lbl') || b;
+  if(s.dataset.busy) return;
+  var old = s.textContent;
+  s.dataset.busy = '1'; s.textContent = '已复制';
+  setTimeout(function(){ s.textContent = old; delete s.dataset.busy; }, 1600);
+});
+</script>
+</body>
+</html>

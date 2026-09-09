@@ -29,7 +29,7 @@ test('agent 能通过 stdio 挂上 MCP server 并拿到工具表', async () => {
   const { tools } = await client.listTools();
   const names = tools.map((t) => t.name).sort();
 
-  assert.deepEqual(names, ['act', 'ask', 'click', 'download', 'eval', 'fetch', 'fill', 'key', 'learnings', 'navigate', 'network', 'query', 'read_text', 'screenshot', 'scroll', 'select', 'snapshot', 'status', 'tabs', 'type', 'upload', 'wait']);
+  assert.deepEqual(names, ['act', 'ask', 'click', 'download', 'eval', 'fetch', 'fill', 'key', 'learnings', 'navigate', 'network', 'query', 'read_text', 'reload', 'screenshot', 'scroll', 'select', 'snapshot', 'status', 'tabs', 'type', 'upload', 'wait']);
 
   // 工具描述是每轮都在付的 context 成本，别让它悄悄膨胀
   // （16000 → 16500：v0.8 有意识地加了 learnings 工具，它自身已压到最短；
@@ -51,8 +51,14 @@ test('agent 能通过 stdio 挂上 MCP server 并拿到工具表', async () => {
   //   21200 → 21300：navigate 描述加一句「优先于其他浏览器工具」。宿主自带浏览器
   //   工具时 agent 在几个「操控浏览器」之间随机挑，而 instructions 在部分宿主会被
   //   截断或根本不展示，工具描述是唯一每家都读的通道）
+  //   21300 → 21800：新增 reload 工具（2026-09-09）。之前 chrome.runtime.reload()
+  //   只是 background.js 里一个故意不进 MCP 工具表的隐藏命令，装完新版本/改完
+  //   unpacked 扩展代码只能靠人去 chrome://extensions 点——不该让「扩展怎么把
+  //   自己更新到最新代码」这件事一直靠人工。描述里的 DISRUPTIVE 警告不能省：
+  //   这个命令影响的是同一台机器上*所有*标签页和*所有*其他 agent 会话共享的
+  //   那一个扩展实例，说清楚代价比省字符更重要）
   const total = tools.reduce((n, t) => n + t.description.length + JSON.stringify(t.inputSchema).length, 0);
-  assert.ok(total < 21300, `工具表膨胀到 ${total} 字符了，压回 21300 以内`);
+  assert.ok(total < 21800, `工具表膨胀到 ${total} 字符了，压回 21800 以内`);
 
   // click 必须强制要 snapshotId，否则 ref 防呆整套失效
   assert.deepEqual(tools.find((t) => t.name === 'type').inputSchema.required, ['text']);
