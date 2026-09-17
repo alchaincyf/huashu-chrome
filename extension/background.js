@@ -2055,7 +2055,7 @@ const HANDLERS = {
     const rows = result.list;
     if (!rows.length) return { text: '这个页面没有记录到网络请求。加 reload:true 刷新后重试。' };
     return {
-      text: `${rows.length} 条请求（带响应体大小）。用 body:"<url片段>" 取某一条的完整响应：\n\n`
+      text: `${rows.length} 条请求（带响应体大小）。用 body:"url片段" 取某一条的完整响应：\n\n`
         + rows.map((r) => `${String(r.s).padEnd(4)} ${String(r.m).padEnd(5)} ${String(r.kb).padStart(4)}KB  ${r.url}`).join('\n'),
     };
   },
@@ -2068,6 +2068,11 @@ const HANDLERS = {
   // 而扩展有 host_permissions，跨域不受限。
   async fetch(p, tabId) {
     if (p.binary && p.via !== 'page') {
+      // SSRF/凭证防护：扩展侧 fetch 带 host_permissions 全域权限，不受页面 CORS 约束，
+      // URL 直接来自 MCP 指令——禁止带着登录态请求内网/本机地址。
+      if (!/^https?:\/\//i.test(p.url) || /^https?:\/\/(localhost|0\.0\.0\.0|\[?::1\]?|127\.|10\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(p.url)) {
+        throw err('INVALID', '不允许扩展侧带登录态请求内网/本机地址，防止 SSRF 与凭证泄露。');
+      }
       try {
         const res = await fetch(p.url, { credentials: 'include' });
         const bytes = new Uint8Array(await res.arrayBuffer());
