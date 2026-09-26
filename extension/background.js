@@ -2465,8 +2465,13 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   }
   if (Object.keys(shrunk).length) await chrome.storage.local.set(shrunk);
   const sess = await chrome.storage.session.get(null);
+  // 这里曾经多写了一个 `|| k === childKey(tabId)`，但 childKey 从未定义过
+  // （重构时留下的死代码）。JS 的 || 会短路，所以只要某个 key 既不匹配
+  // seen:*:<tabId>、也不等于 frames:<tabId>，就会去求值 childKey → 抛
+  // ReferenceError；而这个异常发生在下面 remove() / emit('tab_closed') 之前，
+  // 于是 seen:/frames: 键永远清不掉、桥也收不到标签页关闭事件。
   const gone = Object.keys(sess).filter((k) =>
-    (k.startsWith('seen:') && k.endsWith(':' + tabId)) || k === frameSnapKey(tabId) || k === childKey(tabId));
+    (k.startsWith('seen:') && k.endsWith(':' + tabId)) || k === frameSnapKey(tabId));
   if (gone.length) await chrome.storage.session.remove(gone);
   await noteMarked(tabId, false);
   emit('tab_closed', { tabId });
