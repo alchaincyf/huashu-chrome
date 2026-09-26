@@ -286,8 +286,9 @@ const TOOLS = [
   {
     name: 'download',
     description:
-      'Download a URL via the browser itself. For anything large (video, archives) where fetch+binary would ' +
-      'blow up at its 12MB cap. Straight to disk, never opens the OS save dialog.',
+      'LAST RESORT — if Chrome asks where to save each file, this lands a save dialog on the USER screen. ' +
+      'Try first: `fetch` binary+savePath → same with via:"page" → real URL from `network` + fetch. ' +
+      'Only if all three fail, `ask` listing what you tried. Rules: skill ch.4.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -517,8 +518,8 @@ EVERY write returns an effect line — read it: "submitted" vs "blocked". On a n
 warning change target or approach, never repeat the same call.
 
 A STEP NEEDS A HUMAN (captcha, QR login, OTP, payment)? Call \`ask\` — never retry or work
-around. OS surfaces (file dialogs, permission prompts, chrome://) are beyond any extension:
-tell the user, stop.`;
+around. Never let a download put a dialog on their screen: see the \`download\` tool for the
+required order. OS file dialogs are beyond any extension.`;
 
 // 页面来的文本全部走这里。边界标记 + 降权说明，both 是给模型看的。
 function wrapUntrusted(body, meta = '') {
