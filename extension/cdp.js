@@ -11,6 +11,19 @@
 //
 // 全程 attach 是另一条路（BrowserSkill 走的就是这条），代价是黄条常驻。
 // 我们的差异点就在这里：同样的可靠性，只在必要的那几秒有黄条。
+//
+// ⚠️ 但黄条的根治手段不在扩展里，在浏览器启动参数：
+//
+//     chrome --silent-debugger-extension-api
+//
+// 这是 Chromium 的正式开关（chrome/common/chrome_switches.h 的
+// kSilentDebuggerExtensionApi），带上它 attach 就不再弹黄条。扩展自己关不掉
+// 这条原生 UI——它由浏览器画在页面之上，不在 DOM 里，content script 碰不到。
+//
+// 除了吵，黄条还有个隐性代价：**它会挤压页面视口高度**（约 55px），attach 时
+// 出现、detach 时消失，于是同一批截图的前后帧尺寸会对不上。2026-09-26 在
+// ip33 魔方页实测：连续截图的高度在 1610 / 1722 之间来回跳，根因就是它跟着
+// L2 的通断反复出现。screenshot() 里为此钉了一层视口覆盖（见该函数注释）。
 
 const L2_IDLE_MS = 5000;
 const PROTOCOL = '1.3';
@@ -80,7 +93,7 @@ async function ensureAttached(tabId) {
     throw new L2Unavailable(`attach 失败：${m}`, 'L2_BUSY');
   }
 
-  sessions.set(tabId, { ready: true, timer: null });
+  sessions.set(tabId, { ready: true, timer: null, metrics: null });
 
   // 这一行是整个 L2 能不能在后台标签页工作的开关，2026-08-26 实测确认：
   //
@@ -114,6 +127,12 @@ export async function detach(tabId) {
   if (s?.timer) clearTimeout(s.timer);
   sessions.delete(tabId);
   dialogs.delete(tabId);
+  // 截图时钉的视口要还原，否则用户那一页会一直停在被钉住的尺寸上
+  if (s?.metrics) {
+    await chrome.debugger
+      .sendCommand({ tabId }, 'Emulation.clearDeviceMetricsOverride')
+      .catch(() => { /* 已经断了，浏览器会自己收 */ });
+  }
   try {
     await chrome.debugger.detach({ tabId });
   } catch {
@@ -277,19 +296,42 @@ export async function setFileInput(tabId, selector, files) {
 // 默认 60% 缩放的 JPEG：视觉 token 按像素数算，缩到 0.6 就是省掉 64%，而
 // 「这一页大概长什么样、按钮在哪」这类问题 60% 足够看清。要读小字、量像素
 // 传 full:true 拿 1:1 PNG。缩放走 clip.scale——Chrome 在合成时缩，不是拍完再缩。
+// 采集期间钉住视口尺寸。
+//
+// 黄条跟着 L2 的通断出现/消失，页面跟着重排，同一批截图的前后帧就不是一个
+// 几何（实测 1610 / 1722 两种高度来回跳）。这里在本会话第一次截图时量一次，
+// 之后整段会话都用它：setDeviceMetricsOverride 不改页面此刻的样子，只是让它
+// 在快门落下前后不能再变，拍出来每一帧因此尺寸一致。会话结束（detach）时 clear。
+//
+// 钉不上就静静退回原行为，绝不因为一个取景细节让截图整个失败。
+async function pinViewport(cmd) {
+  const m = await cmd('Page.getLayoutMetrics');
+  const v = m.cssVisualViewport || m.visualViewport || {};
+  return {
+    width: Math.max(1, Math.round(v.clientWidth || 1280)),
+    height: Math.max(1, Math.round(v.clientHeight || 800)),
+  };
+}
+
 export async function screenshot(tabId, { full = false } = {}) {
   return withL2(tabId, async (cmd) => {
+    const s = sessions.get(tabId);
+    let size = s?.metrics;
+    if (!size) {
+      size = await pinViewport(cmd);
+      try {
+        await cmd('Emulation.setDeviceMetricsOverride', { ...size, deviceScaleFactor: 0, mobile: false });
+        if (s) s.metrics = size;
+      } catch { /* 受限页面钉不上：按当前尺寸截，几何可能跳，但不影响内容 */ }
+    }
     if (full) {
       const r = await cmd('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
       return { dataUrl: `data:image/png;base64,${r.data}`, scale: 1 };
     }
     const scale = 0.6;
-    const m = await cmd('Page.getLayoutMetrics');
-    const v = m.cssVisualViewport || m.visualViewport || {};
-    const width = Math.max(1, Math.round(v.clientWidth || 1280)), height = Math.max(1, Math.round(v.clientHeight || 800));
     const r = await cmd('Page.captureScreenshot', {
       format: 'jpeg', quality: 80, captureBeyondViewport: false,
-      clip: { x: 0, y: 0, width, height, scale },
+      clip: { x: 0, y: 0, width: size.width, height: size.height, scale },
     });
     return { dataUrl: `data:image/jpeg;base64,${r.data}`, scale };
   });
