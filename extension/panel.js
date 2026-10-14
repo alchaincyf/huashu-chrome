@@ -9,6 +9,7 @@
 // 网页标题、client 名）一律 textContent——它们都可能源自被注入的页面。
 
 import { compat, compatNote, cmpVersion } from './compat.js';
+import { localizeDocument, t } from './i18n.js';
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => {
@@ -21,14 +22,20 @@ const send = (msg) => chrome.runtime.sendMessage(msg).catch(() => null);
 const MINE = chrome.runtime.getManifest().version;
 const ACT_MS = 5000;   // 「正在做」只亮 5 秒——停手了还亮着就是在骗人
 
+localizeDocument();
+
 $('ver').textContent = `v${MINE}`;
 
-const relTime = (t) => {
-  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
-  if (s < 5) return '刚刚';
-  if (s < 60) return `${s}秒前`;
-  if (s < 3600) return `${Math.floor(s / 60)}分前`;
-  return `${Math.floor(s / 3600)}时前`;
+const relTime = (timestamp) => {
+  const s = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+  if (s < 5) return t('panel_rel_just_now');
+  if (s < 60) return t(`panel_rel_seconds_${s === 1 ? 'one' : 'many'}`, [s]);
+  if (s < 3600) {
+    const minutes = Math.floor(s / 60);
+    return t(`panel_rel_minutes_${minutes === 1 ? 'one' : 'many'}`, [minutes]);
+  }
+  const hours = Math.floor(s / 3600);
+  return t(`panel_rel_hours_${hours === 1 ? 'one' : 'many'}`, [hours]);
 };
 
 let winId = null, tabId = null, actTimer = null;
@@ -49,7 +56,7 @@ async function renderPage() {
 
   box.textContent = '';
   if (!owners.length) {
-    box.appendChild(el('div', 'empty', '这一页没有 agent 在操作。下面列着它们各自在哪一页，点一下就能切过去。'));
+    box.appendChild(el('div', 'empty', t('panel_page_no_agent')));
     return;
   }
 
@@ -63,7 +70,7 @@ async function renderPage() {
 
     if (snap.tabLabel) {
       const b = el('div', 'blk');
-      b.append(el('div', 'lab', '本页'), el('div', null, snap.tabLabel));
+      b.append(el('div', 'lab', t('panel_label_current_page')), el('div', null, snap.tabLabel));
       wrap.appendChild(b);
     }
     const intent = snap.intents?.[o.sid];
@@ -71,14 +78,17 @@ async function renderPage() {
       const b = el('div', 'blk');
       const q = el('div', 'intent', intent.text);
       q.appendChild(el('span', 'ago', relTime(intent.t)));
-      b.append(el('div', 'lab', '准备做'), q);
+      b.append(el('div', 'lab', t('panel_label_intent')), q);
       wrap.appendChild(b);
     }
     if (snap.plan?.length) {
       const p = snap.plan;
       const b = el('div', 'blk');
-      b.append(el('div', 'lab', '接下来'),
-        el('div', null, p.slice(0, 4).join(' → ') + (p.length > 4 ? ` →（还有 ${p.length - 4} 步）` : '')));
+      const more = p.length > 4
+        ? t(`panel_more_steps_${p.length === 5 ? 'one' : 'many'}`, [p.length - 4])
+        : '';
+      b.append(el('div', 'lab', t('panel_label_next')),
+        el('div', null, p.slice(0, 4).join(' → ') + more));
       wrap.appendChild(b);
     }
     if (snap.act && snap.sid === o.sid && Date.now() - snap.actAt < ACT_MS) {
@@ -86,7 +96,7 @@ async function renderPage() {
       const n = el('div', 'now');
       const pl = el('span', 'pulse'); pl.style.background = o.color;
       n.append(pl, el('span', null, snap.act));
-      b.append(el('div', 'lab', '正在做'), n);
+      b.append(el('div', 'lab', t('panel_label_now')), n);
       wrap.appendChild(b);
       clearTimeout(actTimer);
       actTimer = setTimeout(renderPage, ACT_MS - (Date.now() - snap.actAt) + 50);
@@ -100,7 +110,7 @@ async function renderPage() {
         row.append(el('span', 'ago', relTime(r.t)), el('span', null, r.text));
         tl.appendChild(row);
       }
-      b.append(el('div', 'lab', '时间线'), tl);
+      b.append(el('div', 'lab', t('panel_label_timeline')), tl);
       wrap.appendChild(b);
     }
     box.appendChild(wrap);
@@ -116,13 +126,13 @@ async function renderSessions() {
   box.textContent = '';
   const rows = r?.sessions || [];
   if (!rows.length) {
-    box.appendChild(el('div', 'empty', '还没有 agent 在线。在 Claude Code、Codex 这类工具里让它用 huashu-chrome 做件事，这里就会出现。'));
+    box.appendChild(el('div', 'empty', t('panel_sessions_empty')));
     return rows;
   }
   for (const s of rows) {
     const b = el('button');
     const sw = el('span', 'dot'); sw.style.background = s.color;
-    b.append(sw, el('span', 'who', s.label), el('span', 'page', s.title ? `· ${s.title}` : '· 还没打开页面'));
+    b.append(sw, el('span', 'who', s.label), el('span', 'page', s.title ? t('panel_session_page_title', s.title) : t('panel_session_no_page')));
     if (s.tabId) b.onclick = () => send({ __hcPopup: 'focusTab', tabId: s.tabId });
     else b.disabled = true;
     box.appendChild(b);
@@ -144,10 +154,10 @@ function light(state, name, sub, cmd) {
   if (cmd) {
     const c = el('div', 'cmd');
     const code = el('code', null, cmd);
-    const btn = el('button', 'btn ghost', '复制');
+    const btn = el('button', 'btn ghost', t('panel_copy'));
     btn.onclick = async () => {
-      try { await navigator.clipboard.writeText(cmd); btn.textContent = '已复制'; } catch { btn.textContent = '请手动复制'; }
-      setTimeout(() => { btn.textContent = '复制'; }, 1600);
+      try { await navigator.clipboard.writeText(cmd); btn.textContent = t('panel_copied'); } catch { btn.textContent = t('panel_copy_manual'); }
+      setTimeout(() => { btn.textContent = t('panel_copy'); }, 1600);
     };
     c.append(code, btn);
     txt.appendChild(c);
@@ -160,28 +170,28 @@ async function renderConn(sessionCount) {
   const r = (await send({ __hcPopup: 'status' })) || {};
   const box = $('lights');
   box.textContent = '';
-  box.appendChild(light('ok', `浏览器扩展 v${MINE}`, '已装好，正在运行'));
+  box.appendChild(light('ok', t('panel_extension_running', [MINE]), t('panel_extension_installed')));
 
-  let pill = ['bad', '未连接'];
+  let pill = ['bad', t('panel_pill_not_connected')];
   if (r.connected) {
     const level = compat({ ext: MINE, cli: r.bridge });
-    const note = compatNote(level, { ext: MINE, cli: r.bridge });
+    const note = compatNote(level, { ext: MINE, cli: r.bridge, locale: document.documentElement.lang });
     const needCli = level === 'cli-old' || (level === 'protocol' && cmpVersion(MINE, r.bridge) > 0);
-    box.appendChild(light(note ? 'warn' : 'ok', `本地端 v${r.bridge || '?'}`, note || '已连接', needCli ? 'npx -y huashu-chrome@latest install' : null));
-    pill = note ? ['warn', '已连接（有更新）'] : ['ok', '已连接'];
+    box.appendChild(light(note ? 'warn' : 'ok', t('panel_cli_name', [r.bridge || '?']), note || t('panel_cli_connected'), needCli ? 'npx -y huashu-chrome@latest install' : null));
+    pill = note ? ['warn', t('panel_pill_connected_update')] : ['ok', t('panel_pill_connected')];
   } else {
     const never = !r.lastRx;
-    box.appendChild(light('bad', '本地端未连接',
-      never ? '还没装本地端，或者装了但还没有 agent 用过它（本地端由 agent 第一次调用时拉起）。在终端里跑这一行，它会自动配好你电脑上的 agent：'
-        : `上次收到心跳是 ${relTime(r.lastRx)}。先点下面的「重连」；不行再在终端跑：`,
+    box.appendChild(light('bad', t('panel_cli_disconnected'),
+      never ? t('panel_cli_never_used_setup')
+        : t('panel_cli_last_heartbeat', [relTime(r.lastRx)]),
       never ? 'npx -y huashu-chrome@latest install' : 'npx huashu-chrome doctor'));
-    if (r.offscreenError) box.appendChild(light('warn', '后台文档建不起来', r.offscreenError));
+    if (r.offscreenError) box.appendChild(light('warn', t('panel_background_doc_error'), r.offscreenError));
   }
   $('reconnRow').hidden = !!r.connected;
 
   box.appendChild(sessionCount
-    ? light('ok', `${sessionCount} 个 agent 在线`, '每个 agent 用自己的颜色，页面描边和标签组同色')
-    : light('', '暂无 agent 在线', '在你的 agent 里说一句「用 huashu-chrome 打开……」就会出现在这里'));
+    ? light('ok', t(`panel_agents_online_${sessionCount === 1 ? 'one' : 'many'}`, [sessionCount]), t('panel_agents_colors_hint'))
+    : light('', t('panel_no_agents'), t('panel_no_agents_hint')));
 
   $('pilldot').className = `dot ${pill[0]}`;
   $('pilltxt').textContent = pill[1];
@@ -194,10 +204,10 @@ async function refreshAll() {
 
 $('reconn').onclick = async () => {
   $('reconn').disabled = true;
-  $('reconn').textContent = '连接中…';
+  $('reconn').textContent = t('panel_reconnect_connecting');
   await send({ __hcPopup: 'connect' });
   $('reconn').disabled = false;
-  $('reconn').textContent = '重连';
+  $('reconn').textContent = t('panel_reconnect');
   refreshAll();
 };
 

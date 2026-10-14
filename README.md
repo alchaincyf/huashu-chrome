@@ -2,6 +2,8 @@
 
 # huashu-chrome
 
+[简体中文](README.md) · [English](README.en.md)
+
 <img src="https://raw.githubusercontent.com/alchaincyf/huashu-chrome/master/media/architecture.png" alt="系统原理图：一条命令穿过五个器官——npm 包 → CLI → MCP server → 本地桥 → Chrome 扩展，最后落在你真实浏览器的真实按钮上" width="100%">
 
 > *「工具返回『已点击』不算数，页面真的动了才算。」*
@@ -137,6 +139,18 @@ npx huashu-chrome doctor
 
 看到「握手正常 · Chrome 扩展在线」就成了。桥进程由 agent 首次调用时自动拉起
 （doctor 发现桥没跑也会先拉一个再探），你不用手动开任何东西。
+
+### 语言
+
+单次运行可用 `--lang en` 或 `--lang zh-CN` 选择 CLI 和安装引导页的语言：
+
+```bash
+npx huashu-chrome install --lang en
+```
+
+也可以设置 `HUASHU_CHROME_LANG` 作为默认值。优先级是 CLI 显式参数 > `HUASHU_CHROME_LANG` > 操作系统区域设置。中文区域（例如 `zh`、`zh-CN`、`zh-TW`）使用简体中文 `zh-CN`，其他区域使用英文。
+
+Chrome 扩展界面跟随 Chrome 自身的界面语言，不受 CLI 参数或环境变量覆盖。英文引导和界面已提供；浏览器工具回执与随包站点经验暂时保留原有语言。
 
 <details>
 <summary>手动配置（不想让 install 碰你的配置文件）</summary>
@@ -538,38 +552,4 @@ MIT License © [花叔 Huashu](https://github.com/alchaincyf)
 
 ## English
 
-**huashu-chrome** lets any MCP-capable AI agent drive *your own* Chrome — with all your logins
-already in it. It is an MCP server plus a Chrome extension, 22 browser tools, installed with one
-command. No API keys, no separate headless browser, no re-login, no captcha farm: the agent acts
-as you, in the browser you already have open.
-
-Works with Claude Code, Codex CLI, Cursor, Gemini CLI, Cline, Windsurf and ~20 other agents
-(`npx huashu-chrome install` detects what is on your machine and writes each one's MCP config).
-
-Four ideas that make it different from a headless-browser MCP:
-
-- **Three information carriers, in order.** Network for data (the API names its own fields, so
-  numbers are never guessed off the screen), DOM for actions (ref-numbered snapshots — coordinates
-  drift and CSS selectors break on redesign, refs do neither), pixels last. The MCP server ships
-  this ordering to the agent as handshake `instructions`.
-- **Every write must report whether the page actually moved.** The biggest failure mode of browser
-  agents is silent failure: the tool returns success, the page did nothing, and the next twenty
-  steps are garbage. Here each write returns effect evidence (`expanded false → true`), and says
-  so explicitly when nothing attributable changed. Batched steps (`act`) verify after each step and
-  stop on the first no-op.
-- **Learnings compound.** Site knowledge ships with the package (`docs/经验/`, ~20 sites with
-  verified endpoints, walls and dead ends, each dated) and the agent writes new findings to
-  `~/.huashu-chrome/learnings/` on your own disk, never uploaded. One Feishu Bitable task took 281
-  calls and 54 minutes to figure out cold; under 10 calls the second time.
-- **Safety lives outside the model.** Page text is demoted to `<page-content untrusted>`; sensitive
-  targets (submit / pay / delete / publish) never auto-retry with trusted events; a payment
-  confirmation card lives *in the extension*, where the agent has no parameter to skip it; every
-  command is audited to `~/.huashu-chrome/audit.jsonl` with credentials redacted by key name.
-  What is **not** done is stated plainly in the 安全 section — money is gated, deletion is not.
-
-You can also see it working: controlled tabs join a colored tab group, the page gets a matching
-outline, a breathing cursor and a small cockpit — all of which are invisible to the agent's own
-screenshots, so it never mistakes our overlay for a page element.
-
-**Install**: `npx huashu-chrome install`, then click through the extension install (browsers do not
-let scripts do that part). Verify with `npx huashu-chrome doctor`.
+Read the [complete English documentation](README.en.md) for installation, configuration, browser tools, safety, and troubleshooting.

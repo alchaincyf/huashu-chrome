@@ -1,0 +1,298 @@
+{
+  "extension_description": {
+    "message": "Let any MCP-capable AI agent control your own Chrome with your existing logins."
+  },
+  "ui_panel_document_title": {
+    "message": "huashu-chrome"
+  },
+  "ui_panel_checking": {
+    "message": "Checking…"
+  },
+  "ui_panel_current_page_heading": {
+    "message": "This page"
+  },
+  "ui_panel_loading": {
+    "message": "Loading…"
+  },
+  "ui_panel_online_agents_heading": {
+    "message": "Online agents"
+  },
+  "ui_panel_connection_heading": {
+    "message": "Connection"
+  },
+  "ui_panel_reconnect": {
+    "message": "Reconnect"
+  },
+  "ui_panel_reconnect_hint": {
+    "message": "The extension is still running; only its connection to the local bridge dropped."
+  },
+  "ui_panel_settings_heading": {
+    "message": "Settings"
+  },
+  "ui_panel_high_fidelity": {
+    "message": "High-fidelity input"
+  },
+  "ui_panel_high_fidelity_hint": {
+    "message": "Use real browser-level input for strict sites and rich-text editors when needed; it disconnects automatically afterward."
+  },
+  "ui_panel_page_marking": {
+    "message": "Page markers"
+  },
+  "ui_panel_page_marking_hint": {
+    "message": "Add a colored outline, cursor, and avatar to pages being controlled; turn this off for screen recordings."
+  },
+  "ui_panel_doctor_footer_before": {
+    "message": "If it will not connect, run "
+  },
+  "ui_panel_doctor_footer_after": {
+    "message": " in a terminal to find where it is stuck."
+  },
+  "ui_panel_rel_just_now": {
+    "message": "just now"
+  },
+  "ui_panel_rel_seconds_one": {
+    "message": "$1 second ago"
+  },
+  "ui_panel_rel_seconds_many": {
+    "message": "$1 seconds ago"
+  },
+  "ui_panel_rel_minutes_one": {
+    "message": "$1 minute ago"
+  },
+  "ui_panel_rel_minutes_many": {
+    "message": "$1 minutes ago"
+  },
+  "ui_panel_rel_hours_one": {
+    "message": "$1 hour ago"
+  },
+  "ui_panel_rel_hours_many": {
+    "message": "$1 hours ago"
+  },
+  "ui_panel_page_no_agent": {
+    "message": "No agent is working on this page. Online agents and their tabs are listed below; select one to switch to it."
+  },
+  "ui_panel_label_current_page": {
+    "message": "PAGE"
+  },
+  "ui_panel_label_intent": {
+    "message": "PLANNING TO"
+  },
+  "ui_panel_label_next": {
+    "message": "UP NEXT"
+  },
+  "ui_panel_more_steps_one": {
+    "message": " → ($1 more step)"
+  },
+  "ui_panel_more_steps_many": {
+    "message": " → ($1 more steps)"
+  },
+  "ui_panel_label_now": {
+    "message": "WORKING NOW"
+  },
+  "ui_panel_label_timeline": {
+    "message": "TIMELINE"
+  },
+  "ui_panel_sessions_empty": {
+    "message": "No agents are online yet. Ask an agent in Claude Code, Codex, or another tool to do something with huashu-chrome, and it will show up here."
+  },
+  "ui_panel_session_page_title": {
+    "message": "· $1"
+  },
+  "ui_panel_session_no_page": {
+    "message": "· No page open yet"
+  },
+  "ui_panel_copy": {
+    "message": "Copy"
+  },
+  "ui_panel_copied": {
+    "message": "Copied"
+  },
+  "ui_panel_copy_manual": {
+    "message": "Copy manually"
+  },
+  "ui_panel_extension_running": {
+    "message": "Browser extension v$1"
+  },
+  "ui_panel_extension_installed": {
+    "message": "Installed and running"
+  },
+  "ui_panel_pill_not_connected": {
+    "message": "Not connected"
+  },
+  "ui_panel_pill_connected_update": {
+    "message": "Connected (update available)"
+  },
+  "ui_panel_pill_connected": {
+    "message": "Connected"
+  },
+  "ui_panel_cli_name": {
+    "message": "Local bridge v$1"
+  },
+  "ui_panel_cli_connected": {
+    "message": "Connected"
+  },
+  "ui_panel_cli_disconnected": {
+    "message": "Local bridge not connected"
+  },
+  "ui_panel_cli_never_used_setup": {
+    "message": "The local bridge is not installed yet, or no agent has used it. It starts automatically the first time an agent calls it. Run this command in a terminal to set up the agents on your computer:"
+  },
+  "ui_panel_cli_last_heartbeat": {
+    "message": "Last heartbeat received $1. Click Reconnect below; if that does not help, run this in a terminal:"
+  },
+  "ui_panel_background_doc_error": {
+    "message": "Could not create the background document"
+  },
+  "ui_panel_agents_online_one": {
+    "message": "$1 agent online"
+  },
+  "ui_panel_agents_online_many": {
+    "message": "$1 agents online"
+  },
+  "ui_panel_agents_colors_hint": {
+    "message": "Each agent has its own color, shared by its page outline and tab group."
+  },
+  "ui_panel_no_agents": {
+    "message": "No agents online"
+  },
+  "ui_panel_no_agents_hint": {
+    "message": "Tell your agent “Use huashu-chrome to open…” and it will appear here."
+  },
+  "ui_panel_reconnect_connecting": {
+    "message": "Connecting…"
+  },
+  "ui_welcome_document_title": {
+    "message": "huashu-chrome is ready"
+  },
+  "ui_welcome_heading": {
+    "message": "Extension installed. One more step."
+  },
+  "ui_welcome_tagline": {
+    "message": "huashu-chrome lets your AI agent work in this browser with all your existing logins."
+  },
+  "ui_welcome_step1_title": {
+    "message": "Browser extension"
+  },
+  "ui_welcome_step1_description": {
+    "message": "Installed and ready."
+  },
+  "ui_welcome_step2_title": {
+    "message": "Run one command in a terminal to connect your agent"
+  },
+  "ui_welcome_step2_before_node": {
+    "message": "It finds the AI agents installed on your computer and configures each one. First install "
+  },
+  "ui_welcome_nodejs_link": {
+    "message": "Node.js"
+  },
+  "ui_welcome_step2_after_node": {
+    "message": " (version 20 or later)."
+  },
+  "ui_welcome_copy": {
+    "message": "Copy"
+  },
+  "ui_welcome_copied": {
+    "message": "Copied"
+  },
+  "ui_welcome_copy_manual": {
+    "message": "Copy manually"
+  },
+  "ui_welcome_waiting_for_connection": {
+    "message": "Waiting for the local bridge to connect… (It starts automatically when an agent first uses it.)"
+  },
+  "ui_welcome_connected": {
+    "message": "Local bridge connected ($1). You can go talk to your agent now."
+  },
+  "ui_welcome_step3_title": {
+    "message": "Say something to your agent"
+  },
+  "ui_welcome_step3_before_example": {
+    "message": "Restart your agent, then try saying:"
+  },
+  "ui_welcome_agent_example": {
+    "message": "Use huashu-chrome to open Xiaohongshu and check the stats on my latest post."
+  },
+  "ui_welcome_step4_title": {
+    "message": "Click the toolbar icon to see what it is doing"
+  },
+  "ui_welcome_step4_description": {
+    "message": "The side panel shows which page it is using, what it plans to do, and what it just did. To keep the icon on the toolbar, click the puzzle-piece next to the address bar, then click the pin beside huashu-chrome."
+  },
+  "ui_welcome_doctor_footer_before": {
+    "message": "Stuck? Run "
+  },
+  "ui_welcome_doctor_footer_after": {
+    "message": " in a terminal to find where it is stuck."
+  },
+  "overlay_ask_default_title": {
+    "message": "huashu-chrome needs your help",
+    "description": "Default title for a human-intervention overlay and notification."
+  },
+  "overlay_ask_cancel": {
+    "message": "Cancel",
+    "description": "Cancel button in the human-intervention overlay."
+  },
+  "overlay_ask_done": {
+    "message": "I'm done",
+    "description": "Completion button in the human-intervention overlay."
+  },
+  "overlay_ask_note_placeholder": {
+    "message": "(Optional) Note for the agent",
+    "description": "Placeholder for an optional note in the human-intervention overlay."
+  },
+  "overlay_fact_button": {
+    "message": "Button:",
+    "description": "Label for the button fact in human-intervention and payment overlays."
+  },
+  "overlay_fact_amount": {
+    "message": "Amount:",
+    "description": "Label for the amount fact in human-intervention and payment overlays."
+  },
+  "overlay_fact_page": {
+    "message": "Page:",
+    "description": "Label for the page fact in human-intervention and payment overlays."
+  },
+  "overlay_fact_address": {
+    "message": "Address:",
+    "description": "Label for the address fact in human-intervention and payment overlays."
+  },
+  "overlay_marker_working": {
+    "message": "$1 is working on this page",
+    "description": "Accessible title for the page marker, with the agent label as $1$."
+  },
+  "overlay_marker_tab_suffix": {
+    "message": " ($1)",
+    "description": "Optional tab label appended to the page marker title."
+  },
+  "overlay_marker_open_hint": {
+    "message": "Click to see what it's doing in the side panel",
+    "description": "Instruction appended to the page marker accessible title."
+  },
+  "overlay_marker_open_failed": {
+    "message": "Click the huashu-chrome toolbar icon to see what it's doing in the side panel",
+    "description": "Hint shown if the page marker cannot open the side panel."
+  },
+  "overlay_pay_notification_title": {
+    "message": "Confirm this payment?",
+    "description": "Desktop notification title for a pending payment confirmation."
+  },
+  "overlay_pay_panel_title": {
+    "message": "Payment needs your confirmation",
+    "description": "Title for the payment confirmation overlay."
+  },
+  "overlay_pay_panel_prompt": {
+    "message": "The agent wants to click this button. It will only click after you confirm.",
+    "description": "Explanation shown in the payment confirmation overlay."
+  },
+  "overlay_pay_confirm": {
+    "message": "Confirm and click",
+    "description": "Confirmation button in the payment overlay."
+  },
+  "overlay_pay_cancel": {
+    "message": "Don't pay",
+    "description": "Cancel button in the payment overlay."
+  },
+  "ui_document_language": {
+    "message": "en"
+  }
+}

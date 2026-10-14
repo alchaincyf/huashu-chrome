@@ -1,0 +1,298 @@
+{
+  "extension_description": {
+    "message": "让任何支持 MCP 的 AI agent 操控你自己的 Chrome，带着全部登录态。"
+  },
+  "ui_panel_document_title": {
+    "message": "huashu-chrome"
+  },
+  "ui_panel_checking": {
+    "message": "检查中…"
+  },
+  "ui_panel_current_page_heading": {
+    "message": "这一页"
+  },
+  "ui_panel_loading": {
+    "message": "读取中…"
+  },
+  "ui_panel_online_agents_heading": {
+    "message": "所有在线的 agent"
+  },
+  "ui_panel_connection_heading": {
+    "message": "连接"
+  },
+  "ui_panel_reconnect": {
+    "message": "重连"
+  },
+  "ui_panel_reconnect_hint": {
+    "message": "插件还在运行，只是断开了与本地端的连接"
+  },
+  "ui_panel_settings_heading": {
+    "message": "设置"
+  },
+  "ui_panel_high_fidelity": {
+    "message": "高保真模式"
+  },
+  "ui_panel_high_fidelity_hint": {
+    "message": "需要时使用浏览器级真实输入，应对严格的站点和富文本编辑器；使用后会自动断开"
+  },
+  "ui_panel_page_marking": {
+    "message": "页面标记"
+  },
+  "ui_panel_page_marking_hint": {
+    "message": "为正在操作的页面添加彩色描边、光标和小头像；录屏演示时可以关闭"
+  },
+  "ui_panel_doctor_footer_before": {
+    "message": "连不上时，在终端运行 "
+  },
+  "ui_panel_doctor_footer_after": {
+    "message": "，它会告诉你卡在哪一步。"
+  },
+  "ui_panel_rel_just_now": {
+    "message": "刚刚"
+  },
+  "ui_panel_rel_seconds_one": {
+    "message": "$1 秒前"
+  },
+  "ui_panel_rel_seconds_many": {
+    "message": "$1 秒前"
+  },
+  "ui_panel_rel_minutes_one": {
+    "message": "$1 分钟前"
+  },
+  "ui_panel_rel_minutes_many": {
+    "message": "$1 分钟前"
+  },
+  "ui_panel_rel_hours_one": {
+    "message": "$1 小时前"
+  },
+  "ui_panel_rel_hours_many": {
+    "message": "$1 小时前"
+  },
+  "ui_panel_page_no_agent": {
+    "message": "当前页面没有 agent 正在操作。下面列出了在线 agent 及其所在页面，点一下即可切换过去。"
+  },
+  "ui_panel_label_current_page": {
+    "message": "当前页面"
+  },
+  "ui_panel_label_intent": {
+    "message": "准备做"
+  },
+  "ui_panel_label_next": {
+    "message": "接下来"
+  },
+  "ui_panel_more_steps_one": {
+    "message": " →（还有 $1 步）"
+  },
+  "ui_panel_more_steps_many": {
+    "message": " →（还有 $1 步）"
+  },
+  "ui_panel_label_now": {
+    "message": "正在做"
+  },
+  "ui_panel_label_timeline": {
+    "message": "时间线"
+  },
+  "ui_panel_sessions_empty": {
+    "message": "还没有 agent 在线。在 Claude Code、Codex 或其他工具中让 agent 用 huashu-chrome 做件事，它就会显示在这里。"
+  },
+  "ui_panel_session_page_title": {
+    "message": "· $1"
+  },
+  "ui_panel_session_no_page": {
+    "message": "· 还没有打开页面"
+  },
+  "ui_panel_copy": {
+    "message": "复制"
+  },
+  "ui_panel_copied": {
+    "message": "已复制"
+  },
+  "ui_panel_copy_manual": {
+    "message": "请手动复制"
+  },
+  "ui_panel_extension_running": {
+    "message": "浏览器扩展 v$1"
+  },
+  "ui_panel_extension_installed": {
+    "message": "已安装，正在运行"
+  },
+  "ui_panel_pill_not_connected": {
+    "message": "未连接"
+  },
+  "ui_panel_pill_connected_update": {
+    "message": "已连接（有可用更新）"
+  },
+  "ui_panel_pill_connected": {
+    "message": "已连接"
+  },
+  "ui_panel_cli_name": {
+    "message": "本地端 v$1"
+  },
+  "ui_panel_cli_connected": {
+    "message": "已连接"
+  },
+  "ui_panel_cli_disconnected": {
+    "message": "本地端未连接"
+  },
+  "ui_panel_cli_never_used_setup": {
+    "message": "本地端尚未安装，或者还没有 agent 用过它。agent 第一次调用时，本地端会自动启动。在终端运行下面这条命令，即可为电脑上的 agent 完成配置："
+  },
+  "ui_panel_cli_last_heartbeat": {
+    "message": "上次收到心跳：$1。先点下面的“重连”；如果仍然不行，再在终端运行："
+  },
+  "ui_panel_background_doc_error": {
+    "message": "无法创建后台文档"
+  },
+  "ui_panel_agents_online_one": {
+    "message": "$1 个 agent 在线"
+  },
+  "ui_panel_agents_online_many": {
+    "message": "$1 个 agent 在线"
+  },
+  "ui_panel_agents_colors_hint": {
+    "message": "每个 agent 使用自己的颜色，页面描边和标签组也会使用同一种颜色。"
+  },
+  "ui_panel_no_agents": {
+    "message": "暂无 agent 在线"
+  },
+  "ui_panel_no_agents_hint": {
+    "message": "对 agent 说一句“用 huashu-chrome 打开……”，它就会显示在这里。"
+  },
+  "ui_panel_reconnect_connecting": {
+    "message": "连接中…"
+  },
+  "ui_welcome_document_title": {
+    "message": "huashu-chrome 已就绪"
+  },
+  "ui_welcome_heading": {
+    "message": "扩展装好了，还差一步"
+  },
+  "ui_welcome_tagline": {
+    "message": "huashu-chrome 让你的 AI agent 使用这个浏览器工作，并保留你已有的全部登录状态。"
+  },
+  "ui_welcome_step1_title": {
+    "message": "浏览器扩展"
+  },
+  "ui_welcome_step1_description": {
+    "message": "已经安装，可以使用了。"
+  },
+  "ui_welcome_step2_title": {
+    "message": "在终端运行一条命令，连接你的 agent"
+  },
+  "ui_welcome_step2_before_node": {
+    "message": "它会自动找到电脑上安装的 AI agent，并逐个完成配置。请先安装 "
+  },
+  "ui_welcome_nodejs_link": {
+    "message": "Node.js"
+  },
+  "ui_welcome_step2_after_node": {
+    "message": "（20 或更高版本）。"
+  },
+  "ui_welcome_copy": {
+    "message": "复制"
+  },
+  "ui_welcome_copied": {
+    "message": "已复制"
+  },
+  "ui_welcome_copy_manual": {
+    "message": "请手动复制"
+  },
+  "ui_welcome_waiting_for_connection": {
+    "message": "等待本地端连接…（agent 首次调用时会自动启动）"
+  },
+  "ui_welcome_connected": {
+    "message": "本地端已连接（$1）。现在可以去和 agent 对话了。"
+  },
+  "ui_welcome_step3_title": {
+    "message": "对你的 agent 说句话"
+  },
+  "ui_welcome_step3_before_example": {
+    "message": "重启 agent 后，可以试着这样说："
+  },
+  "ui_welcome_agent_example": {
+    "message": "用 huashu-chrome 打开小红书，看看我最近一篇笔记的数据"
+  },
+  "ui_welcome_step4_title": {
+    "message": "点工具栏图标，看看它在做什么"
+  },
+  "ui_welcome_step4_description": {
+    "message": "侧栏会显示 agent 正在操作哪个页面、准备做什么，以及刚刚做了什么。建议将图标固定在工具栏：点击地址栏右侧的拼图图标，再点击 huashu-chrome 旁边的图钉。"
+  },
+  "ui_welcome_doctor_footer_before": {
+    "message": "遇到问题？在终端运行 "
+  },
+  "ui_welcome_doctor_footer_after": {
+    "message": "，它会告诉你卡在哪一步。"
+  },
+  "overlay_ask_default_title": {
+    "message": "huashu-chrome 需要你搭把手",
+    "description": "默认人工介入浮条和通知标题。"
+  },
+  "overlay_ask_cancel": {
+    "message": "取消",
+    "description": "人工介入浮条的取消按钮。"
+  },
+  "overlay_ask_done": {
+    "message": "我完成了",
+    "description": "人工介入浮条的完成按钮。"
+  },
+  "overlay_ask_note_placeholder": {
+    "message": "（可选）想对 agent 说的话",
+    "description": "人工介入浮条中可选备注的占位文字。"
+  },
+  "overlay_fact_button": {
+    "message": "按钮：",
+    "description": "人工介入和支付浮条中按钮事实的标签。"
+  },
+  "overlay_fact_amount": {
+    "message": "金额：",
+    "description": "人工介入和支付浮条中金额事实的标签。"
+  },
+  "overlay_fact_page": {
+    "message": "页面：",
+    "description": "人工介入和支付浮条中页面事实的标签。"
+  },
+  "overlay_fact_address": {
+    "message": "地址：",
+    "description": "人工介入和支付浮条中地址事实的标签。"
+  },
+  "overlay_marker_working": {
+    "message": "$1 正在操作这一页",
+    "description": "页内标记的无障碍名称，$1$ 为 agent 标签。"
+  },
+  "overlay_marker_tab_suffix": {
+    "message": "（$1）",
+    "description": "追加到页内标记标题后的可选标签名。"
+  },
+  "overlay_marker_open_hint": {
+    "message": "点一下在侧栏里看它在做什么",
+    "description": "追加到页内标记无障碍名称的操作提示。"
+  },
+  "overlay_marker_open_failed": {
+    "message": "点浏览器工具栏的 huashu-chrome 图标，在侧栏里看它在做什么",
+    "description": "页内标记无法打开侧栏时显示的提示。"
+  },
+  "overlay_pay_notification_title": {
+    "message": "确认这笔支付？",
+    "description": "待确认支付的桌面通知标题。"
+  },
+  "overlay_pay_panel_title": {
+    "message": "要花钱了，确认一下",
+    "description": "支付确认浮条标题。"
+  },
+  "overlay_pay_panel_prompt": {
+    "message": "agent 请求点击这个按钮。确认之后才会真的点下去。",
+    "description": "支付确认浮条中的说明文字。"
+  },
+  "overlay_pay_confirm": {
+    "message": "确认，点下去",
+    "description": "支付浮条中的确认按钮。"
+  },
+  "overlay_pay_cancel": {
+    "message": "不要",
+    "description": "支付浮条中的取消按钮。"
+  },
+  "ui_document_language": {
+    "message": "zh-CN"
+  }
+}

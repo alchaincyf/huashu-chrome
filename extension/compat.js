@@ -37,7 +37,15 @@ export const UPDATE_EXT = '商店装的扩展 Chrome 会在几小时内自动更
 export const UPDATE_CLI = '在终端跑一次 npx -y huashu-chrome@latest install，然后重启你的 agent。';
 
 // 给人看的一句话。same / patch 返回空串——没事就别说话。
-export function compatNote(level, { ext, cli }) {
+export function compatNote(level, { ext, cli, locale = 'zh-CN' }) {
+  if (!/^zh(?:[-_]|$)/i.test(locale)) {
+    const updateExt = 'Chrome automatically updates store-installed extensions within a few hours. To update now, open chrome://extensions, enable Developer mode, and click Update. For an unpacked extension, click Reload instead.';
+    const updateCli = 'Run npx -y huashu-chrome@latest install in your terminal, then restart your agent.';
+    if (level === 'protocol') return `Extension v${ext} and local package v${cli} use incompatible communication protocols; commands may fail. ${cmpVersion(ext, cli) < 0 ? updateExt : updateCli}`;
+    if (level === 'ext-old') return `Extension v${ext} is older than local package v${cli}; new features may be unavailable. ${updateExt}`;
+    if (level === 'cli-old') return `Local package v${cli} is older than extension v${ext}; update to use new features. ${updateCli}`;
+    return '';
+  }
   if (level === 'protocol') return `扩展 v${ext} 和本地端 v${cli} 的通信协议不兼容，命令可能失败。${cmpVersion(ext, cli) < 0 ? UPDATE_EXT : UPDATE_CLI}`;
   if (level === 'ext-old') return `扩展 v${ext} 比本地端 v${cli} 旧，新功能可能还用不了。${UPDATE_EXT}`;
   if (level === 'cli-old') return `本地端 v${cli} 比扩展 v${ext} 旧，有新功能没用上。${UPDATE_CLI}`;

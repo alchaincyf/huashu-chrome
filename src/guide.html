@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="{{LOCALE}}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>huashu-chrome · 安装说明书</title>
+<title>{{t:guideTitle}}</title>
 <style>
 :root{
   --paper:#f6f4ee;
@@ -210,7 +210,7 @@ svg text.b{font-weight:700}
     <div class="markbox"><div class="ico"></div></div>
     <div>
       <h1>huashu-chrome</h1>
-      <div class="sub">安装说明书 · INSTALLATION MANUAL</div>
+      <div class="sub">{{t:masthead}}</div>
     </div>
     <div class="doc">
       DOC. HC—{{VERSION}}<br>
@@ -221,19 +221,19 @@ svg text.b{font-weight:700}
 
   <section class="hero">
     <div>
-      <h2>终端那边已经配好了，<br>只差浏览器这一下。</h2>
-      <p class="lead">你的 agent 刚刚替你写完了 MCP 配置。剩下的只有一件事：把 Chrome 扩展装上。装上之后它会自动连上本机的桥，你的 agent 就能操控你自己日常在用的这个 Chrome——带着全部登录态。</p>
-      <p class="lead" style="margin-top:10px">下面三步，约 40 秒。每一步都配了图，图上圈出来的地方就是你要点的地方。</p>
+      <h2>{{t:heroTitleFirst}}<br>{{t:heroTitleSecond}}</h2>
+      <p class="lead">{{t:heroLead}}</p>
+      <p class="lead" style="margin-top:10px">{{t:heroTiming}}</p>
     </div>
     <aside class="enclosed">
-      <div class="hd"><span class="tag">随附清单 · Enclosed</span><span class="rule"></span><span class="tag">{{AGENT_COUNT}}</span></div>
+      <div class="hd"><span class="tag">{{t:enclosed}}</span><span class="rule"></span><span class="tag">{{AGENT_COUNT}}</span></div>
 {{AGENT_ROWS}}
       <p class="ft">{{AGENT_FOOT}}</p>
     </aside>
   </section>
 
   <!-- ============ SEC.01 装扩展 ============ -->
-  <div class="sec"><span class="no">SEC.01</span><h3>装上扩展</h3><span class="rule"></span><span class="meta">3 STEPS · ≈40s</span></div>
+  <div class="sec"><span class="no">SEC.01</span><h3>{{t:installExtension}}</h3><span class="rule"></span><span class="meta">3 STEPS · ≈40s</span></div>
 
   <div class="steps">
 
@@ -241,7 +241,7 @@ svg text.b{font-weight:700}
     <article class="card">
       <div class="cno"><b>01</b><span class="f">FIG.1.1</span></div>
       <div class="fig">
-        <svg viewBox="0 0 326 176" role="img" aria-label="Chrome 应用商店里的 huashu-chrome 页面">
+        <svg viewBox="0 0 326 176" role="img" aria-label="{{t:storePageAria}}">
           <rect class="fw ln" x="7" y="9" width="312" height="158" rx="4"/>
           <path class="ln2" d="M7 45H319"/>
           <circle class="fl" cx="24" cy="27" r="3.5"/><circle class="fl" cx="37" cy="27" r="3.5"/><circle class="fl" cx="50" cy="27" r="3.5"/>
@@ -249,18 +249,18 @@ svg text.b{font-weight:700}
           <text class="m s" x="76" y="31">chromewebstore.google.com/…</text>
           <rect class="fw ln" x="26" y="62" width="274" height="86" rx="4"/>
           <text class="b" x="88" y="86">huashu-chrome</text>
-          <text class="m s" x="88" y="103">扩展程序 · huasheng.ai</text>
+          <text class="m s" x="88" y="103">{{t:storePublisher}}</text>
           <rect class="fa" x="186" y="112" width="98" height="26" rx="4"/>
-          <text class="w" x="235" y="129" text-anchor="middle" font-size="12">添加至 Chrome</text>
+          <text class="w" x="235" y="129" text-anchor="middle" font-size="12">{{t:addToChrome}}</text>
           <path class="fi" d="M170 118 L170 142 L176 136 L180 147 L186 145 L182 134 L189 134 Z"/>
           <path class="fw" d="M170 118 L170 142 L176 136 L180 147 L186 145 L182 134 L189 134 Z" fill="none" stroke="#fffefa" stroke-width="1.5"/>
         </svg>
         <div class="pin" style="left:12.9%;top:41.5%;width:12.6%;aspect-ratio:1"></div>
       </div>
-      <h4>打开商店页</h4>
-      <p class="note">点下面这个按钮，商店页在新标签页里打开。认准发布者是 <span class="mono">huasheng.ai</span>、图标是右边这个卡通头像。</p>
+      <h4>{{t:openStore}}</h4>
+      <p class="note">{{t:openStoreNote}}</p>
       <div class="act">
-        <a class="btn btn-primary" href="https://chromewebstore.google.com/detail/foiljmaplphdfimfcnfdpekhdnfbgfbf" target="_blank" rel="noopener">添加至 Chrome ↗</a>
+        <a class="btn btn-primary" href="https://chromewebstore.google.com/detail/foiljmaplphdfimfcnfdpekhdnfbgfbf" target="_blank" rel="noopener">{{t:addToChrome}} ↗</a>
         <p class="urlline">chromewebstore.google.com/detail/foiljmaplphdfimfcnfdpekhdnfbgfbf</p>
       </div>
     </article>
@@ -269,7 +269,7 @@ svg text.b{font-weight:700}
     <article class="card">
       <div class="cno"><b>02</b><span class="f">FIG.1.2</span></div>
       <div class="fig">
-        <svg viewBox="0 0 326 176" role="img" aria-label="Chrome 的添加扩展确认弹窗">
+        <svg viewBox="0 0 326 176" role="img" aria-label="{{t:confirmAria}}">
           <rect class="fp ln2" x="7" y="9" width="312" height="34" rx="4"/>
           <rect class="ln2" x="250" y="18" width="16" height="16" rx="3"/>
           <rect class="ln2" x="276" y="18" width="16" height="16" rx="3"/>
@@ -277,69 +277,69 @@ svg text.b{font-weight:700}
           <path class="fw" d="M262 46 L270 56 L254 56 Z"/>
           <path class="ln" d="M254 56 L262 46 L270 56"/>
           <rect class="fw ln" x="36" y="56" width="254" height="102" rx="4"/>
-          <text class="b" x="52" y="80">要添加「huashu-chrome」吗？</text>
+          <text class="b" x="52" y="80">{{t:confirmAdd}}</text>
           <rect class="fg" x="52" y="92" width="176" height="7" rx="3"/>
           <rect class="fg" x="52" y="106" width="140" height="7" rx="3"/>
           <rect class="fa" x="52" y="124" width="112" height="26" rx="4"/>
-          <text class="w" x="108" y="141" text-anchor="middle" font-size="12">添加扩展程序</text>
+          <text class="w" x="108" y="141" text-anchor="middle" font-size="12">{{t:addExtension}}</text>
           <rect class="ln2" x="176" y="124" width="60" height="26" rx="4"/>
-          <text class="s" x="206" y="141" text-anchor="middle">取消</text>
+          <text class="s" x="206" y="141" text-anchor="middle">{{t:cancel}}</text>
         </svg>
       </div>
-      <h4>点「添加扩展程序」</h4>
-      <p class="note">Chrome 会在右上角弹一个确认框，把它要的权限列给你看。点橙色那颗按钮，几秒就装完了。</p>
-      <div class="act"><p class="note" style="font-size:12.5px;color:var(--ink3)">权限只用于操控你打开的标签页，不上传任何数据。</p></div>
+      <h4>{{t:clickAdd}}</h4>
+      <p class="note">{{t:confirmNote}}</p>
+      <div class="act"><p class="note" style="font-size:12.5px;color:var(--ink3)">{{t:permissions}}</p></div>
     </article>
 
     <!-- 03 -->
     <article class="card">
       <div class="cno"><b>03</b><span class="f">FIG.1.3</span></div>
       <div class="fig">
-        <svg viewBox="0 0 326 176" role="img" aria-label="工具栏图标上的灰点消失">
-          <text class="m s" x="14" y="26">TOOLBAR · 装完之后</text>
+        <svg viewBox="0 0 326 176" role="img" aria-label="{{t:toolbarAria}}">
+          <text class="m s" x="14" y="26">{{t:toolbarAfter}}</text>
           <rect class="fp ln2" x="14" y="52" width="122" height="56" rx="4"/>
           <rect class="ln2" x="26" y="66" width="26" height="26" rx="4"/>
           <circle cx="97" cy="96" r="7.5" fill="#a8a29e" stroke="#fffefa" stroke-width="2.5"/>
-          <text class="s" x="14" y="132">灰点 = 还没连上桥</text>
+          <text class="s" x="14" y="132" textLength="156" lengthAdjust="spacingAndGlyphs">{{t:grayDot}}</text>
           <path class="ln" d="M152 80 H182"/>
           <path class="ln" d="M174 73 L182 80 L174 87"/>
           <rect class="fw ac" x="198" y="52" width="114" height="56" rx="4"/>
           <rect class="ln2" x="210" y="66" width="26" height="26" rx="4"/>
-          <text class="o m" x="198" y="132">在线 · 桥已连上</text>
+          <text class="o m" x="190" y="132" textLength="120" lengthAdjust="spacingAndGlyphs">{{t:online}}</text>
           <path class="ac" d="M198 140 H286"/>
         </svg>
         <div class="pin grey" style="left:19.9%;top:38.4%;width:9.5%;aspect-ratio:1"></div>
         <div class="pin" style="left:76.4%;top:38.4%;width:9.5%;aspect-ratio:1"></div>
       </div>
-      <h4>看工具栏：灰点消失</h4>
-      <p class="note">装好后图标出现在工具栏。图标右下角有灰点，说明还没连上本机的桥；灰点消失、图标恢复正常，就是接通了。</p>
-      <div class="act"><p class="note" style="font-size:12.5px;color:var(--ink3)">图标被 Chrome 收进了拼图菜单？点拼图图标，把 huashu-chrome 钉出来。</p></div>
+      <h4>{{t:grayDotHeading}}</h4>
+      <p class="note">{{t:grayDotNote}}</p>
+      <div class="act"><p class="note" style="font-size:12.5px;color:var(--ink3)">{{t:pinExtension}}</p></div>
     </article>
 
     <!-- 04 验证 -->
     <article class="card verify">
       <div class="left">
-        <div class="cno"><b>04</b><span class="f">FIG.1.4 · 验证</span></div>
+        <div class="cno"><b>04</b><span class="f">FIG.1.4 · {{t:verify}}</span></div>
         <div class="fig">
-          <svg viewBox="0 0 560 168" role="img" aria-label="终端里 doctor 命令的成功输出">
+          <svg viewBox="0 0 560 168" role="img" aria-label="{{t:doctorAria}}">
             <rect x="0" y="0" width="560" height="168" rx="4" fill="#29261e"/>
             <text class="m tp" x="22" y="34">$ npx huashu-chrome doctor</text>
-            <text class="m td" x="22" y="62">桥</text>
+            <text class="m td" x="22" y="62">{{t:bridge}}</text>
             <rect x="22" y="76" width="9" height="9" fill="#8c8577"/>
-            <text class="m tm" x="42" y="85">pid 41287 · 端口 8899 · 起于 14:32:07</text>
+            <text class="m tm" x="42" y="85">{{t:terminalStatus}}</text>
             <rect x="22" y="104" width="9" height="9" fill="#f97316"/>
-            <text class="m w" x="42" y="113">握手正常 · Chrome 扩展在线 (v{{VERSION}})</text>
+            <text class="m w" x="42" y="113">{{t:handshakeOnline}}</text>
             <rect x="22" y="132" width="9" height="9" fill="#8c8577"/>
-            <text class="m tm" x="42" y="141">扩展目录 · 已就位</text>
+            <text class="m tm" x="42" y="141">{{t:extensionReady}}</text>
           </svg>
         </div>
       </div>
       <div>
-        <h4>跑一次体检，确认整套跑通</h4>
-        <p class="note" style="margin-top:8px">回到终端，敲这条命令。看到 <span class="hl">「握手正常 · Chrome 扩展在线」</span>就成了——MCP server、本机的桥、Chrome 扩展三段都通了，可以直接让 agent 开始干活。</p>
-        <p class="note" style="margin-top:10px;color:var(--ink3);font-size:12.5px">没看到？点工具栏的 huashu-chrome 图标 →「重连」，几秒后再跑一次。</p>
+        <h4>{{t:doctorHeading}}</h4>
+        <p class="note" style="margin-top:8px">{{t:doctorNote}}</p>
+        <p class="note" style="margin-top:10px;color:var(--ink3);font-size:12.5px">{{t:doctorRetry}}</p>
         <div class="act">
-          <button class="btn btn-ghost" data-copy="npx huashu-chrome doctor"><span class="k">npx huashu-chrome doctor</span><span class="lbl">复制</span></button>
+          <button class="btn btn-ghost" data-copy="npx huashu-chrome doctor"><span class="k">npx huashu-chrome doctor</span><span class="lbl">{{t:copy}}</span></button>
         </div>
       </div>
     </article>
@@ -347,27 +347,27 @@ svg text.b{font-weight:700}
   </div>
 
   <!-- ============ SEC.02 装好后长什么样 ============ -->
-  <div class="sec" style="margin-top:52px"><span class="no">SEC.02</span><h3>装好后长什么样</h3><span class="rule"></span><span class="meta">FIG.2 · 可见性</span></div>
+  <div class="sec" style="margin-top:52px"><span class="no">SEC.02</span><h3>{{t:whatItLooksLike}}</h3><span class="rule"></span><span class="meta">{{t:visibility}}</span></div>
 
   <div class="figwrap">
     <div>
       <div class="stage">
-        <svg viewBox="0 0 720 440" role="img" aria-label="被 agent 操控中的 Chrome 窗口示意">
+        <svg viewBox="0 0 720 440" role="img" aria-label="{{t:controlledChrome}}">
           <!-- 窗口 -->
           <rect class="fp ln" x="6" y="6" width="708" height="428" rx="6"/>
           <circle class="fl" cx="28" cy="30" r="4"/><circle class="fl" cx="44" cy="30" r="4"/><circle class="fl" cx="60" cy="30" r="4"/>
           <!-- 标签组 -->
           <rect class="fa" x="80" y="16" width="52" height="28" rx="4"/>
-          <text class="w b" x="106" y="35" text-anchor="middle" font-size="14">花叔</text>
+          <text class="w b" x="106" y="35" text-anchor="middle" font-size="14">{{t:tabHuashu}}</text>
           <rect class="fw ac" x="136" y="14" width="132" height="32" rx="4"/>
-          <text x="152" y="35">小红书后台</text>
+          <text x="152" y="35">{{t:xiaohongshu}}</text>
           <rect class="ln2" x="276" y="14" width="160" height="32" rx="4"/>
-          <text class="s" x="292" y="35">你自己的其他标签…</text>
+          <text class="s" x="292" y="35">{{t:otherTabs}}</text>
           <!-- 内容区 + 四边描边 -->
           <rect x="16" y="60" width="688" height="364" rx="4" fill="#fffefa" stroke="#f97316" stroke-width="3"/>
           <!-- 浮条 -->
           <rect class="fw ac" x="196" y="80" width="330" height="38" rx="4"/>
-          <text class="o" x="361" y="105" text-anchor="middle" font-size="15">需要人帮忙：验证码 / 扫码 / 付款确认</text>
+          <text class="o" x="361" y="105" text-anchor="middle" font-size="15">{{t:helpBanner}}</text>
           <!-- 页面骨架 -->
           <rect class="fg" x="56" y="150" width="270" height="16" rx="2"/>
           <rect class="fg2" x="56" y="188" width="430" height="10" rx="2"/>
@@ -382,11 +382,11 @@ svg text.b{font-weight:700}
           <path d="M297 283 L297 320 L306 311 L313 326 L321 322 L314 308 L325 308 Z" fill="none" stroke="#fffefa" stroke-width="1.5"/>
           <!-- 驾驶舱 -->
           <rect x="440" y="286" width="248" height="122" rx="4" fill="#29261e"/>
-          <text class="tc" x="458" y="312" font-size="13">正在做什么</text>
+          <text class="tc" x="458" y="312" font-size="13">{{t:doing}}</text>
           <rect x="546" y="303" width="124" height="10" rx="2" fill="#f97316"/>
-          <text class="tc" x="458" y="342" font-size="13">准备做什么</text>
+          <text class="tc" x="458" y="342" font-size="13">{{t:next}}</text>
           <rect x="546" y="333" width="124" height="10" rx="2" fill="#57534e"/>
-          <text class="tc" x="458" y="372" font-size="13">最近时间线</text>
+          <text class="tc" x="458" y="372" font-size="13">{{t:timeline}}</text>
           <rect x="546" y="363" width="124" height="10" rx="2" fill="#57534e"/>
           <!-- 圆标 -->
           <g>
@@ -407,31 +407,31 @@ svg text.b{font-weight:700}
           </g>
         </svg>
       </div>
-      <p class="figcap">FIG.2 — 被 agent 操控中的 Chrome：人眼看得见的四个信号</p>
+      <p class="figcap">{{t:figCaption}}</p>
     </div>
 
     <div>
       <ul class="legend">
-        <li><span class="bdg">A</span><span class="tx">被操控的标签页会进一个彩色标签组<i>组名「花叔」，组色就是这次会话的身份色——同时开两个 agent 也分得清谁在动哪个。</i></span></li>
-        <li><span class="bdg">B</span><span class="tx">页面四边同色描边 + 呼吸泛光的箭头光标<i>光标滑到哪，就是它正在动哪。描边一收，说明这一页它松手了。</i></span></li>
-        <li><span class="bdg">C</span><span class="tx">浏览器侧栏<i>点工具栏图标或页面角落的小头像打开：正在做什么 / 准备做什么 / 最近时间线。不用猜它在想什么，也不占网页。</i></span></li>
-        <li><span class="bdg">D</span><span class="tx">需要人帮忙时弹浮条<i>验证码、扫码、付款确认这类只能你来的事，它停下来等你，你处理完它接着走。</i></span></li>
+        <li><span class="bdg">A</span><span class="tx">{{t:legendA}}<i>{{t:legendADetail}}</i></span></li>
+        <li><span class="bdg">B</span><span class="tx">{{t:legendB}}<i>{{t:legendBDetail}}</i></span></li>
+        <li><span class="bdg">C</span><span class="tx">{{t:legendC}}<i>{{t:legendCDetail}}</i></span></li>
+        <li><span class="bdg">D</span><span class="tx">{{t:legendD}}<i>{{t:legendDDetail}}</i></span></li>
       </ul>
       <div class="notebox">
         <span class="sq">NB</span>
-        <span class="tx note">新标签页一律在后台打开，<span class="hl">不抢你的焦点</span>。它干它的，你该干嘛干嘛——这是这个扩展从第一行代码起就守着的规矩。</span>
+        <span class="tx note">{{t:backgroundTabsBefore}}<span class="hl">{{t:backgroundTabsEmphasis}}</span>{{t:backgroundTabsAfter}}</span>
       </div>
     </div>
   </div>
 
   <!-- ============ 附录 A ============ -->
-  <div class="sec" style="margin-top:52px"><span class="no">APPENDIX</span><h3>附录</h3><span class="rule"></span><span class="meta">A. 手动加载 · B. 规格对比</span></div>
+  <div class="sec" style="margin-top:52px"><span class="no">APPENDIX</span><h3>{{t:appendix}}</h3><span class="rule"></span><span class="meta">{{t:appendices}}</span></div>
 
   <details>
     <summary>
-      <span class="apx">附录 A</span>
-      <span class="ttl">开发者手动加载</span>
-      <span class="sig">商店打不开，或者你已经 clone 了仓库——四步，看图就够</span>
+      <span class="apx">{{t:appendixA}}</span>
+      <span class="ttl">{{t:manualLoad}}</span>
+      <span class="sig">{{t:manualIntro}}</span>
       <span class="pm"></span>
     </summary>
     <div class="apxbody">
@@ -440,121 +440,121 @@ svg text.b{font-weight:700}
         <div class="sub">
           <div class="sno">A.1</div>
           <div class="fig">
-            <svg viewBox="0 0 236 104" role="img" aria-label="在地址栏粘贴 chrome://extensions">
-              <text class="m s" x="8" y="18">地址栏 · 只能你自己粘</text>
+            <svg viewBox="0 0 236 104" role="img" aria-label="{{t:addressBarAria}}">
+              <text class="m s" x="8" y="18">{{t:addressBar}}</text>
               <rect class="fw ln" x="8" y="32" width="220" height="34" rx="4"/>
               <circle class="ln2" cx="28" cy="49" r="7"/>
               <text class="m" x="46" y="53">chrome://extensions</text>
               <path class="ac" d="M8 78 H126"/>
             </svg>
           </div>
-          <h5>打开扩展管理页</h5>
-          <p class="note">网页不许直接跳 <span class="mono">chrome://</span> 开头的地址，只能你自己粘进地址栏。Edge 用 <span class="mono">edge://extensions</span>，Brave 用 <span class="mono">brave://extensions</span>。</p>
-          <div class="act"><button class="btn btn-ghost" data-copy="chrome://extensions"><span class="lbl">复制地址</span></button></div>
+          <h5>{{t:openExtensions}}</h5>
+          <p class="note">{{t:openExtensionsNote}}</p>
+          <div class="act"><button class="btn btn-ghost" data-copy="chrome://extensions"><span class="lbl">{{t:copyAddress}}</span></button></div>
         </div>
 
         <div class="sub">
           <div class="sno">A.2</div>
           <div class="fig">
-            <svg viewBox="0 0 236 104" role="img" aria-label="打开右上角的开发者模式开关">
+            <svg viewBox="0 0 236 104" role="img" aria-label="{{t:developerModeAria}}">
               <rect class="fw ln2" x="8" y="12" width="220" height="80" rx="4"/>
-              <text class="s" x="20" y="40" font-size="12">开发者模式</text>
+              <text class="s" x="20" y="40" font-size="12">{{t:developerMode}}</text>
               <rect class="fa" x="164" y="26" width="48" height="24" rx="4"/>
               <circle cx="200" cy="38" r="8" fill="#fffefa"/>
               <rect class="fg" x="20" y="62" width="120" height="8" rx="2"/>
               <rect class="fg" x="20" y="76" width="86" height="8" rx="2"/>
             </svg>
           </div>
-          <h5>右上角打开「开发者模式」</h5>
-          <p class="note">开关在这一页的右上角。打开它，页面上会多出一行按钮。</p>
+          <h5>{{t:enableDeveloperMode}}</h5>
+          <p class="note">{{t:developerModeNote}}</p>
         </div>
 
         <div class="sub">
           <div class="sno">A.3</div>
           <div class="fig">
-            <svg viewBox="0 0 236 104" role="img" aria-label="点击加载已解压的扩展程序按钮">
+            <svg viewBox="0 0 236 104" role="img" aria-label="{{t:loadUnpackedAria}}">
               <rect class="fw ln2" x="8" y="12" width="220" height="80" rx="4"/>
               <rect class="fw ac" x="16" y="34" width="140" height="28" rx="4"/>
-              <text class="o" x="86" y="52" text-anchor="middle" font-size="11">加载已解压的扩展程序</text>
+              <text class="o" x="86" y="52" text-anchor="middle" font-size="11">{{t:loadUnpacked}}</text>
               <rect class="ln2" x="164" y="34" width="30" height="28" rx="4"/>
               <rect class="ln2" x="200" y="34" width="26" height="28" rx="4"/>
               <path class="fi" d="M96 62 L96 84 L102 78 L106 88 L112 86 L108 76 L115 76 Z"/>
             </svg>
           </div>
-          <h5>点「加载已解压的扩展程序」</h5>
-          <p class="note">左起第一颗按钮。点开会弹出文件选择框。</p>
+          <h5>{{t:clickLoadUnpacked}}</h5>
+          <p class="note">{{t:loadUnpackedNote}}</p>
         </div>
 
         <div class="sub">
           <div class="sno">A.4</div>
           <div class="fig">
-            <svg viewBox="0 0 236 108" role="img" aria-label="终端打开扩展文件夹，拖到扩展页上">
+            <svg viewBox="0 0 236 108" role="img" aria-label="{{t:dragFolderAria}}">
               <rect class="fw ln" x="8" y="6" width="220" height="40" rx="4"/>
               <text class="m" x="16" y="22" style="font-size:10px">$ npx huashu-chrome \</text>
               <text class="m" x="16" y="38" style="font-size:10px">    extension --reveal</text>
               <path class="ln" d="M14 60 H42 L47 66 H94 V96 H14 Z"/>
-              <text class="m s" x="54" y="84" text-anchor="middle" font-size="8">extension</text>
+              <text class="m s" x="54" y="84" text-anchor="middle" font-size="8">{{t:extensionFolder}}</text>
               <path class="ac" d="M106 78 H146 M138 71 L146 78 L138 85"/>
               <rect class="fw ac" x="156" y="56" width="72" height="44" rx="4"/>
-              <text class="o" x="192" y="75" text-anchor="middle" font-size="9">扩展管理页</text>
-              <text class="m s" x="192" y="90" text-anchor="middle" font-size="8">拖到这里</text>
+              <text class="o" x="192" y="75" text-anchor="middle" font-size="9">{{t:extensionsPage}}</text>
+              <text class="m s" x="192" y="90" text-anchor="middle" font-size="8">{{t:dragHere}}</text>
             </svg>
           </div>
-          <h5>把扩展文件夹拖进来</h5>
-          <p class="note">回终端跑 <span class="mono">npx huashu-chrome extension --reveal</span>，扩展文件夹会在访达 / 资源管理器里被选中。把它拖到扩展管理页上就装好了；或者在 A.3 弹出的选择框里选中它。这一页不放路径——它在你自己的终端里。</p>
-          <div class="act"><button class="btn btn-ghost" data-copy="npx huashu-chrome extension --reveal"><span class="lbl">复制命令</span></button></div>
+          <h5>{{t:dragFolder}}</h5>
+          <p class="note">{{t:dragFolderNote}}</p>
+          <div class="act"><button class="btn btn-ghost" data-copy="npx huashu-chrome extension --reveal"><span class="lbl">{{t:copyCommand}}</span></button></div>
         </div>
 
       </div>
-      <p class="warn">手动加载的扩展 ID 和商店版一致：<span class="mono">{{EXT_ID}}</span>。装完同样回终端跑一次 <span class="mono">npx huashu-chrome doctor</span>。改过扩展代码的话，回 <span class="mono">chrome://extensions</span> 点一次「重新加载」，再刷新目标页面。</p>
+      <p class="warn">{{t:manualExtensionBefore}}<span class="mono">{{EXT_ID}}</span>{{t:manualExtensionAfterId}}<span class="mono">npx huashu-chrome doctor</span>{{t:manualExtensionAfterDoctor}}<span class="mono">chrome://extensions</span>{{t:manualExtensionAfterUrl}}</p>
     </div>
   </details>
 
   <!-- ============ 附录 B 规格表 ============ -->
   <details open>
     <summary>
-      <span class="apx">附录 B</span>
-      <span class="ttl">规格对比：为什么是它</span>
-      <span class="sig">同类方案在七条硬指标上的差别</span>
+      <span class="apx">{{t:appendixB}}</span>
+      <span class="ttl">{{t:comparisonTitle}}</span>
+      <span class="sig">{{t:comparisonIntro}}</span>
       <span class="pm"></span>
     </summary>
     <div class="apxbody">
       <table class="spec">
         <thead>
-          <tr><th style="width:19%"></th><th class="me">huashu-chrome</th><th>Claude in Chrome</th><th>ChatGPT 扩展（Codex）</th><th>Playwright MCP</th><th>chrome-devtools-mcp</th><th>Browser Use</th></tr>
+          <tr><th style="width:19%"></th><th class="me">huashu-chrome</th><th>Claude in Chrome</th><th>{{t:competitorChatGpt}}</th><th>Playwright MCP</th><th>chrome-devtools-mcp</th><th>Browser Use</th></tr>
         </thead>
         <tbody>
-          <tr><th>用你日常的 Chrome，带真实登录态</th><td class="me"><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ac" cx="9" cy="9" r="7.5"/><path class="ac" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>就是眼前这个</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>要走扩展模式</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>Chrome 144+ 逐次授权</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>Harness 接管才行</span></td></tr>
-          <tr><th>任何支持 MCP 的 agent 都能接</th><td class="me"><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ac" cx="9" cy="9" r="7.5"/><path class="ac" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>20+ 家通用</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg>只限 Anthropic 客户端</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg>Codex CLI 用不了</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg></span></td></tr>
-          <tr><th>不改启动参数、不开调试端口</th><td class="me"><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ac" cx="9" cy="9" r="7.5"/><path class="ac" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>装个扩展就行</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>扩展模式才免</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg>要开远程调试</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg>装 Chromium 或开远程调试</span></td></tr>
-          <tr><th>多个 agent 同时干活互不抢页</th><td class="me"><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ac" cx="9" cy="9" r="7.5"/><path class="ac" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>每会话一槽，撞车当场拦</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>每会话一标签组</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><text x="9" y="13" text-anchor="middle" font-size="11" fill="#a8a29e" font-family="ui-monospace,Menlo,Consolas,monospace">?</text></svg>官方未说明</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>每客户端一标签组</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>靠实验开关</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>共用一条道会抢</span></td></tr>
-          <tr><th>出厂带站点经验，越用越快</th><td class="me"><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ac" cx="9" cy="9" r="7.5"/><path class="ac" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>{{SITE_COUNT}} 站实测笔记＋本机回流</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>只有通用记忆</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>有，默认关闭</span></td></tr>
-          <tr><th>验证码、扫码、付款交还给人</th><td class="me"><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ac" cx="9" cy="9" r="7.5"/><path class="ac" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>ask 工具，付款闸在扩展里</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>遇到就暂停</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>只确认敏感动作</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>云端版才有</span></td></tr>
-          <tr><th>看得见谁在控哪一页</th><td class="me"><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ac" cx="9" cy="9" r="7.5"/><path class="ac" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>标签组＋描边＋驾驶舱</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>彩色标签组</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><text x="9" y="13" text-anchor="middle" font-size="11" fill="#a8a29e" font-family="ui-monospace,Menlo,Consolas,monospace">?</text></svg>官方未说明</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>按客户端命名标签组</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>标题加个标记</span></td></tr>
+          <tr><th>{{t:criterionChrome}}</th><td class="me"><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ac" cx="9" cy="9" r="7.5"/><path class="ac" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>{{t:thisOne}}</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>{{t:extensionMode}}</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>{{t:perUsePermission}}</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>{{t:harnessRequired}}</span></td></tr>
+          <tr><th>{{t:criterionMcp}}</th><td class="me"><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ac" cx="9" cy="9" r="7.5"/><path class="ac" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>{{t:generic20}}</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg>{{t:anthropicOnly}}</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg>{{t:codexCliUnavailable}}</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg></span></td></tr>
+          <tr><th>{{t:criterionFlags}}</th><td class="me"><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ac" cx="9" cy="9" r="7.5"/><path class="ac" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>{{t:extensionOnly}}</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>{{t:extensionModeNeeded}}</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg>{{t:remoteDebugging}}</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg>{{t:chromiumOrDebugging}}</span></td></tr>
+          <tr><th>{{t:criterionConcurrency}}</th><td class="me"><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ac" cx="9" cy="9" r="7.5"/><path class="ac" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>{{t:oneSlot}}</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>{{t:oneGroupPerSession}}</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><text x="9" y="13" text-anchor="middle" font-size="11" fill="#a8a29e" font-family="ui-monospace,Menlo,Consolas,monospace">?</text></svg>{{t:notDocumented}}</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>{{t:oneGroupPerClient}}</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>{{t:experimentFlag}}</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>{{t:sharedLane}}</span></td></tr>
+          <tr><th>{{t:criterionLearning}}</th><td class="me"><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ac" cx="9" cy="9" r="7.5"/><path class="ac" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>{{t:siteNotes}}</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>{{t:genericMemory}}</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>{{t:disabledByDefault}}</span></td></tr>
+          <tr><th>{{t:criterionHandoff}}</th><td class="me"><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ac" cx="9" cy="9" r="7.5"/><path class="ac" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>{{t:askAndGate}}</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>{{t:pausesOnEncounter}}</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>{{t:sensitiveConfirmation}}</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>{{t:cloudOnly}}</span></td></tr>
+          <tr><th>{{t:criterionVisibility}}</th><td class="me"><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ac" cx="9" cy="9" r="7.5"/><path class="ac" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>{{t:groupOutlinePanel}}</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>{{t:coloredTabGroup}}</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><text x="9" y="13" text-anchor="middle" font-size="11" fill="#a8a29e" font-family="ui-monospace,Menlo,Consolas,monospace">?</text></svg>{{t:notDocumented}}</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>{{t:groupsByClient}}</span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg></span></td><td><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>{{t:titleMarker}}</span></td></tr>
         </tbody>
       </table>
-      <p class="legend"><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>具备</span><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>部分具备 / 有前置条件</span><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg>不具备</span><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><text x="9" y="13" text-anchor="middle" font-size="11" fill="#a8a29e" font-family="ui-monospace,Menlo,Consolas,monospace">?</text></svg>官方未说明</span></p>
-      <p class="warn">核查日期 2026-09-09，每一格都对着官方文档或官方仓库填的；完整八方案矩阵和每格来源见仓库里的 <a href="https://github.com/alchaincyf/huashu-chrome/blob/master/docs/对比.md" target="_blank" rel="noopener">docs/对比.md</a>。Playwright MCP 的扩展模式也能拿到登录态、也有按客户端隔离——它缺的是站点经验和人工交接。</p>
+      <p class="legend"><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln" cx="9" cy="9" r="7.5"/><path class="ln" d="M5.5 9.2 8 11.6 12.6 6.4"/></svg>{{t:hasFeature}}</span><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><path class="ln" d="M9 2.5 16 15.5 2 15.5z"/></svg>{{t:partialFeature}}</span><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><path class="ln2" d="M5.8 5.8 12.2 12.2"/></svg>{{t:noFeature}}</span><span class="mk"><svg width="18" height="18" viewBox="0 0 18 18"><circle class="ln2" cx="9" cy="9" r="7.5"/><text x="9" y="13" text-anchor="middle" font-size="11" fill="#a8a29e" font-family="ui-monospace,Menlo,Consolas,monospace">?</text></svg>{{t:notDocumented}}</span></p>
+      <p class="warn">{{t:comparisonCaveatBefore}}<a href="https://github.com/alchaincyf/huashu-chrome/blob/master/docs/对比.md" target="_blank" rel="noopener">docs/对比.md</a>{{t:comparisonCaveatAfter}}</p>
     </div>
   </details>
 
   <!-- ============ 页脚 ============ -->
-  <div class="sec" style="margin-top:52px"><span class="no">END</span><h3>联系我们</h3><span class="rule"></span><span class="meta">OPEN SOURCE · MIT</span></div>
+  <div class="sec" style="margin-top:52px"><span class="no">END</span><h3>{{t:contact}}</h3><span class="rule"></span><span class="meta">OPEN SOURCE · MIT</span></div>
 
   <div class="star">
     <div class="tx">
-      <b>觉得有用？</b>
-      一个 star 是对这个开源项目最直接的支持。这东西是一个人写的，star 是它继续更新下去的理由。
+      <b>{{t:useful}}</b>
+      {{t:starCopy}}
     </div>
-    <a class="btn" href="https://github.com/alchaincyf/huashu-chrome" target="_blank" rel="noopener">去 GitHub 点个 star ↗</a>
+    <a class="btn" href="https://github.com/alchaincyf/huashu-chrome" target="_blank" rel="noopener">{{t:starButton}}</a>
   </div>
 
   <footer class="colophon">
     <span>huashu-chrome {{VERSION}}</span><span class="sep">·</span>
-    <span>扩展 ID {{EXT_ID}}</span><span class="sep">·</span>
+    <span>{{t:extensionId}} {{EXT_ID}}</span><span class="sep">·</span>
     <a href="https://www.huasheng.ai/huashu-chrome/" target="_blank" rel="noopener">huasheng.ai/huashu-chrome</a><span class="sep">·</span>
     <a href="https://github.com/alchaincyf/huashu-chrome" target="_blank" rel="noopener">github.com/alchaincyf/huashu-chrome</a><span class="sep">·</span>
-    <span>作者 花叔</span>
+    <span>{{t:author}}</span>
   </footer>
 
 </div>
@@ -576,7 +576,7 @@ document.addEventListener('click', function(e){
   var s = b.querySelector('.lbl') || b;
   if(s.dataset.busy) return;
   var old = s.textContent;
-  s.dataset.busy = '1'; s.textContent = '已复制';
+  s.dataset.busy = '1'; s.textContent = {{COPY_FEEDBACK}};
   setTimeout(function(){ s.textContent = old; delete s.dataset.busy; }, 1600);
 });
 </script>

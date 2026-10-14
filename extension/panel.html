@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>huashu-chrome</title>
+<title data-i18n="panel_document_title">huashu-chrome</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -79,41 +79,41 @@
 <header>
   <img src="icons/icon128.png" alt="" />
   <div class="t">huashu-chrome<span class="v" id="ver"></span></div>
-  <div class="pill"><span class="dot" id="pilldot"></span><span id="pilltxt">检查中…</span></div>
+  <div class="pill"><span class="dot" id="pilldot"></span><span id="pilltxt" data-i18n="panel_checking">检查中…</span></div>
 </header>
 
 <main>
   <section>
-    <h2>这一页</h2>
-    <div id="page"><div class="empty">读取中…</div></div>
+    <h2 data-i18n="panel_current_page_heading">这一页</h2>
+    <div id="page"><div class="empty" data-i18n="panel_loading">读取中…</div></div>
   </section>
 
   <section>
-    <h2>所有在线的 agent</h2>
+    <h2 data-i18n="panel_online_agents_heading">所有在线的 agent</h2>
     <div class="sess" id="sess"></div>
   </section>
 
   <section>
-    <h2>连接</h2>
+    <h2 data-i18n="panel_connection_heading">连接</h2>
     <div id="lights"></div>
-    <div class="cmd" id="reconnRow" hidden><button class="btn" id="reconn">重连</button>
-      <span class="sub" style="color:var(--mute);font-size:12px">插件没消失，断的只是到终端的连接</span></div>
+    <div class="cmd" id="reconnRow" hidden><button class="btn" id="reconn" data-i18n="panel_reconnect">重连</button>
+      <span class="sub" style="color:var(--mute);font-size:12px" data-i18n="panel_reconnect_hint">插件没消失，断的只是到终端的连接</span></div>
   </section>
 
   <section>
-    <h2>设置</h2>
+    <h2 data-i18n="panel_settings_heading">设置</h2>
     <label class="sw-row">
-      <span class="txt">高保真模式<div class="sub">需要时用浏览器级真实输入，应付严格的站点和富文本编辑器；用完自动断开</div></span>
+      <span class="txt"><span data-i18n="panel_high_fidelity">高保真模式</span><div class="sub" data-i18n="panel_high_fidelity_hint">需要时用浏览器级真实输入，应付严格的站点和富文本编辑器；用完自动断开</div></span>
       <input type="checkbox" class="toggle" id="l2" />
     </label>
     <label class="sw-row">
-      <span class="txt">页面标记<div class="sub">被操作的页面带彩色描边、光标和小头像；录屏演示时可以关掉</div></span>
+      <span class="txt"><span data-i18n="panel_page_marking">页面标记</span><div class="sub" data-i18n="panel_page_marking_hint">被操作的页面带彩色描边、光标和小头像；录屏演示时可以关掉</div></span>
       <input type="checkbox" class="toggle" id="mark" />
     </label>
   </section>
 </main>
 
-<footer>连不上时在终端跑 <code style="padding:1px 5px">npx huashu-chrome doctor</code>，它会告诉你卡在哪一步。</footer>
+<footer><span data-i18n="panel_doctor_footer_before">连不上时在终端跑 </span><code style="padding:1px 5px">npx huashu-chrome doctor</code><span data-i18n="panel_doctor_footer_after">，它会告诉你卡在哪一步。</span></footer>
 
 <script type="module" src="panel.js"></script>
 </html>

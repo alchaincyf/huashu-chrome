@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>huashu-chrome 装好了</title>
+<title data-i18n="welcome_document_title">huashu-chrome 装好了</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -48,44 +48,44 @@
   <div class="hero">
     <img src="icons/icon128.png" alt="" />
     <div>
-      <h1>扩展装好了，还差一步</h1>
-      <p>huashu-chrome 让你的 AI agent 用这个浏览器干活，带着你已有的全部登录。</p>
+      <h1 data-i18n="welcome_heading">扩展装好了，还差一步</h1>
+      <p data-i18n="welcome_tagline">huashu-chrome 让你的 AI agent 用这个浏览器干活，带着你已有的全部登录。</p>
     </div>
   </div>
 
   <ol>
     <li class="done">
       <span class="n">✓</span>
-      <h3>浏览器扩展</h3>
-      <div class="d">已经装好了。</div>
+      <h3 data-i18n="welcome_step1_title">浏览器扩展</h3>
+      <div class="d" data-i18n="welcome_step1_description">已经装好了。</div>
     </li>
 
     <li id="step2">
       <span class="n">2</span>
-      <h3>在终端里跑一行，接上你的 agent</h3>
-      <div class="d">它会自动找到你电脑上装着的 AI agent，逐个配好。需要先装 <a href="https://nodejs.org" target="_blank" rel="noopener">Node.js</a>（20 以上）。
-        <div class="cmd"><code id="cmd">npx -y huashu-chrome@latest install</code><button id="copy">复制</button></div>
-        <div class="live" id="live"><span class="dot"></span><span id="livetxt">等待本地端连上…（agent 第一次用它时会自动拉起）</span></div>
+      <h3 data-i18n="welcome_step2_title">在终端里跑一行，接上你的 agent</h3>
+      <div class="d"><span data-i18n="welcome_step2_before_node">它会自动找到你电脑上装着的 AI agent，逐个配好。需要先装 </span><a href="https://nodejs.org" target="_blank" rel="noopener" data-i18n="welcome_nodejs_link">Node.js</a><span data-i18n="welcome_step2_after_node">（20 以上）。</span>
+        <div class="cmd"><code id="cmd">npx -y huashu-chrome@latest install</code><button id="copy" data-i18n="welcome_copy">复制</button></div>
+        <div class="live" id="live"><span class="dot"></span><span id="livetxt" data-i18n="welcome_waiting_for_connection">等待本地端连上…（agent 第一次用它时会自动拉起）</span></div>
       </div>
     </li>
 
     <li>
       <span class="n">3</span>
-      <h3>对你的 agent 说一句</h3>
-      <div class="d">重启 agent 后，试试这样说：
-        <div class="cmd"><code id="say">用 huashu-chrome 打开小红书，看看我最近一篇笔记的数据</code><button id="copy2">复制</button></div>
+      <h3 data-i18n="welcome_step3_title">对你的 agent 说一句</h3>
+      <div class="d"><span data-i18n="welcome_step3_before_example">重启 agent 后，试试这样说：</span>
+        <div class="cmd"><code id="say" data-i18n="welcome_agent_example">用 huashu-chrome 打开小红书，看看我最近一篇笔记的数据</code><button id="copy2" data-i18n="welcome_copy">复制</button></div>
       </div>
     </li>
 
     <li>
       <span class="n">4</span>
-      <h3>想看它在做什么，点工具栏的头像</h3>
-      <div class="d">侧栏会显示它正在操作哪一页、准备做什么、刚刚做了什么。建议把图标固定到工具栏：点地址栏右边的拼图图标，再点 huashu-chrome 旁边的图钉。</div>
+      <h3 data-i18n="welcome_step4_title">想看它在做什么，点工具栏的头像</h3>
+      <div class="d" data-i18n="welcome_step4_description">侧栏会显示它正在操作哪一页、准备做什么、刚刚做了什么。建议把图标固定到工具栏：点地址栏右边的拼图图标，再点 huashu-chrome 旁边的图钉。</div>
     </li>
   </ol>
 
-  <div class="foot">卡住了？在终端跑 <code style="padding:2px 6px">npx huashu-chrome doctor</code>，它会告诉你卡在哪一步。</div>
+  <div class="foot"><span data-i18n="welcome_doctor_footer_before">卡住了？在终端跑 </span><code style="padding:2px 6px">npx huashu-chrome doctor</code><span data-i18n="welcome_doctor_footer_after">，它会告诉你卡在哪一步。</span></div>
 </div>
 
-<script src="welcome.js"></script>
+<script type="module" src="welcome.js"></script>
 </html>

@@ -37,6 +37,20 @@
   if (window.__hcMark) return;
   window.__hcMark = true;
 
+  // mark.js is injected as a classic isolated-world script, so use Chrome's
+  // native message catalog directly instead of importing the app i18n module.
+  // The fallback keeps tests and older/missing catalogs usable in Chinese.
+  function overlayMessage(key, fallback, substitutions) {
+    try {
+      if (typeof chrome !== 'undefined' && chrome.i18n?.getMessage) {
+        const localized = chrome.i18n.getMessage(key, substitutions);
+        if (localized) return localized;
+      }
+    } catch { /* tests or a stale extension context may omit i18n */ }
+    const parts = substitutions || [];
+    return fallback.replace(/\$(\d+)/g, (_match, position) => String(parts[Number(position) - 1] ?? ''));
+  }
+
   // 顶层框架才画。content.js 是 allFrames 注入的，本文件按设计只注顶层，
   // 但防御性地守住：iframe 里也画的话，一个带广告的页面会冒出七八套 UI。
   const TOP = window.top === window;
@@ -342,14 +356,30 @@
       const n = document.createElement('span'); n.className = 'n'; n.textContent = String(owners.length);
       b.appendChild(n);
     }
-    // title 是浏览器原生提示，不进我们的层，也就不会再挡别的东西
-    b.title = `${owners.map((x) => x.label).join('、')} 正在操作这一页${tabLabel ? `（${tabLabel}）` : ''}\n点一下在侧栏里看它在做什么`;
-    b.addEventListener('click', () => {
+    // This marker is a real control: expose its localized name and keyboard path.
+    const markerName = overlayMessage(
+      'overlay_marker_working', '$1 正在操作这一页', [owners.map((x) => x.label).join('、')],
+    ) + (tabLabel ? overlayMessage('overlay_marker_tab_suffix', '（$1）', [tabLabel]) : '')
+      + `\n${overlayMessage('overlay_marker_open_hint', '点一下在侧栏里看它在做什么')}`;
+    b.title = markerName;
+    b.setAttribute('aria-label', markerName);
+    b.setAttribute('role', 'button');
+    b.tabIndex = 0;
+    const openPanel = () => {
       try {
         chrome.runtime.sendMessage({ __hcPanel: 'open' }).then((r) => {
-          if (!r?.ok) hint('点浏览器工具栏的 huashu-chrome 图标，在侧栏里看它在做什么');
+          if (!r?.ok) hint(overlayMessage(
+            'overlay_marker_open_failed', '点浏览器工具栏的 huashu-chrome 图标，在侧栏里看它在做什么',
+          ));
         }).catch(() => {});
       } catch { /* context 正在失效 */ }
+    };
+    b.addEventListener('click', openPanel);
+    b.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        openPanel();
+      }
     });
     return b;
   }
@@ -568,18 +598,20 @@
       <div class="body"><span class="p"></span></div>
       <div class="foot">
         <span class="clock"></span>
-        <button class="no">取消</button>
-        <button class="ok">我完成了</button>
+        <button class="no"></button>
+        <button class="ok"></button>
       </div>`;
     // 文案一律走 textContent，绝不拼进 innerHTML——prompt 是从 agent 那边传过来的，
     // 而 agent 的内容可能源自页面（也就是可能被注入）。这里是最后一道
     // 「数据不当代码用」的边界。
     askEl.querySelector('.head').prepend(avatarCanvas(20));   // 是花叔的分身在请你搭把手
-    askEl.querySelector('.t').textContent = msg.title || 'huashu-chrome 需要你搭把手';
+    askEl.querySelector('.t').textContent = msg.title || overlayMessage(
+      'overlay_ask_default_title', 'huashu-chrome 需要你搭把手',
+    );
     askEl.querySelector('.p').textContent = msg.prompt || '';
     if (msg.danger) askEl.classList.add('danger');
-    if (msg.okText) askEl.querySelector('.ok').textContent = msg.okText;
-    if (msg.noText) askEl.querySelector('.no').textContent = msg.noText;
+    askEl.querySelector('.ok').textContent = msg.okText || overlayMessage('overlay_ask_done', '我完成了');
+    askEl.querySelector('.no').textContent = msg.noText || overlayMessage('overlay_ask_cancel', '取消');
     // 「点哪个按钮、在哪个站、多少钱」单独拎出来，不混在正文里。
     // 正文是 agent 写的（可能源自被注入的页面），这几样是扩展自己看到的事实。
     if (msg.facts) {
@@ -589,7 +621,14 @@
         if (!v) continue;
         const line = document.createElement('div');
         const key = document.createElement('span');
-        key.textContent = `${k}：`;
+        const factMessages = {
+          '按钮': ['overlay_fact_button', '按钮：'],
+          '金额': ['overlay_fact_amount', '金额：'],
+          '页面': ['overlay_fact_page', '页面：'],
+          '地址': ['overlay_fact_address', '地址：'],
+        };
+        const factMessage = Object.hasOwn(factMessages, k) ? factMessages[k] : null;
+        key.textContent = factMessage ? overlayMessage(...factMessage) : `${k}：`;
         const val = document.createElement('span');
         val.textContent = v;
         if (k === '金额') val.className = 'amount';
@@ -603,7 +642,9 @@
     if (msg.wantNote) {
       noteEl = document.createElement('textarea');
       noteEl.className = 'note';
-      noteEl.placeholder = '（可选）想对 agent 说的话';
+      noteEl.placeholder = overlayMessage(
+        'overlay_ask_note_placeholder', '（可选）想对 agent 说的话',
+      );
       askEl.querySelector('.body').appendChild(noteEl);
     }
 
