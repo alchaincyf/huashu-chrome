@@ -15,6 +15,17 @@ import { CRED_URL, redactCreds } from './redact.js';
 import { identityOf, stripMarkPrefix } from './identity.js';
 import { validateScript, condText, repeatMax, EXEC_BUDGET, collectRefs, toRecipe } from './script.js';
 
+// Human-facing ask/payment copy uses Chrome's native catalog. Keep a Chinese
+// fallback so mocked tests without chrome.i18n exercise the same flow.
+function overlayMessage(key, fallback, substitutions) {
+  try {
+    const localized = chrome.i18n?.getMessage(key, substitutions);
+    if (localized) return localized;
+  } catch { /* tests or an unavailable catalog */ }
+  const parts = substitutions || [];
+  return fallback.replace(/\$(\d+)/g, (_match, position) => String(parts[Number(position) - 1] ?? ''));
+}
+
 // ---------- 连接层 ----------
 //
 // 两条腿：offscreen 文档（首选，不受 SW 的 30 秒空闲回收管），
@@ -1532,7 +1543,7 @@ async function confirmPay(id, pay) {
   chrome.notifications?.create(`hc-pay-${Date.now()}`, {
     type: 'basic',
     iconUrl: 'icons/icon128.png',
-    title: '确认这笔支付？',
+    title: overlayMessage('overlay_pay_notification_title', '确认这笔支付？'),
     message: `${pay.label}${pay.amount ? ` · ${pay.amount}` : ''}\n${tab.title || ''}`.slice(0, 180),
     priority: 2,
   }, () => void chrome.runtime.lastError);
@@ -1540,11 +1551,13 @@ async function confirmPay(id, pay) {
   await chrome.tabs.sendMessage(id, {
     __hcAsk: 'show',
     danger: true,
-    title: '要花钱了，确认一下',
-    prompt: 'agent 请求点击这个按钮。确认之后才会真的点下去。',
+    title: overlayMessage('overlay_pay_panel_title', '要花钱了，确认一下'),
+    prompt: overlayMessage(
+      'overlay_pay_panel_prompt', 'agent 请求点击这个按钮。确认之后才会真的点下去。',
+    ),
     facts: [['按钮', pay.label], ['金额', pay.amount], ['页面', tab.title || ''], ['地址', tab.url || '']],
-    okText: '确认，点下去',
-    noText: '不要',
+    okText: overlayMessage('overlay_pay_confirm', '确认，点下去'),
+    noText: overlayMessage('overlay_pay_cancel', '不要'),
     wantNote: false,
     timeout: payTimeout,
   });
@@ -2585,7 +2598,7 @@ const HANDLERS = {
     chrome.notifications?.create(`hc-ask-${Date.now()}`, {
       type: 'basic',
       iconUrl: 'icons/icon128.png',
-      title: p.title || 'huashu-chrome 需要你搭把手',
+      title: p.title || overlayMessage('overlay_ask_default_title', 'huashu-chrome 需要你搭把手'),
       message: String(p.prompt || '').slice(0, 180),
       priority: 2,
     }, () => void chrome.runtime.lastError);

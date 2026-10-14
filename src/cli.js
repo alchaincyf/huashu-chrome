@@ -10,11 +10,22 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readBridgeInfo, DEFAULT_PORT, HOME, AUDIT_FILE, LOG_FILE } from './lib/paths.js';
 import { VERSION } from './lib/version.js';
+import { createTranslator, parseLanguageArgs, resolveLocale } from './lib/i18n.js';
+import { cliMessages } from './locales/cli.js';
 import { compat, compatNote } from '../extension/compat.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(HERE, '..');
-const argv = process.argv.slice(2);
+let parsedArgs;
+try {
+  parsedArgs = parseLanguageArgs(process.argv.slice(2));
+} catch {
+  const t = createTranslator(cliMessages, resolveLocale());
+  console.error(t('invalidLanguage'));
+  process.exit(1);
+}
+const { args: argv, locale } = parsedArgs;
+const t = createTranslator(cliMessages, locale);
 const cmd = argv[0];
 const flag = (k, d) => { const i = argv.indexOf(k); return i >= 0 ? (argv[i + 1]?.startsWith('--') ? true : argv[i + 1]) : d; };
 const has = (k) => argv.includes(k);
@@ -94,7 +105,7 @@ switch (cmd) {
 
   case 'install': {
     const { install } = await import('./install.js');
-    await install({ yes: !has('--dry-run'), only: flag('--only', null) });
+    await install({ yes: !has('--dry-run'), only: flag('--only', null), locale });
     break;
   }
 
@@ -111,10 +122,10 @@ switch (cmd) {
     break;
 
   case 'audit': {
-    if (has('--stats')) { auditStats(Number(flag('--days', 7))); break; }
+    if (has('--stats')) { auditStats(Number(flag('--days', 7)), t); break; }
     const n = Number(flag('-n', 30));
     const lines = fs.existsSync(AUDIT_FILE) ? fs.readFileSync(AUDIT_FILE, 'utf8').trim().split('\n').slice(-n) : [];
-    if (!lines.length) console.log('还没有审计记录。');
+    if (!lines.length) console.log(t('noAuditRecords'));
     for (const l of lines) {
       const e = JSON.parse(l);
       console.log(`${e.t.slice(11, 19)}  ${(e.ev + '        ').slice(0, 8)} ${e.cmd || ''} ${e.ok === false ? '✗ ' + (e.error || '') : ''}`);
@@ -123,30 +134,31 @@ switch (cmd) {
   }
 
   default:
-    console.log(`huashu-chrome — 让任何 AI agent 操控你自己的 Chrome
+    console.log(`${t('helpTitle')}
 
-  huashu-chrome install        一键安装：自动配好所有 agent + 引导装扩展
-  huashu-chrome mcp            启动 MCP server（agent 配置里填这条，install 会自动写）
-  huashu-chrome doctor         诊断连接问题
-  huashu-chrome extension      打印扩展加载步骤
-  huashu-chrome audit [-n 30]  看最近的浏览器操作记录
-  huashu-chrome audit --stats [--days 7]   真实 agent 的用法统计：回合数、哪类调用最多、在哪儿浪费
-  huashu-chrome bridge --foreground   前台跑桥（调试用）
-  huashu-chrome install --dry-run     只看会改哪些配置，不写
+  huashu-chrome install        ${t('helpInstall')}
+  huashu-chrome mcp            ${t('helpMcp')}
+  huashu-chrome doctor         ${t('helpDoctor')}
+  huashu-chrome extension      ${t('helpExtension')}
+  huashu-chrome audit [-n 30]  ${t('helpAudit')}
+  huashu-chrome audit --stats [--days 7]   ${t('helpAuditStats')}
+  huashu-chrome bridge --foreground   ${t('helpBridge')}
+  huashu-chrome install --dry-run     ${t('helpDryRun')}
+  huashu-chrome --lang en|zh-CN       ${t('helpLanguage')}
 
-配置目录 ${HOME}`);
+${t('configDirectory')} ${HOME}`);
 }
 
 async function doctor() {
   const ok = (s) => console.log(`  ✅ ${s}`);
   const bad = (s, fix) => { console.log(`  ❌ ${s}`); if (fix) console.log(`     → ${fix}`); };
 
-  console.log('\nhuashu-chrome 体检\n');
+  console.log(`\n${t('doctorTitle')}\n`);
 
-  console.log('配置目录');
-  fs.existsSync(HOME) ? ok(HOME) : bad(`${HOME} 不存在`, '跑一次 `huashu-chrome mcp` 会自动创建');
+  console.log(t('configDirectory'));
+  fs.existsSync(HOME) ? ok(HOME) : bad(`${HOME} ${t('missing')}`, t('createHomeHint'));
 
-  console.log('\n桥');
+  console.log(`\n${t('bridge')}`);
   let info = readBridgeInfo();
   let alive = false;
   if (info) { try { process.kill(info.pid, 0); alive = true; } catch {} }
@@ -154,7 +166,7 @@ async function doctor() {
     // 桥没跑时以前直接放弃探测，打一句「不用管」然后接着「扩展 ✅」——新机器上
     // 装完扩展跑 doctor 看到的就是这个假绿，引导页承诺的「扩展在线」永远看不到。
     // 桥本来就是谁先用谁拉起的，doctor 自己拉一个再探，才探得到真相。
-    console.log(`  ·  桥没在跑${info ? `（bridge.json 记着的 pid ${info.pid} 已经没了）` : ''}，先拉起来再探…`);
+    console.log(`  ·  ${t('bridgeStarting', { stalePid: info ? t('bridgeStalePid', { pid: info.pid }) : '' })}`);
     const { tryStartBridge } = await import('./lib/rpc.js');
     tryStartBridge();
     const until = Date.now() + 6000;
@@ -164,46 +176,47 @@ async function doctor() {
       if (info?.pid) { try { process.kill(info.pid, 0); alive = true; break; } catch {} }
     }
     if (!alive) {
-      bad('桥拉不起来', `看 ${LOG_FILE} 的最后几行；端口 ${DEFAULT_PORT} 被别的程序占着也会这样（lsof -i :${DEFAULT_PORT}）`);
+      bad(t('bridgeCouldNotStart'), t('bridgeStartDetails', { log: LOG_FILE, port: DEFAULT_PORT }));
     }
   }
   if (alive) {
-    ok(`pid ${info.pid} · 端口 ${info.port} · 起于 ${info.startedAt ? new Date(info.startedAt).toLocaleTimeString('zh-CN', { hour12: false }) : '?'}`);
+    ok(t('bridgePid', { pid: info.pid, port: info.port, startedAt: info.startedAt ? new Date(info.startedAt).toLocaleTimeString(locale, { hour12: false }) : '?' }));
     {
-      const r = await probe(info);
-      r.ok ? ok(`握手正常${r.extensionOnline ? ` · Chrome 扩展在线 (v${r.extensionVersion})` : ''}`) : bad('握手失败：' + r.error);
+      const r = await probe(info, t);
+      r.ok ? ok(`${t('handshakeOk')}${r.extensionOnline ? ` · ${t('extensionOnline', { version: r.extensionVersion })}` : ''}`) : bad(t('handshakeFailed', { error: r.error }));
       if (r.extensionVersion) {
         const level = compat({ ext: r.extensionVersion, cli: VERSION, extProtocol: r.extensionProtocol });
-        if (level === 'protocol' || level === 'ext-old' || level === 'cli-old') bad(compatNote(level, { ext: r.extensionVersion, cli: VERSION }));
-        else if (level === 'patch') ok(`扩展 v${r.extensionVersion} / 本地端 v${VERSION}：只差补丁号，互相兼容`);
+        if (level === 'protocol' || level === 'ext-old' || level === 'cli-old') bad(compatNote(level, { ext: r.extensionVersion, cli: VERSION, locale }));
+        else if (level === 'patch') ok(t('patchCompatible', { ext: r.extensionVersion, cli: VERSION }));
       }
       // 多个 Chrome 实例连着不再是故障（桥按实例路由），但必须说出来：
       // 「命令为什么跑到另一个窗口去了」只有这一处看得见。
       if ((r.extensions || []).length > 1) {
-        console.log(`  ℹ️  ${r.extensions.length} 个 Chrome 实例连着桥：`);
+        console.log(`  ℹ️  ${t('multipleInstances', { count: r.extensions.length })}`);
         for (const e of r.extensions) {
-          console.log(`       ${e.primary ? '→' : ' '} Chrome ${e.chrome} · 扩展 ${e.version}${e.headless ? ' · headless' : ''}${e.primary ? '（命令走这个）' : ''}`);
+          console.log(`       ${t('chromeInstance', {
+            arrow: e.primary ? '→' : ' ', chrome: e.chrome, version: e.version,
+            headless: e.headless ? t('headless') : '', primary: e.primary ? t('primaryInstance') : '',
+          })}`);
         }
         if (r.extensions.some((e) => e.headless)) {
-          console.log('       headless 那个多半是某次抓取留下的孤儿进程，可以 kill 掉');
+          console.log(`       ${t('headlessOrphan')}`);
         }
       }
       if (r.ok && !r.extensionOnline) {
         // 话术和 popup、mcp-server 的 hint 一致：首选动作是弹窗里的「重连」。
         // 「去浏览器点开任意页面」对半开连接是错的——半开时 offscreen 自认为在线，
         // 不会因为你开了个页面就重连；「去 chrome://extensions」则把人引向重装。
-        bad('Chrome 扩展这会儿没连着桥',
-          '点浏览器工具栏的 huashu-chrome 图标 → 「重连」，几秒后再跑一次 doctor（插件没消失，只是连接断了）。'
-          + '图标都没有？Chrome 没开、扩展没装或被停用——按下面「扩展」一栏的目录去装。');
+        bad(t('extensionNotConnected'), `${t('reconnectHint')} ${t('missingIconHint')}`);
       }
     }
   }
 
-  console.log('\n扩展');
+  console.log(`\n${t('extensions')}`);
   const mf = path.join(ROOT, 'extension', 'manifest.json');
   fs.existsSync(mf)
-    ? ok(`${path.join(ROOT, 'extension')}${alive ? '' : ''}（这只说明文件在；Chrome 是否从这里加载了，看上面「扩展在线」那行）`)
-    : bad('扩展目录缺失', '重装 huashu-chrome');
+    ? ok(t('extensionDirectoryPresent', { directory: path.join(ROOT, 'extension') }))
+    : bad(t('extensionDirectoryMissing'), t('reinstall'));
 
   // bridge.log 里最近一次断连：用户体感的「插件消失」到底是什么时候、断了多久
   try {
@@ -213,7 +226,7 @@ async function doctor() {
       if (l.includes('扩展断开')) lastDown = l.slice(1, 9);
       else if (l.includes('扩展已连接')) lastUp = l.slice(1, 9);
     }
-    if (lastDown) console.log(`  ·  最近一次断开 ${lastDown}${lastUp ? `，最近一次连上 ${lastUp}` : '，之后没再连上'}（bridge.log，只有时分秒）`);
+    if (lastDown) console.log(t('recentDisconnect', { down: lastDown, up: lastUp ? t('connectedAt', { time: lastUp }) : t('neverReconnected') }));
   } catch { /* 没日志就没日志 */ }
 
   // 经验库里 agent 记下的「huashu-chrome 的 X 不生效」——产品 bug 住在经验库里，
@@ -229,14 +242,14 @@ async function doctor() {
       }
     }
     if (hits.length) {
-      console.log('\n经验库里记着的产品问题（agent 写的，值得看一眼）');
+      console.log(`\n${t('learningsHeading')}`);
       for (const h of hits) console.log(`  ·  ${h}`);
     }
   } catch { /* 没有经验目录 */ }
 
-  console.log('\n日志');
-  console.log(`  桥日志   ${LOG_FILE}`);
-  console.log(`  操作审计 ${AUDIT_FILE}   （huashu-chrome audit 查看）`);
+  console.log(`\n${t('logs')}`);
+  console.log(t('bridgeLog', { path: LOG_FILE }));
+  console.log(t('auditLog', { path: AUDIT_FILE }));
   console.log('');
 }
 
@@ -244,8 +257,8 @@ async function doctor() {
 // 口径：排除 test/cli 类客户端，按命令计数、算相邻二元组、算命令之间的空档
 // （≈模型回合）。「同一件事的 eval 次数有没有少、snapshot→snapshot 有没有少」
 // 是感知层改动唯一的验收方式——执行变快在这里毫无意义。
-function auditStats(days) {
-  if (!fs.existsSync(AUDIT_FILE)) return console.log('还没有审计记录。');
+function auditStats(days, t) {
+  if (!fs.existsSync(AUDIT_FILE)) return console.log(t('noStatsAudit'));
   const since = Date.now() - days * 86400000;
   const rows = [];
   for (const l of fs.readFileSync(AUDIT_FILE, 'utf8').split('\n')) {
@@ -262,7 +275,7 @@ function auditStats(days) {
     if (r.ev === 'cmd') { if (isReal(r.client)) { cmds.push(r); open.set(r.id, r); } }
     else if (r.ev === 'res' && open.has(r.id)) { res.set(open.get(r.id), r); open.delete(r.id); }
   }
-  if (!cmds.length) return console.log(`最近 ${days} 天没有真实 agent 的调用记录。`);
+  if (!cmds.length) return console.log(t('noRealAgentCalls', { days }));
 
   const count = new Map();
   for (const r of cmds) count.set(r.cmd, (count.get(r.cmd) || 0) + 1);
@@ -295,45 +308,48 @@ function auditStats(days) {
   const act = count.get('act') || 0;
   const evalN = count.get('eval') || 0;
 
-  console.log(`\n最近 ${days} 天 · 真实 agent ${cmds.length} 次调用 · ${bySid.size} 个会话\n`);
-  console.log('命令分布（次数 · 占比 · 执行中位 ms）');
+  console.log(t('statsHeader', { days, calls: cmds.length, sessions: bySid.size }));
+  console.log(t('commandDistribution'));
   for (const [c, n] of [...count.entries()].sort((a, b) => b[1] - a[1])) {
     console.log(`  ${c.padEnd(12)} ${String(n).padStart(5)}  ${(100 * n / cmds.length).toFixed(1).padStart(5)}%  ${ms.has(c) ? String(med(ms.get(c))).padStart(6) : '     -'}`);
   }
-  console.log(`\n回合空档（命令之间，≈模型回合）中位 ${pct(0.5)}s · p90 ${pct(0.9)}s · n=${gaps.length}`);
-  console.log(`act 占写操作 ${act}/${act + writes}（${act + writes ? (100 * act / (act + writes)).toFixed(1) : 0}%）· eval ${evalN} 次（${(100 * evalN / cmds.length).toFixed(1)}%）`);
-  if (bytesN) console.log(`回执体积 平均 ${Math.round(bytes / bytesN / 1024)}KB（${bytesN} 条有记录）`);
-  console.log('\n相邻二元组 Top 10（连着出现＝前一个没回答问题）');
+  console.log(t('turnGaps', { median: pct(0.5), p90: pct(0.9), count: gaps.length }));
+  console.log(t('actEvalStats', {
+    act, total: act + writes, share: act + writes ? (100 * act / (act + writes)).toFixed(1) : 0,
+    evalCount: evalN, evalShare: (100 * evalN / cmds.length).toFixed(1),
+  }));
+  if (bytesN) console.log(t('responseSize', { size: Math.round(bytes / bytesN / 1024), count: bytesN }));
+  console.log(t('bigramsHeading'));
   for (const [k, n] of [...bigrams.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10)) console.log(`  ${k.padEnd(24)} ${n}`);
   const errs = new Map();
   for (const r of cmds) { const rr = res.get(r); if (rr && rr.ok === false) { const k = `${r.cmd} ${rr.error || ''}`; errs.set(k, (errs.get(k) || 0) + 1); } }
   if (errs.size) {
-    console.log('\n错误 Top 8');
+    console.log(t('errorsHeading'));
     for (const [k, n] of [...errs.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8)) console.log(`  ${k.padEnd(28)} ${n}`);
   }
   // 1.3 起写操作回执带效果类别：none（真没反应）该越来越少，request-only 是以前会被误判的那批
   const eff = new Map();
   for (const r of cmds) { const e = res.get(r)?.effect; if (e) eff.set(e, (eff.get(e) || 0) + 1); }
   if (eff.size) {
-    console.log('\n写操作效果（1.3 起记录）');
+    console.log(t('effectsHeading'));
     for (const [k, n] of [...eff.entries()].sort((a, b) => b[1] - a[1])) console.log(`  ${k.padEnd(18)} ${n}`);
   }
   const lrn = cmds.filter((r) => r.cmd === 'learnings');
   if (lrn.length) {
     const adopt = lrn.filter((r) => r.params?.adopt).length, save = lrn.filter((r) => r.params?.save).length;
-    console.log(`\nlearnings ${lrn.length} 次 · 写回 ${save} · 剧本入库 ${adopt}`);
+    console.log(t('learningsStats', { count: lrn.length, saved: save, adopted: adopt }));
   }
   console.log('');
 }
 
-function probe(info) {
+function probe(info, t) {
   return new Promise((resolve) => {
     const ws = new WebSocket(`ws://127.0.0.1:${info.port}`);
-    const t = setTimeout(() => { ws.close(); resolve({ ok: false, error: '超时' }); }, 3000);
-    ws.onerror = () => { clearTimeout(t); resolve({ ok: false, error: '连接被拒' }); };
+    const timeout = setTimeout(() => { ws.close(); resolve({ ok: false, error: t('probeTimeout') }); }, 3000);
+    ws.onerror = () => { clearTimeout(timeout); resolve({ ok: false, error: t('probeConnectionRefused') }); };
     ws.onopen = () => ws.send(JSON.stringify({ type: 'hello', role: 'agent', token: info.token, client: 'doctor', v: 1 }));
     ws.onmessage = (ev) => {
-      clearTimeout(t);
+      clearTimeout(timeout);
       const m = JSON.parse(ev.data);
       ws.close();
       resolve(m.type === 'welcome'
@@ -345,21 +361,10 @@ function probe(info) {
 
 function printExtension() {
   const dir = path.join(ROOT, 'extension');
-  console.log(`
-装扩展有两条路：
-
-  A. 商店一键装（推荐）：https://chromewebstore.google.com/detail/foiljmaplphdfimfcnfdpekhdnfbgfbf
-
-  B. 手动加载（改过扩展代码、或商店打不开时）
-     1. Chrome 打开  chrome://extensions ，右上角打开「开发者模式」
-     2. 把这个文件夹拖到那一页上（或点「加载已解压的扩展程序」选中它）：
-
-        ${dir}
-
-        加 --reveal 会直接在访达 / 资源管理器里选中它，拖过去就行。
-
-装好后扩展会自动连桥。跑 huashu-chrome doctor 应该看到「Chrome 扩展在线」
-`);
+  console.log(t('extensionInstructions', {
+    storeUrl: 'https://chromewebstore.google.com/detail/foiljmaplphdfimfcnfdpekhdnfbgfbf',
+    directory: dir,
+  }));
 }
 
 function revealExtensionDir() {

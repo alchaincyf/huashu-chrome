@@ -12,6 +12,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { createTranslator, resolveLocale } from './lib/i18n.js';
+import installMessages from './locales/install.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(HERE, '..');
@@ -130,8 +132,10 @@ function launcher(client) {
 // 新用户照着 README 跑完发现什么都没写，第二条命令才是真的。备份照做，
 // 「绝不静默改配置」靠的是先备份再写、每一处都打印出来，不是靠让人跑两遍。
 // 想只看不写，用 --dry-run。
-export async function install({ yes = true, only = null } = {}) {
-  console.log('\nhuashu-chrome 安装\n');
+export async function install({ yes = true, only = null, locale = resolveLocale() } = {}) {
+  const language = resolveLocale({ lang: locale });
+  const tr = createTranslator(installMessages, language);
+  console.log(`\n${tr('terminalTitle')}\n`);
 
   const all = knownAgents().filter((a) => a.file);
   const discovered = discover(new Set(all.map((a) => a.file)));
@@ -140,44 +144,44 @@ export async function install({ yes = true, only = null } = {}) {
   if (only) {
     found = found.filter((a) => a.client === only);
     if (!found.length) {
-      console.log(`  这台机器上没找到 ${only}。检测到的有：${[...all, ...discovered].map((a) => a.client).join(' / ') || '（无）'}\n`);
+      console.log(`  ${tr('onlyMissing', { client: only, clients: [...all, ...discovered].map((a) => a.client).join(' / ') || tr('noneLabel') })}\n`);
       return;
     }
   }
 
   if (!found.length) {
-    console.log('  没在这台机器上找到任何 agent 的 MCP 配置。\n');
-    console.log('  已知的会自动配置：' + SPEC.agents.map((a) => a.name).join('、'));
-    console.log('  没列出来的 agent 也会被自动发现，只要它把 MCP 配置写在 ~/.<名字>/ 下。\n');
-    console.log('  都不匹配的话，把下面这段填进它的 MCP 配置：\n');
+    console.log(`  ${tr('noAgents')}\n`);
+    console.log(`  ${tr('knownAgents', { names: SPEC.agents.map((a) => a.name).join(language === 'zh-CN' ? '、' : ', ') })}`);
+    console.log(`  ${tr('discoveryHint')}\n`);
+    console.log(`  ${tr('customHint')}\n`);
     console.log('    ' + JSON.stringify({ mcpServers: { 'huashu-chrome': launcher('custom') } }, null, 2).split('\n').join('\n    '));
     console.log('');
-    printExtensionStep();
-    const g = writeGuide();
-    console.log(`  引导页：${g}`);
+    printExtensionStep(tr);
+    const g = writeGuide([], language);
+    console.log(`  ${tr('guidePath', { file: g })}`);
     openInBrowser(g);
     return;
   }
 
-  console.log('检测到这些 agent：');
+  console.log(tr('detectedAgents'));
   const plan = [];
   // rows 给引导页的「随附清单」：终端刚做完的事，让用户在页面上也看得见
   const rows = [];
   for (const t of found) {
     const done = alreadyConfigured(t);
-    const tag = t.discovered ? ' (自动发现)' : '';
-    console.log(`  ${done ? '·' : '+'} ${pad(t.name + tag, 26)} ${done ? '已配置，跳过' : '将写入 MCP 配置'}`);
+    const tag = t.discovered ? tr('discoveredTag') : '';
+    console.log(`  ${done ? '·' : '+'} ${pad(t.name + tag, 26)} ${done ? tr('statusSkipped') : tr('statusWillWrite')}`);
     if (!done) plan.push(t);
-    else rows.push({ name: t.name, ok: true, written: false, status: '已配置 · 未改动' });
+    else rows.push({ name: t.name, ok: true, written: false, status: tr('statusAlready') });
   }
 
   if (!plan.length) {
-    console.log('\n所有检测到的 agent 都已经配好了。');
+    console.log(`\n${tr('allConfigured')}`);
   } else {
-    console.log(`\n将修改 ${plan.length} 个配置文件，每个都会先备份成 <文件名>.bak-<时间戳>。`);
+    console.log(`\n${tr('writePlan', { count: plan.length })}`);
     if (!yes) {
-      console.log('\n（--dry-run：只看不写。去掉它重跑就会写入）\n');
-      printExtensionStep();
+      console.log(`\n${tr('dryRun')}\n`);
+      printExtensionStep(tr);
       return;
     }
     let ok = 0;
@@ -185,33 +189,33 @@ export async function install({ yes = true, only = null } = {}) {
       try {
         const backup = `${t.file}.bak-${Date.now()}`;
         fs.copyFileSync(t.file, backup);
-        t.kind === 'json' ? writeJson(t) : writeToml(t);
-        console.log(`  ✅ ${t.name}（原文件已备份为 ${path.basename(backup)}）`);
-        rows.push({ name: t.name, ok: true, written: true, status: '已写入 · 已备份' });
+        t.kind === 'json' ? writeJson(t, tr) : writeToml(t, tr);
+        console.log(`  ${tr('saved', { name: t.name, backup: path.basename(backup) })}`);
+        rows.push({ name: t.name, ok: true, written: true, status: tr('statusWritten') });
         ok++;
       } catch (e) {
-        console.log(`  ❌ ${t.name}：${e.message}`);
-        console.log(`     手动加进 ${t.file} 也可以，格式见 README`);
-        rows.push({ name: t.name, ok: false, written: false, status: '写入失败 · 见终端' });
+        console.log(`  ${tr('failed', { name: t.name, message: e.message })}`);
+        console.log(tr('manualConfig', { file: t.file }));
+        rows.push({ name: t.name, ok: false, written: false, status: tr('statusFailed') });
       }
     }
-    if (ok) console.log(`\n${ok} 个 agent 配好了。它们需要重启一次才会加载新的 MCP server。`);
+    if (ok) console.log(`\n${tr('configuredCount', { count: ok })}`);
   }
 
-  printExtensionStep();
-  const guide = writeGuide(rows);
-  console.log(`  引导页已生成并尝试打开：${guide}`);
+  printExtensionStep(tr);
+  const guide = writeGuide(rows, language);
+  console.log(`  ${tr('guideOpened', { file: guide })}`);
   openInBrowser(guide);
-  console.log('\n装完扩展后跑 `huashu-chrome doctor` 验证。');
+  console.log(`\n${tr('doctorHint')}`);
   // 现在多数用户是让 agent 代装的，从不路过仓库页。这一行是写给读 stdout 的 agent 的：
   // 请它转达、由人决定——绝不让 agent 替用户点，那是刷 star。
-  console.log(`\n装好了。如果它帮到你，问一下用户愿不愿意给仓库点个 star：${REPO}\n`);
+  console.log(`\n${tr('starAsk', { url: REPO })}\n`);
 }
 
-function printExtensionStep() {
-  console.log('\n还差一步：装 Chrome 扩展');
-  console.log(`  商店一键安装：${STORE_URL}`);
-  console.log('  （浏览器不允许脚本代装扩展，这一下必须你自己点；引导页里有图）');
+function printExtensionStep(t) {
+  console.log(`\n${t('extensionHeading')}`);
+  console.log(`  ${t('storeInstall', { url: STORE_URL })}`);
+  console.log(`  ${t('browserRestriction')}`);
 }
 
 // ---------- 配置读写 ----------
@@ -224,13 +228,13 @@ function alreadyConfigured(t) {
   }
 }
 
-function writeJson(t) {
+function writeJson(t, translate) {
   const raw = fs.readFileSync(t.file, 'utf8');
   let cfg;
   try {
     cfg = JSON.parse(raw);
   } catch (e) {
-    throw new Error(`这个文件不是合法 JSON（${e.message}），不敢动它`);
+    throw new Error(translate('malformedJson', { message: e.message }));
   }
   cfg.mcpServers = cfg.mcpServers || {};
   cfg.mcpServers['huashu-chrome'] = launcher(t.client);
@@ -239,11 +243,11 @@ function writeJson(t) {
 
 // TOML 不做完整解析——用户的 config.toml 里可能有注释和自定义格式，
 // 解析再序列化会把它们全抹掉。只在末尾追加一段。
-function writeToml(t) {
+function writeToml(t, translate) {
   const l = launcher(t.client);
   const block = [
     '',
-    '# --- huashu-chrome (由 huashu-chrome install 添加) ---',
+    translate('tomlComment'),
     '[mcp_servers.huashu-chrome]',
     `command = ${JSON.stringify(l.command)}`,
     `args = [${l.args.map((a) => JSON.stringify(a)).join(', ')}]`,
@@ -274,37 +278,58 @@ export function extensionId() {
 // 手动加载那步让用户回终端跑 `extension --reveal`，文件夹自己在访达里选中。
 const STORE_URL = 'https://chromewebstore.google.com/detail/foiljmaplphdfimfcnfdpekhdnfbgfbf';
 
-function writeGuide(rows = []) {
+const escapeHtml = (value) => String(value)
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#39;');
+
+export function renderGuide(template, { locale = resolveLocale(), rows = [], version = '', extensionId: id = null, siteCount = 0, icon = '' } = {}) {
+  const language = resolveLocale({ lang: locale });
+  const tr = createTranslator(installMessages, language);
+  const ok = rows.filter((r) => r.ok).length;
+  const written = rows.filter((r) => r.written).length;
+  const check = '<svg width="16" height="16" viewBox="0 0 16 16"><path class="ac" d="M2.5 8.4 6.2 12 13.5 4"/></svg>';
+  const cross = '<svg width="16" height="16" viewBox="0 0 16 16"><path class="ln2" d="M4 4 12 12 M12 4 4 12"/></svg>';
+  const agentRows = rows.length
+    ? rows.map((row) => `      <div class="agent">${row.ok ? check : cross}<span class="nm">${escapeHtml(row.name)}</span><span class="st">${escapeHtml(row.status)}</span></div>`).join('\n')
+    : `      <div class="agent">${cross}<span class="nm">${escapeHtml(tr('noKnownAgentRow'))}</span><span class="st">${escapeHtml(tr('manualSnippet'))}</span></div>`;
+  const foot = rows.length
+    ? [
+      written ? tr('footWritten', { count: written }) : '',
+      ok - written ? tr('footExisting', { count: ok - written }) : '',
+      tr('footCommon'),
+    ].filter(Boolean).join(' ')
+    : tr('footNoRows');
+  const fields = {
+    LOCALE: language,
+    COPY_FEEDBACK: JSON.stringify(tr('copied')).replace(/</g, '\\u003c'),
+    ICON: escapeHtml(icon), VERSION: escapeHtml(version),
+    EXT_ID: escapeHtml(id || tr('noFixedId')),
+    AGENT_COUNT: `${ok} / ${rows.length}`,
+    AGENT_ROWS: agentRows, AGENT_FOOT: escapeHtml(foot),
+  };
+  // A single pass prevents data containing template tokens from being processed again.
+  return String(template).replace(/\{\{(t:[\w]+|[A-Z_]+)\}\}/g, (token, key) => {
+    if (!key.startsWith('t:')) return Object.hasOwn(fields, key) ? fields[key] : token;
+    const message = key.slice(2);
+    const values = message === 'handshakeOnline' ? { version }
+      : message === 'siteNotes' ? { count: siteCount || tr('siteCountFallback') } : {};
+    return escapeHtml(tr(message, values));
+  });
+}
+
+function writeGuide(rows = [], locale = resolveLocale()) {
   const dir = path.join(os.tmpdir(), 'huashu-chrome');
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, 'install.html');
-  const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
-
   const version = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
   const icon = fs.readFileSync(path.join(ROOT, 'extension', 'icons', 'icon128.png')).toString('base64');
-  let sites = 0;
-  try { sites = fs.readdirSync(path.join(ROOT, 'docs', '经验')).filter((f) => f.endsWith('.md')).length; } catch { /* 没带 docs 就不报数 */ }
-
-  const CHECK = '<svg width="16" height="16" viewBox="0 0 16 16"><path class="ac" d="M2.5 8.4 6.2 12 13.5 4"/></svg>';
-  const CROSS = '<svg width="16" height="16" viewBox="0 0 16 16"><path class="ln2" d="M4 4 12 12 M12 4 4 12"/></svg>';
-  const ok = rows.filter((r) => r.ok).length;
-  const agentRows = rows.length
-    ? rows.map((r) => `      <div class="agent">${r.ok ? CHECK : CROSS}<span class="nm">${esc(r.name)}</span><span class="st">${esc(r.status)}</span></div>`).join('\n')
-    : `      <div class="agent">${CROSS}<span class="nm">没找到已知 agent 的配置</span><span class="st">手动配置片段在终端里</span></div>`;
-  const written = rows.filter((r) => r.written).length;
-  const foot = rows.length
-    ? `${written ? `${written} 份配置文件已写入，各自留了原文件备份；` : ''}${ok - written ? `${ok - written} 个之前就配好了，没动。` : ''}这一栏是终端刚做完的事，你不用管。`.replace(/；$/, '。')
-    : '终端没在这台机器上找到任何 agent 的 MCP 配置，把终端里打印的那段 JSON 填进你 agent 的配置文件即可。';
-
-  const html = fs.readFileSync(path.join(ROOT, 'src', 'guide.html'), 'utf8')
-    .replaceAll('{{ICON}}', icon)
-    .replaceAll('{{VERSION}}', esc(version))
-    .replaceAll('{{EXT_ID}}', esc(extensionId() || '（本地构建，无固定 ID）'))
-    .replaceAll('{{SITE_COUNT}}', sites ? String(sites) : '二十多')
-    .replaceAll('{{AGENT_COUNT}}', `${ok} / ${rows.length}`)
-    .replaceAll('{{AGENT_ROWS}}', agentRows)
-    .replaceAll('{{AGENT_FOOT}}', esc(foot))
-    .replaceAll('https://chromewebstore.google.com/detail/foiljmaplphdfimfcnfdpekhdnfbgfbf', STORE_URL);
+  let siteCount = 0;
+  try { siteCount = fs.readdirSync(path.join(ROOT, 'docs', '经验')).filter((f) => f.endsWith('.md')).length; } catch { /* docs may be omitted from an installation */ }
+  const template = fs.readFileSync(path.join(ROOT, 'src', 'guide.html'), 'utf8');
+  const html = renderGuide(template, { locale, rows, version, extensionId: extensionId(), siteCount, icon });
   fs.writeFileSync(file, html);
   return file;
 }
