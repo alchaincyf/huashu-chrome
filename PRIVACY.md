@@ -1,5 +1,7 @@
 # 隐私政策（huashu-chrome）
 
+[简体中文](PRIVACY.md) · [English](PRIVACY.en.md)
+
 最后更新：2026-08-26
 
 ## 一句话

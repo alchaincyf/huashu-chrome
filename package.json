@@ -11,7 +11,9 @@
     "extension",
     "docs",
     "README.md",
-    "README.en.md"
+    "README.en.md",
+    "PRIVACY.md",
+    "PRIVACY.en.md"
   ],
   "engines": {
     "node": ">=20"

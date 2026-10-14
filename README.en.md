@@ -358,7 +358,7 @@ Some protections are not implemented; the limits are stated plainly:
 
 Before connecting a bank or company back office, remember: **actions that spend money have a human gate; actions that delete data do not.**
 
-For privacy and data boundaries, see [PRIVACY.md](PRIVACY.md).
+For privacy and data boundaries, see the [Privacy Policy](PRIVACY.en.md).
 
 ## Troubleshooting
 

@@ -453,7 +453,7 @@ offscreen 万一建不起来，扩展不能整个哑掉。
 
 > 接网银和公司后台前先想清楚：**会花钱的动作有人把关，会删东西的没有。**
 
-隐私与数据边界另见 [PRIVACY.md](PRIVACY.md)。
+隐私与数据边界另见 [PRIVACY.md](PRIVACY.md)（[English](PRIVACY.en.md)）。
 
 ## 排错
 
