@@ -22,7 +22,8 @@
     "downloads",
     "sidePanel",
     "notifications",
-    "debugger"
+    "debugger",
+    "webRequest"
   ],
   "host_permissions": [
     "<all_urls>"

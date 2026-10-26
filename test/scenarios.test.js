@@ -269,6 +269,21 @@ test('只发请求不改页面的点击：报出请求，不判「没反应」�
   assert.doesNotMatch(r.text, /已自动改用真实事件/);
 });
 
+test('写请求旁证不往页面里放东西：点完之后 fetch 还是原生的', async () => {
+  await go();
+  await c.call('click', { selector: '#favBtn' });
+  assert.equal(await val('String(window.fetch).includes("[native code]") && String(XMLHttpRequest.prototype.send).includes("[native code]") && !("__hcW" in window)'), 'true');
+});
+
+test('network 的钩子只挂在抓过包的站点上，别的站点的页面不受影响', async () => {
+  await go();
+  await c.call('network', {});
+  await c.call('navigate', { url: `http://localhost:${PORT}/playground.html?t=other` });
+  assert.equal(await val('"__hcNet" in window'), 'false');
+  await go();
+  assert.equal(await val('"__hcNet" in window'), 'true');
+});
+
 test('焦点落到目标自己身上不算「页面有反应」', async () => {
   await go();
   // 点击必然让目标获得焦点（L1 显式 focus，L2 由浏览器聚焦），
@@ -511,8 +526,15 @@ test('find 按 role + 名字定位，不依赖快照', async () => {
   assert.match(r.text, /手机号/);   // 表单出来了
 });
 
-test('find 匹配到多个时报错并列出候选，绝不猜', async () => {
+// find 只在视口里的元素中找（候选和快照同源），第 12 节在靶场下半截，
+// 窗口小的浏览器里它在视口外。先滚过去，和 agent 的做法一样。
+const toDeletes = async () => {
   await go();
+  await val('document.getElementById("delAll").scrollIntoView({ block: "center" })');
+};
+
+test('find 匹配到多个时报错并列出候选，绝不猜', async () => {
+  await toDeletes();
   // 靶场里两个一模一样的「删除」并排放着。猜错一个的代价是一条真数据
   await assert.rejects(
     () => c.call('click', { find: { name: '删除' } }),
@@ -520,13 +542,13 @@ test('find 匹配到多个时报错并列出候选，绝不猜', async () => {
 });
 
 test('nth 从同名的几个里精确指定一个', async () => {
-  await go();
+  await toDeletes();
   await c.call('click', { find: { name: '删除', nth: 1 } });
   assert.equal(await val('document.getElementById("delOut").textContent'), '"删了第 2 条"');
 });
 
 test('精确匹配优先，「删除」不会误伤「删除全部」', async () => {
-  await go();
+  await toDeletes();
   // 「删除全部」包含「删除」。三级匹配里精确匹配这一级先命中，包含匹配根本轮不上，
   // 所以候选只有那两个。要是报错文案里出现了「删除全部」，说明分层塌成了一锅包含匹配——
   // 那意味着 `{name:"确定"}` 有可能点到「确定删除」上去。

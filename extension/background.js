@@ -440,6 +440,7 @@ async function multiLineNote(sid, explicitTab, cmd, resolved) {
 function onBridgeEvent(msg) {
   if (msg.event !== 'sessions') return;
   // 先落盘再重算：resyncMarks 里的 ownersOfTab 读的就是 storage 名单
+  void pruneNetHook(msg.live);
   return noteSession(null, null, msg.live).then(() => resyncMarks());
 }
 
@@ -1121,19 +1122,70 @@ const NET_SCRIPT_ID = 'hc-net-hook';
 
 // hook 必须赶在页面自己的 JS 之前，否则首屏那批请求全漏掉——而列表数据恰恰在首屏那批里。
 // 所以走 registerContentScripts + document_start，事后 executeScript 只能算补救。
-async function ensureNetHook() {
+//
+// 注册范围只到「活着的会话抓过包的站点」，会话全走了就注销，persistAcrossSessions:false
+// 让它也活不过 Chrome 重启。以前注册的是 <all_urls> 且从不注销：用过一次 network 之后，
+// 用户自己打开的每个网页都被改写 fetch/XHR、在页面内存里攒响应体，站方一查就知道。
+// 名单放 storage.session：扩展重载时它和动态注册的脚本一起清空，两边始终对得上。
+const NET_SITES_KEY = 'netHookSites';   // { sid: [match pattern] }
+let netHookChain = Promise.resolve();
+const withNetSites = (fn) => (netHookChain = netHookChain.then(async () => {
+  const sites = (await chrome.storage.session.get(NET_SITES_KEY))[NET_SITES_KEY] || {};
+  if (fn(sites) === false) return;
+  await chrome.storage.session.set({ [NET_SITES_KEY]: sites });
+  await syncNetHook(sites);
+}).catch(() => {}));
+
+async function syncNetHook(sites) {
+  const matches = [...new Set(Object.values(sites).flat())];
   const existing = await chrome.scripting.getRegisteredContentScripts({ ids: [NET_SCRIPT_ID] }).catch(() => []);
-  if (existing.length) return false;
-  await chrome.scripting.registerContentScripts([{
+  if (!matches.length) {
+    if (existing.length) await chrome.scripting.unregisterContentScripts({ ids: [NET_SCRIPT_ID] });
+    return;
+  }
+  const script = {
     id: NET_SCRIPT_ID,
-    matches: ['<all_urls>'],
+    matches,
     js: ['net-hook.js'],
     runAt: 'document_start',
     world: 'MAIN',
     allFrames: false,
-  }]);
-  return true; // 刚注册，当前这个页面还没被 hook 到，得刷一次
+    persistAcrossSessions: false,
+  };
+  if (existing.length) await chrome.scripting.updateContentScripts([script]);
+  else await chrome.scripting.registerContentScripts([script]);
 }
+
+async function ensureNetHook(tabId, sid) {
+  let pattern = null;
+  try {
+    const u = new URL((await chrome.tabs.get(tabId)).url || '');
+    if (u.protocol === 'http:' || u.protocol === 'https:') pattern = `${u.protocol}//${u.hostname}/*`;
+  } catch { /* chrome:// 之类本来也注不进 */ }
+  if (!pattern) return;
+  await withNetSites((sites) => {
+    const list = sites[sid || ''] ||= [];
+    if (list.includes(pattern)) return false;
+    list.push(pattern);
+  });
+}
+
+// 会话名单变了：死会话抓过的站点一起摘掉。没带 sid 的老桥命令记在 '' 下，等所有会话都走了再摘
+function pruneNetHook(live) {
+  const alive = new Set(live || []);
+  return withNetSites((sites) => {
+    let changed = false;
+    for (const sid of Object.keys(sites)) {
+      if (sid ? alive.has(sid) : alive.size) continue;
+      delete sites[sid];
+      changed = true;
+    }
+    return changed;
+  });
+}
+
+// 升级上来的旧版本可能留着一份 <all_urls> 的持久注册，SW 每次起来按名单校正一遍
+void withNetSites(() => {});
 
 // 顶层框架的快照 + 各子框架的快照，拼成一份。子框架的 ref 打上 @fN。
 async function snapshotAll(tabId, p = {}) {
@@ -1560,69 +1612,61 @@ async function confirmPay(id, pay) {
 // 经验库里约 15 个站记过这种误判；更糟的是零证据会触发自动用真实事件再点一次，
 // 对点赞这类来回切换的按钮，第二下就把第一下撤销了。
 //
-// 所以写操作前往受控页（顶层）挂一个极小的钩子：只记非 GET 请求的方法、路径和状态码，
+// 所以写操作期间旁听受控页（顶层）发出的非 GET 请求：只记方法、路径和状态码，
 // 不读响应体、不记 query（可能带 token），不外发；操作后取出这一次期间的那几条。
 // 和 net-hook.js 是两件事：那个记全量响应体、只在 agent 用 network 时注册；
-// 这个只为回答「这一下有没有真的提交出去」，开销只有两次 executeScript。
-function sniffWrites() {
-  if (!window.__hcW) {
-    const log = window.__hcW = [];
-    window.__hcWn = 0;
-    const path = (u) => { try { const x = new URL(String(u), location.href); return (x.host === location.host ? '' : x.host) + x.pathname; } catch { return String(u).split('?')[0].slice(0, 120); } };
-    const add = (m, u) => {
-      const rec = { n: ++window.__hcWn, m: String(m || 'GET').toUpperCase(), u: path(u), s: null };
-      log.push(rec); if (log.length > 40) log.shift();
-      return rec;
-    };
-    const quiet = (m) => /^(GET|HEAD|OPTIONS)$/i.test(String(m || 'GET'));
-    const of = window.fetch;
-    if (of) {
-      window.fetch = function (input, init) {
-        const m = (init && init.method) || (input && input.method) || 'GET';
-        const pr = of.apply(this, arguments);
-        if (!quiet(m)) {
-          const rec = add(m, typeof input === 'string' ? input : (input && input.url) || input);
-          pr.then((r) => { rec.s = r.status; }, () => { rec.s = 0; });
-        }
-        return pr;
-      };
-    }
-    const X = XMLHttpRequest.prototype, oOpen = X.open, oSend = X.send;
-    X.open = function (m, u) { this.__hcWm = [m, u]; return oOpen.apply(this, arguments); };
-    X.send = function () {
-      const mu = this.__hcWm;
-      if (mu && !quiet(mu[0])) {
-        const rec = add(mu[0], mu[1]);
-        this.addEventListener('loadend', () => { rec.s = this.status; });
-      }
-      return oSend.apply(this, arguments);
-    };
-    if (navigator.sendBeacon) {
-      const ob = navigator.sendBeacon.bind(navigator);
-      navigator.sendBeacon = (u, d) => { const ok = ob(u, d); add('BEACON', u).s = ok ? 'queued' : 0; return ok; };
-    }
-  }
-  return window.__hcWn;
+// 这个只为回答「这一下有没有真的提交出去」。
+//
+// 走 webRequest，在扩展这一侧听，不往页面里放任何东西。以前是往 MAIN world 注一个
+// 改写 fetch/XHR/sendBeacon 的钩子，每点一下都留在页面里直到刷新，站方查
+// fetch.toString() 就知道有人动过。顺带还能看见整页 form 提交，那条以前 hook 不到。
+// 监听器按次挂、带 tabId 过滤，只在这一次操作期间活着，不会因为用户自己浏览唤醒 SW。
+const WRITE_ARM_MS = 120000;
+const QUIET_METHODS = /^(GET|HEAD|OPTIONS)$/i;
+
+function writePath(url, initiator) {
+  try {
+    const x = new URL(url);
+    const host = initiator ? new URL(initiator).host : '';
+    return (x.host === host ? '' : x.host) + x.pathname;
+  } catch { return String(url).split('?')[0].slice(0, 120); }
 }
 
-async function armWrites(tabId) {
+function armWrites(tabId) {
+  if (!chrome.webRequest) return null;
+  const log = [];
+  const byId = new Map();
+  const filter = { urls: ['<all_urls>'], tabId, types: ['main_frame', 'xmlhttprequest', 'ping'] };
+  const onRequest = (d) => {
+    if (d.frameId !== 0 || (d.type !== 'ping' && QUIET_METHODS.test(d.method))) return;
+    const rec = byId.get(d.requestId);
+    // 307/308 重定向会带着同一个 requestId 再来一次，是同一次提交
+    if (rec) { rec.u = writePath(d.url, d.initiator); return; }
+    const next = { m: d.type === 'ping' ? 'BEACON' : d.method.toUpperCase(), u: writePath(d.url, d.initiator), s: null };
+    byId.set(d.requestId, next);
+    log.push(next);
+    if (log.length > 40) log.shift();
+  };
+  const onDone = (d) => { const rec = byId.get(d.requestId); if (rec) rec.s = d.statusCode; };
+  const onError = (d) => { const rec = byId.get(d.requestId); if (rec) rec.s = 0; };
   try {
-    const [r] = await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN', func: sniffWrites });
-    return typeof r?.result === 'number' ? r.result : null;
-  } catch { return null; }   // chrome:// 之类注不进，就当没有旁证
+    chrome.webRequest.onBeforeRequest.addListener(onRequest, filter);
+    chrome.webRequest.onCompleted.addListener(onDone, filter);
+    chrome.webRequest.onErrorOccurred.addListener(onError, filter);
+  } catch { return null; }
+  setTimeout(() => {
+    chrome.webRequest.onBeforeRequest.removeListener(onRequest);
+    chrome.webRequest.onCompleted.removeListener(onDone);
+    chrome.webRequest.onErrorOccurred.removeListener(onError);
+  }, WRITE_ARM_MS);
+  return log;
 }
 
-async function readWrites(tabId, since) {
-  if (since == null) return [];
-  try {
-    const [r] = await chrome.scripting.executeScript({
-      target: { tabId }, world: 'MAIN',
-      func: (n) => (window.__hcW || []).filter((x) => x.n > n).map(({ m, u, s }) => ({ m, u, s })),
-      args: [since],
-    });
-    // 埋点上报（beacon、日志、统计）不算提交——它们每次点击都会发，算进来就等于永远「有效果」
-    return (r?.result || []).filter((x) => x.m !== 'BEACON' && !/(log|track|collect|stat|report|metric|beacon|analytics|monitor|sentry|apm)/i.test(x.u));
-  } catch { return []; }
+function readWrites(log) {
+  if (!log) return [];
+  // 埋点上报（beacon、日志、统计）不算提交——它们每次点击都会发，算进来就等于永远「有效果」
+  return log.map(({ m, u, s }) => ({ m, u, s }))
+    .filter((x) => x.m !== 'BEACON' && !/(log|track|collect|stat|report|metric|beacon|analytics|monitor|sentry|apm)/i.test(x.u));
 }
 
 const writesText = (ws) => ws.slice(0, 4).map((w) => `${w.m} ${w.u} → ${w.s == null ? '未回' : w.s}`).join('；')
@@ -1643,7 +1687,7 @@ async function performCore(id, cmd, p, { blockSensitive = false } = {}, ctx) {
   // 坐标点不到「按钮文案」，这条路的安全边界是它本来就要求显式给坐标。
   if (cmd === 'click' && !hasTarget && Number.isFinite(params.x) && Number.isFinite(params.y)) {
     const base = await toContent(id, { __hc: 'locate', baselineOnly: true }, frameId).catch(() => null);
-    const wmark = await armWrites(id);
+    const wmark = armWrites(id);
     const x = Number(params.x), y = Number(params.y);
     let note;
     if (params.dragTo && Number.isFinite(params.dragTo.x) && Number.isFinite(params.dragTo.y)) {
@@ -1654,7 +1698,7 @@ async function performCore(id, cmd, p, { blockSensitive = false } = {}, ctx) {
       note = `已点击坐标 (${x}, ${y})（真实事件）`;
     }
     const ev = await settle(id, frameId, { ...params, ref: undefined }, base?.baseline, before);
-    ev.writes = await readWrites(id, wmark);
+    ev.writes = readWrites(wmark);
     const after = (await chrome.tabs.get(id)).url;
     return { note, l2note: '', ev, navigated: before !== after, upgraded: false };
   }
@@ -1701,7 +1745,7 @@ async function performCore(id, cmd, p, { blockSensitive = false } = {}, ctx) {
   };
 
   let note = '', usedL2 = layer === 'L2', l2note = '';
-  const wmark = await armWrites(id);
+  const wmark = armWrites(id);
   try {
     note = usedL2 ? await execL2(id, cmd, params, loc) : await runL1();
   } catch (e) {
@@ -1714,7 +1758,7 @@ async function performCore(id, cmd, p, { blockSensitive = false } = {}, ctx) {
   }
 
   let ev = await settle(id, frameId, params, loc?.baseline, before);
-  ev.writes = await readWrites(id, wmark);
+  ev.writes = readWrites(wmark);
 
   // 零证据 → 自动升级。发出过写请求不算零证据：那一下已经生效了，再点一次就是第二次。敏感目标除外：L1 可能其实已经生效只是没留下痕迹，
   // 对「提交/支付/删除」重试一次就是下第二笔单，这个闸门是确定性的，不问模型。
@@ -1729,7 +1773,7 @@ async function performCore(id, cmd, p, { blockSensitive = false } = {}, ctx) {
         usedL2 = true;
         upgraded = true;
         ev = await settle(id, frameId, params, loc?.baseline, before);
-        ev.writes = await readWrites(id, wmark);
+        ev.writes = readWrites(wmark);
       } catch (e) {
         l2note = `（普通事件无效，真实事件也没能用上：${e.message}）`;
       }
@@ -2214,9 +2258,9 @@ const HANDLERS = {
   },
 
   // 看这个页面调了哪些接口、返回了什么。抓数据的首选入口。
-  async network(p, tabId) {
+  async network(p, tabId, ctx) {
     const id = await resolveTab(tabId);
-    const justRegistered = await ensureNetHook();
+    await ensureNetHook(id, ctx?.sid);
     // 当前页面若在注册之前就加载了，补一针（只能抓到此刻之后的请求）
     await chrome.scripting.executeScript({ target: { tabId: id }, world: 'MAIN', files: ['net-hook.js'] }).catch(() => {});
 
