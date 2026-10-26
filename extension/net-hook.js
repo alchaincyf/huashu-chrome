@@ -23,9 +23,15 @@
       try {
         const url = typeof a[0] === 'string' ? a[0] : a[0]?.url;
         const ct = res.headers.get('content-type') || '';
-        // clone() 是必须的：响应体只能被读一次，直接读会把页面自己的那份吃掉
-        const body = /json|text|javascript/.test(ct) ? (await res.clone().text()).slice(0, MAX_BODY) : '';
-        push({ t: Date.now(), method: a[1]?.method || 'GET', url, status: res.status, ct, body });
+        const rec = { t: Date.now(), method: a[1]?.method || 'GET', url, status: res.status, ct, body: '' };
+        // clone() 是必须的：响应体只能被读一次，直接读会把页面自己的那份吃掉。
+        // 但绝不能 await 它：读完 clone 要等整个响应结束，await 着就迟迟不把 res
+        // 交给页面——慢接口的首字节被拖到下载完，SSE（打字机、工具调用实时渲染）
+        // 被拖到整轮结束才一次性倒出来（alchaincyf/huashu-chrome#15）。
+        // event-stream 也不读：它可能永不结束，clone 那一路会一直攒内存。
+        if (/json|text|javascript/.test(ct) && !/event-stream/i.test(ct)) {
+          res.clone().text().then((b) => { rec.body = b.slice(0, MAX_BODY); push(rec); }, () => push(rec));
+        } else push(rec);
       } catch { /* 记录失败绝不能影响页面本身 */ }
       return res;
     };

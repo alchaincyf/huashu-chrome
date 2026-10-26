@@ -29,6 +29,14 @@ const handler = (req, res) => {
     const ms = Number(new URL(req.url, 'http://x').searchParams.get('ms')) || 300;
     return setTimeout(() => { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('ok'); }, ms);
   }
+  // 流式响应：头立刻回，正文分几批慢慢到。sse 是 event-stream，slowjson 是普通的慢 JSON
+  if (p === 'sse' || p === 'slowjson') {
+    const sse = p === 'sse';
+    res.writeHead(200, { 'content-type': sse ? 'text/event-stream' : 'application/json' });
+    const parts = sse ? ['data: 1\n\n', 'data: 2\n\n', 'data: 3\n\n'] : ['{"a":', '1', '}'];
+    res.write(parts[0]);
+    return setTimeout(() => { res.write(parts[1]); setTimeout(() => res.end(parts[2]), 500); }, 500);
+  }
   // /settings/tokens 端的还是 creds.html，只是换一个「站点风格」的地址：
   // 凭据页的 URL 判定认的是路径段（真实站点就长这样），文件名形式的
   // /creds.html 命不中它 —— 不给一个这样的入口，URL 那一层就没法测。
@@ -267,6 +275,25 @@ test('只发请求不改页面的点击：报出请求，不判「没反应」�
   assert.match(r.text, /POST \/delay/);
   assert.doesNotMatch(r.text, /操作已发出，但页面完全没有反应/);
   assert.doesNotMatch(r.text, /已自动改用真实事件/);
+});
+
+test('network 的钩子不拖住页面的流式响应：第一批数据到了页面就拿得到', async () => {
+  await go();
+  await c.call('network', {});
+  await go();
+  assert.equal(await val('"__hcNet" in window'), 'true');
+  // 两个接口都是头立刻回、正文 1 秒后才结束。钩子要是等正文读完才把响应交给页面，
+  // fetch 和第一次 read 都会被拖到 1 秒之后
+  const r = JSON.parse(await val(`
+    const t0 = performance.now();
+    const res = await fetch('sse');
+    const first = (await res.body.getReader().read(), performance.now() - t0);
+    const slow = performance.now();
+    await fetch('slowjson');
+    return { first, slowHeaders: performance.now() - slow };
+  `));
+  assert.ok(r.first < 600, `SSE 第一批数据 ${Math.round(r.first)}ms 才到页面`);
+  assert.ok(r.slowHeaders < 600, `慢 JSON 的 fetch ${Math.round(r.slowHeaders)}ms 才返回`);
 });
 
 test('焦点落到目标自己身上不算「页面有反应」', async () => {
