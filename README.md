@@ -1,42 +1,62 @@
 <div align="center">
 
-# huashu-chrome
+# lingee-chrome
 
-<img src="https://raw.githubusercontent.com/alchaincyf/huashu-chrome/master/media/architecture.png" alt="系统原理图：一条命令穿过五个器官——npm 包 → CLI → MCP server → 本地桥 → Chrome 扩展，最后落在你真实浏览器的真实按钮上" width="100%">
+**让 AI 帮你操作浏览器——用你自己已经登录好的那个 Chrome。**
 
-> *「工具返回『已点击』不算数，页面真的动了才算。」*
+<sub>基于 [huashu-chrome](https://github.com/alchaincyf/huashu-chrome)（MIT）二次开发，增加企业级权限管控。</sub>
 
-[![npm](https://img.shields.io/npm/v/huashu-chrome?color=cb3837&logo=npm)](https://www.npmjs.com/package/huashu-chrome)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Stars](https://img.shields.io/github/stars/alchaincyf/huashu-chrome?style=social)](https://github.com/alchaincyf/huashu-chrome)
-[![Node](https://img.shields.io/badge/Node-%E2%89%A520-339933?logo=node.js&logoColor=white)](#安装)
-
-<br>
-
-**让任何 AI agent 操控你自己的 Chrome——带着你全部的登录态。**
-
-<sub>一个 MCP server + 一个 Chrome 扩展，22 个浏览器工具。Claude Code、Codex CLI、Cursor、Gemini CLI、Cline、Windsurf 通用。</sub>
-
-<br>
-
-[看效果](#看效果) · [安装](#安装) · [22 个工具](#工具按网页只有三种信息载体来分) · [经验回流](#越用越快经验回流) · [安全](#安全) · [排错](#排错)
 
 </div>
 
 ---
 
+## 一句话说清这是什么
+
+你平时上网，要自己点鼠标、自己填表。**lingee-chrome 让 AI 替你点、替你填**——而且用的就是你此刻这个浏览器里的身份：你登录过的系统，它直接就能进，不用重新登录、不用输验证码、不用找 IT 要接口。
+
+举几个例子，你对 AI 说一句话，它就在浏览器里做完：
+
 ```
-你：帮我把这份 CSV 里的 30 条客户信息录进 CRM
-agent：（打开你已登录的 CRM，逐条填表提交）
+「把这份 Excel 里的 30 条客户，逐条录进 CRM」
+「查一下这个客户最近的订单状态」
+「把这张报表导出来发给我」
 ```
 
-不用 API key，不用重新登录，不用处理验证码——**用的就是你此刻这个浏览器里的身份**。
+## 它和市面上的"AI 浏览器"有什么不同
 
-「npm 包？插件？CLI？还是 MCP？」——都是。它们是同一个产品的五个器官：npm 包是分发载体，
-CLI 是入口（install / mcp / doctor），MCP server 是 agent 的接口，本地桥是 127.0.0.1 上的
-常驻路由器，Chrome 扩展是手。上图就是一条命令穿过它们的全程。
+大部分 AI 浏览器工具，要么只给自家 App 用，要么给你开一个**空白的、没登录的**浏览器——于是要查公司内部系统，它进不去。
 
-**图解版完整说明书 → [huasheng.ai/huashu-chrome](https://huasheng.ai/huashu-chrome/)**
+lingee-chrome 用的是**你本来就开着、已经登录好的 Chrome**。这就是它的核心价值：内部系统、后台、OA，你能看的，AI 就能帮你操作。
+
+## 比原版多了什么：企业级权限管控
+
+原版（huashu-chrome）是个很强的开源工具，但它**默认全放行**——AI 想操作哪个网站都行。放进公司用，这不够安全。lingee-chrome 补上了一道闸门：
+
+### 🔒 站点白名单（已上线）
+
+只允许 AI 操作你指定的网站，其余一律拦住。比如只许它碰金蝶内部系统：
+
+```bash
+lingee-chrome allow add kdm.lingee.com   # 授权一个内部站（含所有子域）
+lingee-chrome allow add kingdee.com
+lingee-chrome allow on                   # 开启：从此 AI 只能碰这两个站
+lingee-chrome allow                      # 随时查看当前授权了哪些站
+```
+
+关掉就恢复全放行（`lingee-chrome allow off`）。**默认是关的**——不主动开启，行为和原版完全一样，升级不会让你的 AI 突然停摆。
+
+这道闸做在 AI 够不着的地方：就算有人用话术骗 AI（俗称 prompt injection），它也改不动一个自己调不到的开关。
+
+### 规划中
+
+- **删除 / 发布 / 提交前弹窗确认**（现在只有付款会弹窗）
+- **操作日志上报到合规系统**（现在日志只存在本地）
+
+---
+
+> 以下是继承自原版的完整技术说明，面向开发者。普通使用者看到这里就够了。
 
 ---
 
@@ -148,7 +168,7 @@ claude mcp add huashu-chrome -- npx -y huashu-chrome mcp --client claude-code
 
 **Codex CLI** — `~/.codex/config.toml`
 ```toml
-[mcp_servers.huashu-chrome]
+[mcp_servers.lingee-chrome]
 command = "npx"
 args = ["-y", "huashu-chrome", "mcp", "--client", "codex"]
 ```
@@ -270,7 +290,7 @@ act 停在第 4 步 3/4：
   大麦、即刻、腾讯文档、Ollama，以及两个 canvas 游戏（`sudoku.com` / `flappybird.io`，
   它们是「棋盘不在 DOM 里」这类页面的样板）。已验证的接口名、墙、坑，
   每条都标了实测日期。升级版本就拿到新经验。
-- **本机经验**：`~/.huashu-chrome/learnings/`，agent 每次干活学到的新规律
+- **本机经验**：`~/.lingee-chrome/learnings/`，agent 每次干活学到的新规律
   自己存进去（新站摸清了门路、老站发现记录过时了），永远不会被升级覆盖。
   全在你自己的磁盘上，不上传。
 
@@ -279,7 +299,7 @@ agent 开工前查一次（`learnings {domain}`），收工时把非显而易见
 环境不一样，所以工具返回的每一份经验都带着同一句话：与页面实际不符时，
 以实际为准，然后把记录改对。查不到经验也不阻塞，按通用策略干就是了。
 
-摸清了一个新站？欢迎把 `~/.huashu-chrome/learnings/` 里的文件提 PR 到
+摸清了一个新站？欢迎把 `~/.lingee-chrome/learnings/` 里的文件提 PR 到
 [`docs/经验/`](docs/经验/)，让所有用户受益。**提之前记得先看一遍有没有把你自己的
 账号、行程、订单号写进去**——那个目录是 agent 自动写的，它不知道哪些字不该出门。
 
@@ -393,7 +413,7 @@ offscreen 万一建不起来，扩展不能整个哑掉。
    抬进模型的注意力里。
 2. **敏感动作不自动升级**——提交 / 支付 / 删除 / 发布这类目标，即使普通事件毫无效果，
    也不会自动改用真实事件重试，避免重复执行。正则 + DOM 特征，不问模型。
-3. **全量审计**——每条命令落 `~/.huashu-chrome/audit.jsonl`，输入的文本做脱敏
+3. **全量审计**——每条命令落 `~/.lingee-chrome/audit.jsonl`，输入的文本做脱敏
    （密码按输入框类型判断，跟长度无关）。`npx huashu-chrome audit` 随时查。
 4. **连接边界**——桥只接受 `chrome-extension://` 来源的扩展连接，网页想连桥直接被拒；
    Node 侧 agent 走随桥启动轮换的 token。
@@ -559,12 +579,12 @@ Four ideas that make it different from a headless-browser MCP:
   stop on the first no-op.
 - **Learnings compound.** Site knowledge ships with the package (`docs/经验/`, ~20 sites with
   verified endpoints, walls and dead ends, each dated) and the agent writes new findings to
-  `~/.huashu-chrome/learnings/` on your own disk, never uploaded. One Feishu Bitable task took 281
+  `~/.lingee-chrome/learnings/` on your own disk, never uploaded. One Feishu Bitable task took 281
   calls and 54 minutes to figure out cold; under 10 calls the second time.
 - **Safety lives outside the model.** Page text is demoted to `<page-content untrusted>`; sensitive
   targets (submit / pay / delete / publish) never auto-retry with trusted events; a payment
   confirmation card lives *in the extension*, where the agent has no parameter to skip it; every
-  command is audited to `~/.huashu-chrome/audit.jsonl` with credentials redacted by key name.
+  command is audited to `~/.lingee-chrome/audit.jsonl` with credentials redacted by key name.
   What is **not** done is stated plainly in the 安全 section — money is gated, deletion is not.
 
 You can also see it working: controlled tabs join a colored tab group, the page gets a matching

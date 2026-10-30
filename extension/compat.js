@@ -34,7 +34,7 @@ export function compat({ ext, cli, extProtocol = PROTOCOL, cliProtocol = PROTOCO
 }
 
 export const UPDATE_EXT = '商店装的扩展 Chrome 会在几小时内自动更新；等不及就打开 chrome://extensions，开「开发者模式」后点「更新」。手动加载的扩展要去那一页点「重新加载」。';
-export const UPDATE_CLI = '在终端跑一次 npx -y huashu-chrome@latest install，然后重启你的 agent。';
+export const UPDATE_CLI = '在终端跑一次 npx -y lingee-chrome@latest install，然后重启你的 agent。';
 
 // 给人看的一句话。same / patch 返回空串——没事就别说话。
 export function compatNote(level, { ext, cli }) {

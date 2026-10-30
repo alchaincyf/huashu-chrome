@@ -14,6 +14,8 @@ import { matchChallenge, hostOf, hostMatches, L2_ORIGINS_SEED } from './risk.js'
 import { CRED_URL, redactCreds } from './redact.js';
 import { identityOf, stripMarkPrefix } from './identity.js';
 import { validateScript, condText, repeatMax, EXEC_BUDGET, collectRefs, toRecipe } from './script.js';
+// 敏感动作二次确认闸的纯裁决（可单测）。第二刀：单次删除/发布/提交/转账先问人。
+import { decideConfirm } from './confirm-gate.js';
 
 // ---------- 连接层 ----------
 //
@@ -132,8 +134,8 @@ function noteBridgeVersion(v) {
   const level = compat({ ext: mine, cli: v });
   bridgeMismatch = (level === 'same' || level === 'patch') ? '' : v;
   chrome.action.setTitle({ title: bridgeMismatch
-    ? `huashu-chrome：${compatNote(level, { ext: mine, cli: v })}`
-    : 'huashu-chrome' });
+    ? `lingee-chrome：${compatNote(level, { ext: mine, cli: v })}`
+    : 'lingee-chrome' });
   setBadge(true);
 }
 
@@ -303,7 +305,7 @@ async function onMessage(msg) {
     await noteSession(msg.sid, msg.label || msg.client, msg.live);
     // 缺省 tabId 在这里统一解析成具体 tabId（会话级槽），handler 拿到的永远是实值。
     // ctx 只在本函数内现场传——SW 里两条命令的 await 会交错，绝不能用模块级变量存「当前消息」
-    const ctx = { sid: msg.sid, live: msg.live, adopted: false };
+    const ctx = { sid: msg.sid, live: msg.live, adopted: false, confirmMode: msg.confirmMode || 'off' };
     const tabId = NO_SLOT_CMDS.has(msg.cmd) ? msg.tabId : await resolveTab(msg.tabId, msg.sid, ctx);
     // 显式 tabId 也进户口簿——await 而不是 void：命令完成后的 syncMark 从
     // 户口簿反推归属，登记必须先落盘，否则第一条命令刷不出标记（又一个落盘竞态）
@@ -1553,6 +1555,45 @@ async function confirmPay(id, pay) {
   return res.outcome === 'continued';
 }
 
+// ---------- 敏感动作确认（第二刀）----------
+//
+// 复用支付确认那同一套「切到前台 + 桌面通知 + 页面弹窗」的机制，只是文案换成
+// 删除/发布/提交/转账。和 confirmPay 一样：闸门在扩展里，agent 够不着，没有任何
+// 参数能跳过——injection 让模型说任何话，也按不动一个它调不到的开关。
+//
+// 超时按「不执行」处理，理由同 confirmPay：无人应答时放行等于这道闸不存在。
+// 只在确认闸 mode=sensitive 时才会走到这里（见 performCore 的 decideConfirm 判定）。
+async function confirmAction(id, label) {
+  const tab = await chrome.tabs.get(id);
+  await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+  await chrome.tabs.update(id, { active: true });
+  await chrome.scripting.executeScript({ target: { tabId: id }, files: ['mark.js'] });
+
+  const shown = (label || '').slice(0, 60);
+  chrome.notifications?.create(`hc-act-${Date.now()}`, {
+    type: 'basic',
+    iconUrl: 'icons/icon128.png',
+    title: '确认这个操作？',
+    message: `${shown || '敏感动作'}\n${tab.title || ''}`.slice(0, 180),
+    priority: 2,
+  }, () => void chrome.runtime.lastError);
+
+  await chrome.tabs.sendMessage(id, {
+    __hcAsk: 'show',
+    danger: true,
+    title: '敏感动作，确认一下',
+    prompt: 'agent 请求执行这个动作（删除/发布/提交/转账一类）。确认之后才会真的做。',
+    facts: [['按钮', shown], ['页面', tab.title || ''], ['地址', tab.url || '']],
+    okText: '确认，执行',
+    noText: '不要',
+    wantNote: false,
+    timeout: payTimeout,
+  });
+
+  const res = await pollPanel(id, payTimeout);
+  return res.outcome === 'continued';
+}
+
 // ---------- 写请求旁证 ----------
 //
 // 很多站的「提交」在 DOM 上不留痕迹：点赞、保存草稿、发私信、设定时——请求发出去了，
@@ -1683,6 +1724,19 @@ async function performCore(id, cmd, p, { blockSensitive = false } = {}, ctx) {
     if (!await confirmPay(id, loc.pay)) {
       throw err('PAY_DECLINED',
         `用户没有确认这笔支付（${loc.pay.label}${loc.pay.amount ? ` · ${loc.pay.amount}` : ''}）。`
+        + '这是明确的「别做」——不要重试，也不要换个方式绕过去。');
+    }
+  }
+
+  // 敏感动作确认闸（第二刀）。只在用户显式开启确认闸（confirmMode=sensitive）、
+  // 且这一下命中敏感语义（删除/发布/提交/转账）时才问人。付款不走这里——它上面
+  // 已经单独处理，且永远生效，与本开关无关。默认 off：没开的话行为与原版一致。
+  // 和支付闸同理：批处理里的敏感动作早被 blockSensitive 挡住了，走到这里的是单次操作。
+  else if (decideConfirm(loc?.sensitive, { mode: ctx?.confirmMode })) {
+    const label = loc?.sensitiveLabel || '';
+    if (!await confirmAction(id, label)) {
+      throw err('ACTION_DECLINED',
+        `用户没有确认这个敏感动作（${label || '删除/发布/提交/转账一类'}）。`
         + '这是明确的「别做」——不要重试，也不要换个方式绕过去。');
     }
   }
@@ -2139,7 +2193,7 @@ const HANDLERS = {
   // 这条路由浏览器原生下载，不进内存、不进 context，还自带断点和大文件支持。
   // saveAs:false 是关键：不弹系统保存对话框（那是扩展够不着的东西）。
   async download(p) {
-    const filename = p.filename || `huashu-chrome/${Date.now()}-${(p.url.split('/').pop() || 'file').split('?')[0].slice(0, 60)}`;
+    const filename = p.filename || `lingee-chrome/${Date.now()}-${(p.url.split('/').pop() || 'file').split('?')[0].slice(0, 60)}`;
     const dlId = await chrome.downloads.download({ url: p.url, filename, conflictAction: 'uniquify', saveAs: false });
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -2585,7 +2639,7 @@ const HANDLERS = {
     chrome.notifications?.create(`hc-ask-${Date.now()}`, {
       type: 'basic',
       iconUrl: 'icons/icon128.png',
-      title: p.title || 'huashu-chrome 需要你搭把手',
+      title: p.title || 'lingee-chrome 需要你搭把手',
       message: String(p.prompt || '').slice(0, 180),
       priority: 2,
     }, () => void chrome.runtime.lastError);

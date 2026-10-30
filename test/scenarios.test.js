@@ -1246,6 +1246,6 @@ test('eval 接受语句序列和顶层 await，不用自己包 IIFE', async () =
 test('read_text scope:page 给整页渲染文本，块与块之间有换行', async () => {
   await go();
   const r = await c.call('read_text', { scope: 'page', format: 'text' });
-  assert.match(r.text, /huashu-chrome 靶场/);
+  assert.match(r.text, /lingee-chrome 靶场/);
   assert.ok((r.text.match(/\n/g) || []).length > 20, '整页文本应保留换行，不能挤成一行');
 });

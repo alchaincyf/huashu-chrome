@@ -8,8 +8,8 @@
 // 点错的代价在真实登录态下可能是一笔真订单。
 
 (() => {
-  if (window.__huashuChrome) return;
-  window.__huashuChrome = true;
+  if (window.__lingeeChrome) return;
+  window.__lingeeChrome = true;
 
   let refMap = new Map();
   let snapshotSeq = 0;
@@ -923,6 +923,9 @@
       role: roleOf(el),
       prefer: preferOf(el),
       sensitive: isSensitive(el),
+      // 敏感动作的按钮文案：只在命中时取，给第二刀的确认弹窗命名用（lingee-chrome）。
+      // 取不到也不影响判定——弹窗里就少一行按钮名而已。
+      sensitiveLabel: isSensitive(el) ? labelOf(el).slice(0, 60) : '',
       pay: payInfo(el),
       baseline,
     };

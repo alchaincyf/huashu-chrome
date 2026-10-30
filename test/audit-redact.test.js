@@ -2,7 +2,7 @@
 //
 // 这套测试的由来是一次真实泄露：redact() 原先按顶层字段逐个点名
 //（params.text、params.fields[].text），而 act 把动作放在 params.steps[] 里，
-// 于是整条穿了过去。事后翻 ~/.huashu-chrome/audit.jsonl，里面躺着
+// 于是整条穿了过去。事后翻 ~/.lingee-chrome/audit.jsonl，里面躺着
 // 5 条疑似密码和 27 个手机号的明文，最早的已经在那儿放了一整天。
 //
 // 更糟的是产品自己把用户往那条路上引：MCP 的说明文字写着
@@ -128,12 +128,12 @@ test('正文脱敏不能吃掉定位信息：URL、路径、选择器、代码',
     prompt: '在 https://video.twimg.com/amplify_video/2085812345678/vid/1280x720.mp4 上，'
           + '存到 /data/exports/2026-08-25/media/2085812345678.mp4',
     expr: 'document.querySelectorAll("input[name=is_author]")',
-    url: 'https://registry.npmjs.org/huashu-chrome',
+    url: 'https://registry.npmjs.org/lingee-chrome',
     selector: '#submit-btn-2026',
   });
   assert.match(out.prompt, /amplify_video\/2085812345678/, 'URL 被脱敏吃掉了');
   assert.match(out.prompt, /exports\/2026-08-25/, '文件路径被脱敏吃掉了');
   assert.equal(out.expr, 'document.querySelectorAll("input[name=is_author]")');
-  assert.equal(out.url, 'https://registry.npmjs.org/huashu-chrome');
+  assert.equal(out.url, 'https://registry.npmjs.org/lingee-chrome');
   assert.equal(out.selector, '#submit-btn-2026');
 });

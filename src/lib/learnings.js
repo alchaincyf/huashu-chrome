@@ -1,6 +1,6 @@
 // 经验库 —— 站点操作经验的读写。两层：
 //   出厂经验  docs/经验/<域名>.md   随 npm 包分发，升级即更新
-//   本机经验  ~/.huashu-chrome/learnings/<域名>.md   agent 干活时学到的增量，永不被升级覆盖
+//   本机经验  ~/.lingee-chrome/learnings/<域名>.md   agent 干活时学到的增量，永不被升级覆盖
 // 经验是提示不是规则：与页面实际不符时以实际为准，agent 负责改写本机那份。
 import fs from 'node:fs';
 import path from 'node:path';
@@ -11,7 +11,7 @@ import { validateScript } from '../../extension/script.js';
 
 const SEED_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'docs', '经验');
 // 环境变量仅供测试隔离用
-export const LEARNINGS_DIR = process.env.HUASHU_CHROME_LEARNINGS_DIR || path.join(HOME, 'learnings');
+export const LEARNINGS_DIR = process.env.LINGEE_CHROME_LEARNINGS_DIR || path.join(HOME, 'learnings');
 
 // 同一个站的多个门牌号归到一个键上
 const ALIAS = {
@@ -192,7 +192,7 @@ export function getLearnings(domain) {
   if (names.length) parts.push(`[可直接运行的剧本：${names.map((x) => `「${x}」`).join('、')}——见下文 \`\`\`act 块]`);
   const drafts = readDrafts(key);
   if (drafts.length) parts.push(draftsNote(key, drafts));
-  if (seed) parts.push(`## 出厂经验（huashu-chrome v${VERSION}）\n\n${seed}`);
+  if (seed) parts.push(`## 出厂经验（lingee-chrome v${VERSION}）\n\n${seed}`);
   if (local) parts.push(`## 本机经验\n\n${local}`);
   // 有剧本才多说一句——没有就零噪音（经验不阻塞，也不添乱）
   const n = countPlaybooks(parts.join('\n'));

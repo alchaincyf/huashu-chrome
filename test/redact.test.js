@@ -82,7 +82,7 @@ test('凭据类地址在 URL 层被认出来', () => {
 
 test('普通地址不会被误判成凭据页', () => {
   for (const u of [
-    'https://github.com/alchaincyf/huashu-chrome',
+    'https://github.com/alchaincyf/lingee-chrome',
     'https://example.com/articles/tokenomics',   // 「token」是子串，但不是完整路径段
     'http://127.0.0.1:8124/playground.html',
   ]) assert.equal(CRED_URL.test(u), false, u);

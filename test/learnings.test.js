@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-process.env.HUASHU_CHROME_LEARNINGS_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'hc-learnings-'));
+process.env.LINGEE_CHROME_LEARNINGS_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'hc-learnings-'));
 const { getLearnings, saveLearnings, lintPlaybooks, LEARNINGS_DIR, cleanNote, saveDraft, adoptDraft } = await import('../src/lib/learnings.js');
 const { toRecipe } = await import('../extension/script.js');
 
@@ -106,7 +106,7 @@ test('把 get 的全文原样存回去：出厂段、提示语、重复小节都
 });
 
 test('回贴的出厂经验段整段剥掉，本机内容留下', () => {
-  const pasted = '## 出厂经验（huashu-chrome v1.2.1）\n\n出厂的一大段\n\n## 本机经验\n\n## 我的发现\n本机的一句';
+  const pasted = '## 出厂经验（lingee-chrome v1.2.1）\n\n出厂的一大段\n\n## 本机经验\n\n## 我的发现\n本机的一句';
   const out = cleanNote(pasted);
   assert.doesNotMatch(out, /出厂的一大段/);
   assert.match(out, /本机的一句/);

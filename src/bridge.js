@@ -8,10 +8,15 @@
 // 网页的 Origin 是自己的域名，扩展的是 chrome-extension://<id>。只放后者进来。
 import { WebSocketServer } from 'ws';
 import fs from 'node:fs';
-import { DEFAULT_PORT, writeBridgeInfo, newToken, tokenEquals, audit, ensureHome, ALLOWLIST_FILE } from './lib/paths.js';
+import { DEFAULT_PORT, writeBridgeInfo, newToken, tokenEquals, audit, ensureHome, ALLOWLIST_FILE, CONFIRM_FILE } from './lib/paths.js';
 import { VERSION } from './lib/version.js';
 // 纯字符串判定、不碰 chrome API，所以桥这边直接复用，不再抄一份
 import { scrubProse } from '../extension/redact.js';
+// 站点白名单的纯裁决逻辑（可单测）。桥这边只负责读文件，裁决交给它。
+import { decideSite } from './lib/allowlist.js';
+// 敏感动作确认闸的模式归一（可单测）。和 risk.js 一样放在 extension/、桥这边复用——
+// 桥只读文件取模式，真正的裁决在扩展侧：「这一下是不是删除/发布」要等元素定位完才知道。
+import { normalizeMode } from '../extension/confirm-gate.js';
 
 export { VERSION };
 
@@ -81,7 +86,7 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
   // 话术和 doctor、mcp-server 的 hint 保持一致：首选动作是扩展弹窗里的「重连」，
   // 不是去 chrome://extensions——插件从来没消失过，去那儿只会把人引向「重装」。
   const NO_EXT_MSG = '扩展没连上桥。桥已经替你等过一轮'
-    + `（最多 ${WAIT_MAX / 1000}s），它还没回来。让用户点一下浏览器工具栏的 huashu-chrome 图标 → 「重连」`
+    + `（最多 ${WAIT_MAX / 1000}s），它还没回来。让用户点一下浏览器工具栏的 lingee-chrome 图标 → 「重连」`
     + '（插件没消失，只是这条连接断了）；Chrome 没开就先开；改过扩展代码才需要去 chrome://extensions 重载。';
 
   let lastActivity = Date.now();
@@ -353,7 +358,7 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
     // sid 盖章：扩展据此维护每个会话自己的受控 tab 槽（多 agent 并发隔离）。
     // live 是此刻还连着的会话，扩展拿它判断某个标签页「还有没有主」。
     // client / label 是给人看的：页面上的控制标记要写出「Codex CLI」而不是一串 sid。
-    send(target, { ...msg, __k: key, sid: ws.sid, client: ws.client, label: ws.label, live: liveSessions() });   // __k 原样带回，用于精确路由
+    send(target, { ...msg, __k: key, sid: ws.sid, client: ws.client, label: ws.label, live: liveSessions(), confirmMode: readConfirmMode() });   // __k 原样带回，用于精确路由
   }
 
   function routeBack(ws, msg) {
@@ -388,26 +393,32 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
     if (msg.type === 'event' && extensions.has(ws)) broadcast(msg);
   }
 
-  // 站点白名单：默认拒绝。裁决在这里做，agent 够不着。
-  // allowlist.json 不存在 = 尚未配置 = 全放行（P0 开发期），P1 改为默认拒绝。
+  // 站点白名单：裁决在这里做，agent 够不着。
+  // 默认放行、主动开启：allowlist.json 不存在或 mode≠allowlist = 全放行（不打断升级）；
+  // 用户把 mode 设成 'allowlist' 后才进入"默认拒绝、只许名单内"。裁决逻辑在 lib/allowlist.js（可单测）。
   function checkSite(msg) {
     const url = msg.params?.url;
     if (!url) return null;
-    let list;
+    let list = null;
     try {
       list = JSON.parse(fs.readFileSync(ALLOWLIST_FILE, 'utf8'));
     } catch {
-      return null;
+      list = null; // 文件不存在/损坏 = 未配置 = 放行
     }
-    if (list.mode !== 'allowlist') return null;
-    let host;
+    const gate = decideSite(url, list);
+    if (gate) audit({ ev: 'blocked_site', host: gate.message, client: msg.client });
+    return gate;
+  }
+
+  // 确认闸模式（第二刀）。桥只读文件取出 'off'|'sensitive'，不裁决——
+  // 「这一下是不是敏感动作」要等扩展定位完元素才知道。读到的模式随命令发给扩展，
+  // 由 performCore 结合 loc.sensitive 决定要不要弹窗。confirm.json 不存在/损坏 = off。
+  function readConfirmMode() {
     try {
-      host = new URL(url).hostname;
+      return normalizeMode(JSON.parse(fs.readFileSync(CONFIRM_FILE, 'utf8')));
     } catch {
-      return null;
+      return 'off';
     }
-    const ok = (list.sites || []).some((s) => host === s || host.endsWith('.' + s));
-    return ok ? null : { code: 'SITE_NOT_ALLOWED', message: `${host} 不在授权站点列表里，请在扩展弹窗里授权` };
   }
 
   function send(ws, obj) {
