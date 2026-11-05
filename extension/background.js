@@ -292,6 +292,9 @@ const NO_SLOT_CMDS = new Set(['tabs', 'download', 'reload', 'status']);
 async function onMessage(msg) {
   if (msg.type === 'event') return onBridgeEvent(msg);
   if (msg.type !== 'cmd') return;
+  // 护栏只服务于「上一条动作」，生命周期到这条命令为止。这样 ask / 支付确认 /
+  // 截图 focus 这些显式要前台的动作不必各自知道护栏的存在——它们天然就不受管。
+  frontGuard = null;
   try {
     const handler = HANDLERS[msg.cmd];
     if (!handler) throw err('INTERNAL', `未知命令 ${msg.cmd}`);
@@ -1395,6 +1398,14 @@ const RECENT_TABS = 'recentTabs';
 const RECENT_CAP = 20;
 
 chrome.tabs.onCreated.addListener(async (tab) => {
+  noteGuardTab(tab);   // 同步：激活判据不能等 storage
+  // 开页那一刻就按回去：onCreated 比 onActivated 早一步，赶在浏览器把新页画出来之前
+  // 归还，用户就看不到「闪一下」。同步调用、不做任何 await——晚一个 await 就是一帧。
+  // 判据和 settleFront 是同一个：只还「这次动作登记过的页」。只看窗口的话，别的会话
+  // 在同一窗口开的页也会被按回去——实测两个会话同窗开页，前台被来回拉了三次。
+  if (frontGuard && frontGuard.opened.has(tab.id)) {
+    void chrome.tabs.update(frontGuard.backTo, { active: true }).catch(() => { /* 原来那页已关 */ });
+  }
   const { [RECENT_TABS]: list = [] } = await chrome.storage.session.get(RECENT_TABS);
   list.push({ id: tab.id, opener: tab.openerTabId, win: tab.windowId, at: Date.now() });
   await chrome.storage.session.set({ [RECENT_TABS]: list.slice(-RECENT_CAP) });
@@ -1422,6 +1433,116 @@ async function childOpenedSince(openerId, since) {
     return null;   // 开完又被关掉了（有些站点用它做中转）
   }
 }
+
+// 把前台还给用户原来那页。
+//
+// 页面自己 window.open 出来的子页，Chrome 默认把它设成前台——用户正在读的页被顶掉，
+// 而扩展只是「跟过去」，主观上根本没想抢。所以跟过去之后原样还回去。
+//
+// 只在两条都成立时动手：子页和原来那页在同一窗、且子页此刻确实是前台。
+// 缺一条就说明前台不是这次操作弄丢的（用户自己切走了、或那是另一个窗口），
+// 这时再动一次 tabs.update 只会更吵。
+async function restoreFront(prevId, childId) {
+  if (!prevId || prevId === childId) return false;
+  try {
+    const [prev, childTab] = await Promise.all([chrome.tabs.get(prevId), chrome.tabs.get(childId)]);
+    if (prev.windowId !== childTab.windowId || !childTab.active) return false;
+    await chrome.tabs.update(prevId, { active: true });
+    return true;
+  } catch {
+    return false;   // 原来那页在这期间被关了
+  }
+}
+
+// 页面主世界里的 window.open 替换。
+//
+// 站点用 window.open / target=_blank 开出来的页，Chrome 会把它切成前台——扩展事后
+// 只能「切回来」，而切回来之前那一帧已经画出来了，用户看到的就是闪一下。想真无感，
+// 唯一的办法是不让它前台打开：把 URL 递回扩展，由扩展以 active:false 建页。
+//
+// 不看窗口名。窗口名只说明调用方想要一个句柄，跟这次开页该不该到前台没有关系：
+// 用它区分会把不带窗口名的登录弹窗拦进后台，也会把带了名字的普通开页放过去抢前台。
+// 哪些场景该让页到前台，由 standDownFront 按明确信号放通，不在这里猜。
+// 替换是幂等的，注入在每次动作之前。
+function pageOpenShim() {
+  if (window.__hcOpenHooked) return;
+  window.__hcOpenHooked = true;
+  const orig = window.open;
+  window.open = function (url) {
+    try {
+      if (typeof url === 'string' && /^https?:/i.test(url)) {
+        window.postMessage({ __hcOpenBg: true, url }, '*');
+        return null;
+      }
+    } catch { /* 退原路 */ }
+    return orig.apply(window, arguments);
+  };
+}
+
+// 前台护栏：**开页那一刻就拉回来**，不靠延迟轮询。
+//
+// 站点 window.open 出来的页会被 Chrome 切成前台（实测连开两个，第二个晚一秒又来一次）。
+// chrome.tabs.onActivated 在切换发生的同时就响，这里直接判断「切过去的这页是不是
+// 这次动作开出来的」，是就立刻把关标还给用户原来那页。比 setTimeout 轮询快一个数量级，
+// 也不会出现「用户已经看了一秒才被拉回」的观感。
+//
+// 判据用 RECENT_TABS（onCreated 记账）：只有「动作开始之后创建」的页才还，
+// 用户自己点的页、别的会话的页都不在这个集合里——这也是和多会话隔离共存的前提。
+let frontGuard = null;   // { backTo, winId, since, until }
+
+// 撤防：这一拍之后开出的页不再被按回后台。
+//
+// 护栏默认把「这次动作开出来的页」切回后台，因为页面自己开的页不该抢用户的前台。
+// 但有的动作意义就是让用户看见那个页，前台是它要的结果。这类动作不在这里列举——
+// 列举就会漏。要抢前台一律走 takeFront：它先撤防再聚焦，新增一种场景只是多一处
+// 调用，不用记得还要来这里登记。直接 chrome.tabs.update({active:true}) 会把
+// 这次动作开出的页按回后台，test/front-guard.test.js 会拦住这种写法。
+function standDownFront() {
+  frontGuard = null;
+}
+
+// 把一个标签页切到前台，并让护栏给它让路。reason 写明凭什么抢
+// （支付确认、调用方传了 focus、正在请用户看这个页），只进注释不进逻辑。
+async function takeFront(tabId, reason) {
+  void reason;
+  standDownFront();
+  const tab = await chrome.tabs.get(tabId);
+  await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+  await chrome.tabs.update(tabId, { active: true });
+  return tab;
+}
+
+async function armFrontGuard(backTo, winId) {
+  if (!backTo) return;
+  // 记下动作开始那一刻窗口在不在前台：只有「本来不在前台、被页面拉到前台」才去还焦点，
+  // 用户自己就在浏览器里操作时不该动他。
+  const w = await chrome.windows.get(winId).catch(() => null);
+  frontGuard = {
+    backTo, winId, wasFocused: !!w?.focused,
+    since: Date.now(), until: Date.now() + 5000, opened: new Set(),
+  };
+}
+
+// 「这次动作开出来的页」记在内存里、由 onCreated 同步登记。
+// 不能用 storage 里的 recentTabs 当判据：激活往往比那条异步记账先到，查不到就漏，
+// 实测就是这么漏的（日志里两次前台切换、一次归还都没有）。
+function noteGuardTab(tab) {
+  if (!frontGuard || Date.now() > frontGuard.until) return;
+  if (tab.windowId !== frontGuard.winId) return;
+  frontGuard.opened.add(tab.id);
+}
+
+async function settleFront(tabId, windowId) {
+  if (!frontGuard || tabId === frontGuard.backTo) return;
+  if (Date.now() > frontGuard.until) { frontGuard = null; return; }
+  if (windowId !== frontGuard.winId) return;
+  if (!frontGuard.opened.has(tabId)) return;   // 不是你这次开的页，不碰
+  await chrome.tabs.update(frontGuard.backTo, { active: true }).catch(() => { /* 原来那页已关 */ });
+}
+
+chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
+  void settleFront(tabId, windowId);
+});
 
 // agent 自己导航到的地方不算漂移
 const markNavigated = async (tabId, sid) => {
@@ -1524,9 +1645,8 @@ function pollPanel(id, timeout) {
 let payTimeout = 180000;
 
 async function confirmPay(id, pay) {
-  const tab = await chrome.tabs.get(id);
-  await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
-  await chrome.tabs.update(id, { active: true });
+  // 支付确认就是要用户看着这个页点头
+  const tab = await takeFront(id, '支付确认');
   await chrome.scripting.executeScript({ target: { tabId: id }, files: ['mark.js'] });
 
   chrome.notifications?.create(`hc-pay-${Date.now()}`, {
@@ -1631,6 +1751,16 @@ const writesText = (ws) => ws.slice(0, 4).map((w) => `${w.m} ${w.u} → ${w.s ==
 async function performCore(id, cmd, p, { blockSensitive = false } = {}, ctx) {
   const { frameId, params } = await prepare(id, p);
   const before = (await chrome.tabs.get(id)).url;
+  const tabBefore = await chrome.tabs.get(id);
+  // 前台保护：站点 window.open / target=_blank 开出来的子页，Chrome 会把它切成前台，
+  // 用户正在看的那页被顶掉——扩展只是跟过去，从来没想过要抢。
+  // 先在页面里拦下：链接点击和无名 window.open 都改由扩展以 active:false 建页，
+  // 浏览器根本不会切前台。拦不住的（内容脚本没注入、带窗口名的 OAuth 弹窗）由护栏兜底。
+  void chrome.scripting.executeScript({ target: { tabId: id }, world: 'MAIN', func: pageOpenShim })
+    .catch(() => { /* 页面不允许注入（chrome://、扩展页）就退回护栏 */ });
+  void toContent(id, { __hcArmLinks: true }).catch(() => { /* 没有内容脚本就退回护栏 */ });
+  const frontBefore = (await chrome.tabs.query({ active: true, windowId: tabBefore.windowId }))[0]?.id;
+  await armFrontGuard(frontBefore, tabBefore.windowId);
   const startedAt = Date.now();
 
   // 定位：resolve、滚动、遮挡检测全在 content script 里做（一行没改），
@@ -1766,7 +1896,12 @@ async function performCore(id, cmd, p, { blockSensitive = false } = {}, ctx) {
     await setActiveTabId(child.id);
     await claimTab(ctx?.sid, child.id, ctx);
     await markNavigated(child.id, ctx?.sid);
-    return { note, l2note, ev, navigated, upgraded, followed: { from: id, to: child.id, url: child.url, how: child.how } };
+    const front = await restoreFront(frontBefore, child.id);
+    return {
+      note: front ? `${note}（前台已还给你原来那页）` : note,
+      l2note, ev, navigated, upgraded, frontRestored: front,
+      followed: { from: id, to: child.id, url: child.url, how: child.how },
+    };
   }
 
   return { note, l2note, ev, navigated, upgraded };
@@ -2451,8 +2586,8 @@ const HANDLERS = {
             `在那之前，要截它必须切到前台——传 focus:true 显式同意打断用户，` +
             `或者先用 snapshot / read_text 读内容（不需要前台）。`);
         }
-        await chrome.tabs.update(id, { active: true });
-        await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+        // 调用方显式传了 focus:true，同意打断用户
+        await takeFront(id, '截图 focus:true');
         await sleep(250);
         // 切换可能没成功（窗口最小化、被别的窗口盖住）。不确认就截，
         // 截到的还是用户那一页——这正是第二次事故的成因。
@@ -2531,7 +2666,7 @@ const HANDLERS = {
       if (label) await chrome.storage.local.set({ [labelKey(id)]: label });
       await setActiveTabId(id);
       await claimTab(sid, id, ctx);
-      if (p.focus) await chrome.tabs.update(id, { active: true });
+      if (p.focus) await takeFront(id, '切换受控标签 focus:true');
       return { text: warn + `受控标签页切到 [${id}]${label ? `「${label}」` : ''}` };
     }
     if (p.action === 'close') {
@@ -2570,9 +2705,8 @@ const HANDLERS = {
     }
 
     if (p.focus !== false) {
-      const tab = await chrome.tabs.get(id);
-      await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
-      await chrome.tabs.update(id, { active: true });
+      // 没传 focus:false，就是在请用户看这个页
+      await takeFront(id, 'ask');
     }
 
     // ask 的浮条并进了 mark.js（统一呈现层），协议没变，只是换了宿主文件
@@ -2771,6 +2905,29 @@ chrome.runtime.onMessage.addListener((m, sender, sendResponse) => {
 
   // 页内小头像被点了：打开这个窗口的侧栏。sidePanel.open 要求用户手势，
   // 内容脚本在 click 里发来的消息带着这次手势（Chrome 116+）。
+  // 页面主世界拦下的 window.open：由扩展在**后台**建页，浏览器不会切前台。
+  if (m?.__hcOpenBg && sender?.tab) {
+    void (async () => {
+      const src = sender.tab;
+      const url = String(m.__hcOpenBg).slice(0, 2000);
+      if (!/^https?:/i.test(url)) return;
+      // 紧跟同组末尾，和 tabs(new) 一致；组外就落在原页后面
+      let index;
+      if (src.groupId !== -1) {
+        const inGroup = (await chrome.tabs.query({ windowId: src.windowId }))
+          .filter((t) => t.groupId === src.groupId)
+          .sort((a, b) => a.index - b.index);
+        const tail = inGroup[inGroup.length - 1];
+        if (tail) index = tail.index + 1;
+      }
+      // openerTabId 得带上：新页是扩展建的，不声明来源的话浏览器不记父子关系，
+      // 后面「这次点击开出来的页」就只能退回去猜「同窗口里刚出现的那个」。
+      await chrome.tabs.create({ url, active: false, windowId: src.windowId, openerTabId: src.id, ...(index === undefined ? {} : { index }) })
+        .catch(() => { /* 窗口没了就算了 */ });
+    })();
+    return false;
+  }
+
   if (m?.__hcPanel === 'open' && sender.tab) {
     chrome.sidePanel.open({ windowId: sender.tab.windowId })
       .then(() => sendResponse({ ok: true }), (e) => sendResponse({ ok: false, error: e.message }));

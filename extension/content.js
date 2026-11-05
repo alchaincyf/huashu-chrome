@@ -2008,7 +2008,37 @@
 
   // ---------- 消息入口 ----------
 
+  // 点中 target="_blank" 的链接时，别交给浏览器去开前台新标签——它会让 Chrome 认为
+  // 「用户要开新页」，把前台切走。改成让扩展以 active:false 建页，全程无感。
+  //
+  // 只在**动作布防窗口内**生效（后台在每次动作前调 __hcArmLinks），否则用户自己在这个
+  // 页面上点链接也会变成后台开页。捕获阶段 + stopImmediatePropagation：必须抢在站点
+  // 自己的 click 处理器之前，否则它们会先跳转。
+  let armUntil = 0;
+  document.addEventListener('click', (e) => {
+    if (Date.now() > armUntil) return;
+    const a = e.target?.closest?.('a[href][target="_blank"]');
+    if (!a) return;
+    const href = a.href || '';
+    if (!/^https?:/i.test(href)) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    armUntil = 0;   // 一次动作只接管一次
+    chrome.runtime.sendMessage({ __hcOpenBg: href }).catch(() => { /* 后台没接住就算了 */ });
+  }, true);
+
+  // 页面主世界里 window.open 被拦下后（见 background 的 pageOpenShim），URL 走这条
+  // postMessage 递进来，再由扩展在后台开页——这样浏览器根本不会把前台切过去。
+  window.addEventListener('message', (e) => {
+    if (e.source !== window) return;
+    const d = e.data;
+    if (!d || d.__hcOpenBg !== true || typeof d.url !== 'string') return;
+    if (!/^https?:/i.test(d.url)) return;
+    chrome.runtime.sendMessage({ __hcOpenBg: d.url }).catch(() => { /* 后台没接住就算了 */ });
+  });
+
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    if (msg?.__hcArmLinks) { armUntil = Date.now() + 5000; sendResponse({ ok: true }); return false; }
     if (!msg || !msg.__hc) return;
     (async () => {
       try {
