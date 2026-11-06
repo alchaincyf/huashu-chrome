@@ -1992,7 +1992,14 @@ function effectLines({ note, l2note, ev, upgraded, followed }) {
 
 async function perform(id, cmd, p, ctx) {
   const drift = await driftNote(id, ctx?.sid);
-  const r = await performCore(id, cmd, p, {}, ctx);
+  let r;
+  try {
+    r = await performCore(id, cmd, p, {}, ctx);
+  } finally {
+    // 动作一结束就撤防：布防只为这次动作期间拦下页面自己开的新标签。不撤的话，
+    // 用户在这之后几秒内自己开页也会被拦。performCore 有多条 return，用 finally 才不漏。
+    await toContent(id, { __hcDisarmLinks: true }).catch(() => {});
+  }
   // 跟到新标签页了就拍新的那个——拍老的等于把 agent 留在它已经离开的页面上
   const snap = await snapshotAll(r.followed ? r.followed.to : id);
   const head = [drift, effectLines(r)].filter(Boolean).join('\n');

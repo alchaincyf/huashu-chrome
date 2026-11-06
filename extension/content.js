@@ -2011,11 +2011,20 @@
   // 点中 target="_blank" 的链接时，别交给浏览器去开前台新标签——它会让 Chrome 认为
   // 「用户要开新页」，把前台切走。改成让扩展以 active:false 建页，全程无感。
   //
-  // 只在**动作布防窗口内**生效（后台在每次动作前调 __hcArmLinks），否则用户自己在这个
-  // 页面上点链接也会变成后台开页。捕获阶段 + stopImmediatePropagation：必须抢在站点
-  // 自己的 click 处理器之前，否则它们会先跳转。
+  // 两个前提缺一不可：
+  //   ① 在动作布防窗口内（后台动作前调 __hcArmLinks，动作结束调 __hcDisarmLinks）；
+  //   ② 这个点击不是人点的。**真人点击必须放行**——他想在新标签里看，把页开到后台
+  //      背后是纯粹帮倒忙。合成点击（isTrusted=false）才是扩展自己发的。
+  //
+  // 代价：扩展升级后的真实点击（CDP 派发，isTrusted=true）也在放行之列，那一拍由护栏
+  // 把前台还回去，最多闪一帧。分不清「扩展的真实点击」和「人的点击」是浏览器的限制，
+  // 宁可闪一帧也不拦人。
+  //
+  // 捕获阶段 + stopImmediatePropagation：必须抢在站点自己的 click 处理器之前，
+  // 否则它们会先跳转。
   let armUntil = 0;
   document.addEventListener('click', (e) => {
+    if (e.isTrusted) return;                 // 人点的，一律不拦
     if (Date.now() > armUntil) return;
     const a = e.target?.closest?.('a[href][target="_blank"]');
     if (!a) return;
@@ -2023,7 +2032,6 @@
     if (!/^https?:/i.test(href)) return;
     e.preventDefault();
     e.stopImmediatePropagation();
-    armUntil = 0;   // 一次动作只接管一次
     chrome.runtime.sendMessage({ __hcOpenBg: href }).catch(() => { /* 后台没接住就算了 */ });
   }, true);
 
@@ -2038,7 +2046,12 @@
   });
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-    if (msg?.__hcArmLinks) { armUntil = Date.now() + 5000; sendResponse({ ok: true }); return false; }
+    // 布防只在这次动作期间有效：动作结束会收到 __hcDisarmLinks 立刻撤掉。
+    // 窗口纯粹兜底——撤防消息丢了（页面在动作中导航、内容脚本重载、SW 被回收），
+    // 到期就自动失效。3 秒够覆盖一次动作，又短到兜底生效时顶多拦站点自己的 window.open 一次。
+    // 真人点击另有 isTrusted 放行，不靠这个窗口。
+    if (msg?.__hcArmLinks) { armUntil = Date.now() + 3000; sendResponse({ ok: true }); return false; }
+    if (msg?.__hcDisarmLinks) { armUntil = 0; sendResponse({ ok: true }); return false; }
     if (!msg || !msg.__hc) return;
     (async () => {
       try {
