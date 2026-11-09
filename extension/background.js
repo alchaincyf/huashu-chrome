@@ -440,6 +440,7 @@ async function multiLineNote(sid, explicitTab, cmd, resolved) {
 function onBridgeEvent(msg) {
   if (msg.event !== 'sessions') return;
   // 先落盘再重算：resyncMarks 里的 ownersOfTab 读的就是 storage 名单
+  void pruneNetHook(msg.live);
   return noteSession(null, null, msg.live).then(() => resyncMarks());
 }
 
@@ -1121,19 +1122,73 @@ const NET_SCRIPT_ID = 'hc-net-hook';
 
 // hook 必须赶在页面自己的 JS 之前，否则首屏那批请求全漏掉——而列表数据恰恰在首屏那批里。
 // 所以走 registerContentScripts + document_start，事后 executeScript 只能算补救。
-async function ensureNetHook() {
+//
+// 注册范围只到「活着的会话抓过包的站点」，会话全走了就注销，persistAcrossSessions:false
+// 让它也活不过 Chrome 重启。以前注册的是 <all_urls> 且从不注销：用过一次 network 之后，
+// 用户自己打开的每个网页都被改写 fetch，1.3.0 的钩子还会把 SSE 卡到流结束——
+// 乐享 AI 这类流式对话页「时好时坏、回答长就挂」，禁用扩展才好（2026-11-08 用户来信）。
+// 名单放 storage.session：扩展重载时它和动态注册的脚本一起清空，两边始终对得上。
+// 思路来自 claymorelab 的 PR #16。
+const NET_SITES_KEY = 'netHookSites';   // { sid: [match pattern] }
+let netHookChain = Promise.resolve();
+const withNetSites = (fn) => (netHookChain = netHookChain.then(async () => {
+  const sites = (await chrome.storage.session.get(NET_SITES_KEY))[NET_SITES_KEY] || {};
+  if (fn(sites) === false) return;
+  await chrome.storage.session.set({ [NET_SITES_KEY]: sites });
+  await syncNetHook(sites);
+}).catch(() => {}));
+
+async function syncNetHook(sites) {
+  const matches = [...new Set(Object.values(sites).flat())];
   const existing = await chrome.scripting.getRegisteredContentScripts({ ids: [NET_SCRIPT_ID] }).catch(() => []);
-  if (existing.length) return false;
-  await chrome.scripting.registerContentScripts([{
+  if (!matches.length) {
+    if (existing.length) await chrome.scripting.unregisterContentScripts({ ids: [NET_SCRIPT_ID] });
+    return;
+  }
+  const script = {
     id: NET_SCRIPT_ID,
-    matches: ['<all_urls>'],
+    matches,
     js: ['net-hook.js'],
     runAt: 'document_start',
     world: 'MAIN',
     allFrames: false,
-  }]);
-  return true; // 刚注册，当前这个页面还没被 hook 到，得刷一次
+    persistAcrossSessions: false,
+  };
+  // 不用 updateContentScripts：旧版本留下的那份是 persistAcrossSessions:true，update 改不掉这一项
+  if (existing.length) await chrome.scripting.unregisterContentScripts({ ids: [NET_SCRIPT_ID] });
+  await chrome.scripting.registerContentScripts([script]);
 }
+
+async function ensureNetHook(tabId, sid) {
+  let pattern = null;
+  try {
+    const u = new URL((await chrome.tabs.get(tabId)).url || '');
+    if (u.protocol === 'http:' || u.protocol === 'https:') pattern = `${u.protocol}//${u.hostname}/*`;
+  } catch { /* chrome:// 之类本来也注不进 */ }
+  if (!pattern) return;
+  await withNetSites((sites) => {
+    const list = sites[sid || ''] ||= [];
+    if (list.includes(pattern)) return false;
+    list.push(pattern);
+  });
+}
+
+// 会话名单变了：死会话抓过的站点一起摘掉。没带 sid 的老桥命令记在 '' 下，等所有会话都走了再摘
+function pruneNetHook(live) {
+  const alive = new Set(live || []);
+  return withNetSites((sites) => {
+    let changed = false;
+    for (const sid of Object.keys(sites)) {
+      if (sid ? alive.has(sid) : alive.size) continue;
+      delete sites[sid];
+      changed = true;
+    }
+    return changed;
+  });
+}
+
+// 升级上来的旧版本留着一份 <all_urls> 的持久注册，SW 每次起来按名单校正一遍
+void withNetSites(() => {});
 
 // 顶层框架的快照 + 各子框架的快照，拼成一份。子框架的 ref 打上 @fN。
 async function snapshotAll(tabId, p = {}) {
@@ -2214,9 +2269,9 @@ const HANDLERS = {
   },
 
   // 看这个页面调了哪些接口、返回了什么。抓数据的首选入口。
-  async network(p, tabId) {
+  async network(p, tabId, ctx) {
     const id = await resolveTab(tabId);
-    const justRegistered = await ensureNetHook();
+    await ensureNetHook(id, ctx?.sid);
     // 当前页面若在注册之前就加载了，补一针（只能抓到此刻之后的请求）
     await chrome.scripting.executeScript({ target: { tabId: id }, world: 'MAIN', files: ['net-hook.js'] }).catch(() => {});
 
