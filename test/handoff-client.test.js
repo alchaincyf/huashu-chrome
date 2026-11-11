@@ -68,10 +68,12 @@ class FakeSocket extends EventEmitter {
     const msg = JSON.parse(raw);
     this.world.sent.push(msg);
     if (msg.type === 'hello') {
+      this.world.hellos = (this.world.hellos || 0) + 1;
+      const empty = this.world.hellos <= (this.world.emptyFirst || 0);
       const welcome = {
         type: 'welcome', bridge: '1.4.0', v: 1,
         capabilities: this.world.capabilities ?? ['targeted-routing-v1', 'session-handoff-v1'],
-        extensions: this.world.browsers.map((b) => b.inst),
+        extensions: empty ? [] : this.world.browsers.map((b) => b.inst),
       };
       queueMicrotask(() => this.emit('message', Buffer.from(JSON.stringify(welcome))));
       return;
@@ -363,4 +365,16 @@ test('grants prints each profile and grant, and marks the one run will use', asy
   assert.equal(await runCli('grants', [], { clientOptions: w.options, stdout: o.stream, stderr: streams().stream }), 0);
   assert.match(o.out.text, /"Work".*\n.*✓ amazon-sc .*on, 1 tab\(s\)  \[run uses this profile\]/);
   assert.match(o.out.text, /"Home".*\n.*· amazon-sc .*off/);
+});
+
+test('right after a bridge restart: waits for the extensions to dial back in, then gives up with NO_EXTENSION', async () => {
+  const w = world([browser(WORK)], { emptyFirst: 2 });
+  const s = await getSession({ ...w.options, grant: 'amazon-sc', profile: 'Work', extensionWaitMs: 3000 });
+  assert.equal(s.profile.name, 'Work');
+  assert.equal(w.hellos, 3, 'reconnected until a profile was there');
+
+  const never = world([browser(WORK)], { emptyFirst: 99 });
+  const started = Date.now();
+  await assert.rejects(getSession({ ...never.options, grant: 'amazon-sc', profile: 'Work', extensionWaitMs: 1200 }), code('NO_EXTENSION'));
+  assert.ok(Date.now() - started < 4000);
 });

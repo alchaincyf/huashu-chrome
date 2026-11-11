@@ -81,6 +81,9 @@ export function createMemory(file = MEMORY_FILE) {
  */
 export async function chooseProfile({ instances, grant, profile, memory, statusOf }) {
   const headed = instances.filter((i) => !i.headless);
+  if (!headed.length) {
+    throw safeError('No Chrome profile is connected to the bridge. Open Chrome with the huashu-chrome extension.', 'NO_EXTENSION');
+  }
   if (profile !== undefined) {
     return { instance: matchProfile(headed, profile), source: 'explicit', remember: true };
   }
@@ -94,9 +97,6 @@ export async function chooseProfile({ instances, grant, profile, memory, statusO
       );
     }
     return { instance: live, source: 'remembered', remember: false };
-  }
-  if (!headed.length) {
-    throw safeError('No Chrome profile is connected to the bridge. Open Chrome with the huashu-chrome extension.', 'NO_EXTENSION');
   }
   const on = [];
   let old = 0;

@@ -55,6 +55,20 @@ function requireHandoff(welcome) {
 
 const targetOf = (inst) => ({ extensionId: inst.extensionId, instanceId: inst.instanceId });
 
+// Right after a bridge (re)start the extensions take a few seconds to dial back
+// in, and the welcome lists only who is connected at that instant. Reconnect
+// until at least one Chrome profile is there, or give up after waitMs.
+export const EXTENSION_WAIT_MS = 8000;
+async function connectWithExtensions(options, { waitMs = EXTENSION_WAIT_MS, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+  const end = Date.now() + waitMs;
+  for (;;) {
+    const client = await connect(options);
+    if (client.welcome.instances.some((i) => !i.headless) || Date.now() >= end) return client;
+    client.close();
+    await sleep(500);
+  }
+}
+
 function validateOptions({ grant, profile, tabId, storeId, timeoutMs }) {
   if (typeof grant !== 'string' || !GRANT_ID.test(grant)) throw safeError('--grant needs a grant id such as amazon-sc. `huashu-chrome grants` lists them.', 'USAGE');
   if (profile !== undefined && (!str(profile, 128) || !profile.trim())) throw safeError('--profile needs a profile name or id.', 'USAGE');
@@ -66,12 +80,12 @@ function validateOptions({ grant, profile, tabId, storeId, timeoutMs }) {
 export async function getSession(options = {}) {
   const {
     grant, profile, tabId, storeId,
-    memory = createMemory(), timeoutMs = CLIENT_TIMEOUT_MS, crypto, now = Date.now,
+    memory = createMemory(), timeoutMs = CLIENT_TIMEOUT_MS, crypto, now = Date.now, extensionWaitMs,
     ...connectOptions
   } = options;
   validateOptions({ grant, profile, tabId, storeId, timeoutMs });
   const keys = await newKeyPair(crypto);
-  const client = await connect({ ...connectOptions, timeoutMs });
+  const client = await connectWithExtensions({ ...connectOptions, timeoutMs }, { waitMs: extensionWaitMs });
   try {
     requireHandoff(client.welcome);
     const statuses = new Map();
@@ -120,9 +134,9 @@ export async function getSession(options = {}) {
 }
 
 export async function getStatus(options = {}) {
-  const { profile, memory = createMemory(), timeoutMs = CLIENT_TIMEOUT_MS, ...connectOptions } = options;
+  const { profile, memory = createMemory(), timeoutMs = CLIENT_TIMEOUT_MS, extensionWaitMs, ...connectOptions } = options;
   if (profile !== undefined && (!str(profile, 128) || !profile.trim())) throw safeError('--profile needs a profile name or id.', 'USAGE');
-  const client = await connect({ ...connectOptions, timeoutMs });
+  const client = await connectWithExtensions({ ...connectOptions, timeoutMs }, { waitMs: extensionWaitMs });
   try {
     requireHandoff(client.welcome);
     const headed = client.welcome.instances.filter((i) => !i.headless);
