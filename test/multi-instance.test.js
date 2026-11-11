@@ -133,12 +133,22 @@ test('一个实例断开 —— 只失败它承接的命令，另一个照常干
   assert.equal(r.error.code, 'NO_EXTENSION', 'a 承接的在途命令宽限期过后要失败');
   assert.match(r.error.message, /可能已经在页面上生效/, '要提醒 agent 别把一次点击做成两次');
 
-  // b 还在，桥不该认为「扩展离线」——新命令要能正常发出去
-  g.ws.send(JSON.stringify({ type: 'cmd', id: 'c-after', cmd: 'status', params: {} }));
+  // b 还在，桥不该认为「扩展离线」——别的会话的新命令要能正常发出去
+  const other = await agent('s-fail-other');
+  other.ws.send(JSON.stringify({ type: 'cmd', id: 'c-other', cmd: 'status', params: {} }));
   await settle(300);
   assert.equal(b.cmds.length, 1, 'a 断开不该影响 b 接活');
 
-  b.ws.close(); g.ws.close();
+  // 但 s-fail 自己绑定的是 a：它的下一条命令要等 a 回来，不能悄悄落进 b 那个账号
+  g.ws.send(JSON.stringify({ type: 'cmd', id: 'c-after', cmd: 'status', params: {} }));
+  await settle(200);
+  assert.equal(b.cmds.length, 1, '绑定 a 的会话不该被换到 b');
+  const a2 = await ext({ instanceId: 'inst-A2', headless: false });
+  await settle(300);
+  assert.equal(a2.cmds.length, 1, 'a 回来后排队的命令要送到 a');
+  assert.equal(a2.cmds[0].id, 'c-after');
+
+  a2.ws.close(); b.ws.close(); g.ws.close(); other.ws.close();
   await settle();
 });
 

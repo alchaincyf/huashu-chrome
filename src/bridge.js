@@ -37,6 +37,9 @@ const IDLE_EXIT_MS = 30 * 60 * 1000; // 半小时没人用就自己退，别留�
 const EXT_SILENCE_MS = 50000;        // 扩展每 15 秒一次心跳，连着三拍没到就先探一下
 const EXT_PROBE_MS = 15000;          // 探了还不回，再等这么久才判死
 const ORPHAN_GRACE_MS = 15000;       // 扩展断开时在途命令的宽限：一个心跳周期，够它重连并补发回执
+const MAX_TARGET_ID_LENGTH = 128;
+const PIN_CAP = 1000;                // 会话→实例的绑定上限（按最近使用淘汰）
+const TAB_OWNER_CAP = 5000;          // tabId→实例的户口簿上限
 
 // writeInfo=false 供测试用：不写 bridge.json，否则测试桥的 token 会盖掉
 // 真在跑的那个桥，用户所有 agent 会话当场断连。
@@ -111,7 +114,99 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
     const pool = headed.length ? headed : live;
     return pool.reduce((a, b) => (a.lastRx >= b.lastRx ? a : b));
   }
-  const extLabel = (ws) => `Chrome ${ws.chromeVersion || '?'}${ws.headless ? ' · headless' : ''} · 扩展 ${ws.extVersion}`;
+  const extLabel = (ws) => `Chrome ${ws.chromeVersion || '?'}${ws.headless ? ' · headless' : ''} · 扩展 ${ws.extVersion}`
+    + `${ws.instanceId ? ` · ${String(ws.instanceId).slice(0, 8)}` : ''}`;
+
+  // ---------- 多 profile 路由 ----------
+  //
+  // 同一份扩展被多个 Chrome profile 加载时，每个 profile 是一个实例。
+  // primary() 按 lastRx 挑，而心跳也刷新 lastRx——于是一个会话的命令落在
+  // 哪个 profile 取决于心跳节拍，任务做到一半就可能换了账号。更糟的是 tabId：
+  // 不同 user-data-dir 的 Chrome 各自从小数字起编号，同一个 tabId 在两边
+  // 可能都存在，命令就会在别人的账号里点下去。
+  //
+  // 两条规则把它钉死：
+  // 1) 会话绑定：一个会话第一次落到哪个实例，之后都去那里。实例瞬断就等它回来，
+  //    绝不悄悄换到另一个 profile；等满窗口还不回来才解绑并明说。
+  // 2) tabId 认主：桥从回执里记下每个 tabId 属于哪个实例，带 tabId 的命令
+  //    直接送到它的主人那里——哪怕不是本会话绑定的实例。
+  const identityKey = (e) => `${e.extensionId}\u0000${e.instanceId}`;
+  const liveByKey = (key) => liveExtensions().find((e) => identityKey(e) === key) || null;
+  const sessionPins = new Map();     // sid → identityKey
+  const tabOwners = new Map();       // tabId → Set<identityKey>
+
+  function pinSession(sid, key) {
+    if (!sid) return;
+    sessionPins.delete(sid);
+    sessionPins.set(sid, key);
+    while (sessionPins.size > PIN_CAP) sessionPins.delete(sessionPins.keys().next().value);
+  }
+  function noteTab(tabId, key) {
+    const owners = tabOwners.get(tabId) || new Set();
+    tabOwners.delete(tabId);
+    owners.add(key);
+    tabOwners.set(tabId, owners);
+    while (tabOwners.size > TAB_OWNER_CAP) tabOwners.delete(tabOwners.keys().next().value);
+  }
+  function forgetTab(tabId, key) {
+    const owners = tabOwners.get(tabId);
+    if (!owners) return;
+    owners.delete(key);
+    if (!owners.size) tabOwners.delete(tabId);
+  }
+  function cmdTabId(msg) {
+    const v = msg.tabId ?? msg.params?.tabId;
+    return Number.isSafeInteger(v) && v > 0 ? v : null;
+  }
+
+  // 未显式指定 target 的命令该去哪个实例。
+  // 返回 { key, ext, reason }：ext 为 null 表示该实例此刻不在线（调用方排队等它）。
+  function resolveRoute(ws, msg) {
+    const pinKey = ws.sid ? sessionPins.get(ws.sid) : undefined;
+    const tabId = cmdTabId(msg);
+    const owners = tabId != null ? tabOwners.get(tabId) : null;
+    if (owners?.size) {
+      if (owners.size === 1) {
+        const [key] = owners;
+        return { key, ext: liveByKey(key), reason: 'tab', tabId };
+      }
+      // 同一个 tabId 在两个 profile 里都见过：本会话绑定的那个说了算，否则拒绝猜
+      if (pinKey && owners.has(pinKey)) return { key: pinKey, ext: liveByKey(pinKey), reason: 'tab', tabId };
+      return { error: { code: 'TAB_AMBIGUOUS', message: `Tab ${tabId} exists in more than one connected Chrome profile. `
+        + 'Run tabs(action:"list") to re-check, or open a fresh tab with tabs(action:"new").' } };
+    }
+    if (pinKey) return { key: pinKey, ext: liveByKey(pinKey), reason: 'pin' };
+    const ext = primary();
+    return ext ? { key: identityKey(ext), ext, reason: 'new' } : { key: null, ext: null, reason: 'none' };
+  }
+
+  // 从回执里学 tabId 归属。只信成功的回执，以及 NO_TAB 这种「确定不在这儿」的失败。
+  function learnTabs(p, ext, msg) {
+    const key = identityKey(ext);
+    if (!msg.ok) {
+      if (msg.error?.code === 'NO_TAB' && p.tabId != null) forgetTab(p.tabId, key);
+      return;
+    }
+    const closing = p.cmd === 'tabs' && p.action === 'close';
+    if (p.tabId != null) (closing ? forgetTab : noteTab)(p.tabId, key);
+    const d = msg.data;
+    if (!closing && d && Number.isSafeInteger(d.tabId) && d.tabId > 0) noteTab(d.tabId, key);
+    if (p.cmd === 'tabs' && p.action === 'list' && typeof d?.text === 'string') {
+      // list 是这个实例的全量：在里面的认领，不在里面的除名
+      const seen = new Set([...d.text.matchAll(/^\[(\d+)\]/gm)].map((m) => Number(m[1])));
+      for (const id of seen) noteTab(id, key);
+      for (const [id, owners] of [...tabOwners]) if (owners.has(key) && !seen.has(id)) forgetTab(id, key);
+    }
+  }
+  function extensionIdFromOrigin(origin) {
+    if (typeof origin !== 'string') return null;
+    try {
+      const url = new URL(origin);
+      return url.protocol === 'chrome-extension:' && url.hostname ? url.hostname : null;
+    } catch {
+      return null;
+    }
+  }
 
   const wss = new WebSocketServer({
     host: '127.0.0.1',
@@ -127,7 +222,8 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
 
   wss.on('connection', (ws, req) => {
     const origin = req.headers.origin;
-    ws.isExtension = typeof origin === 'string' && origin.startsWith('chrome-extension://');
+    ws.extensionId = extensionIdFromOrigin(origin);
+    ws.isExtension = !!ws.extensionId;
     ws.helloed = false;
     ws.connId = ++connSeq;
     ws.lastRx = Date.now();
@@ -182,7 +278,7 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
         // 命令早已在页面上执行完、回执也存在扩展的发件箱里等着补发。当场判死的
         // 后果是最坏的一种：点击已经生效，agent 收到「失败」，按提示重试
         // 就是双击/重复下单——正是这个产品明说要消灭的静默失败。
-        // 宽限期里回执按 __k 回来照常配对（routeBack 不看它从哪条连接来）；
+        // 宽限期里回执按 __k 回来照常配对（routeBack 校验扩展+实例身份）；
         // 宽限用完还没回来，再按原来的话报错。别的实例的命令一概不动。
         for (const [k, p] of pending) {
           if (p.ext !== ws || p.orphanTimer) continue;
@@ -213,14 +309,18 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
       ws.extProtocol = msg.v ?? PROTOCOL;
       ws.chromeVersion = msg.chrome || '?';
       ws.headless = !!msg.headless;
-      // 老扩展不报 instanceId。退回按扩展 id 认——行为和单槽那版一样
-      // （同一份代码的两个实例仍会互相替换），但至少不会跟新扩展混着算。
-      ws.instanceId = msg.instanceId || `ext:${msg.extId || '?'}`;
+      // 老扩展不报 instanceId 时，用实际 Origin 的扩展 id 退回兼容身份。
+      // 不采信 hello 里的 extId：它是客户端字段，不能作为连接身份。
+      ws.instanceId = typeof msg.instanceId === 'string'
+        && msg.instanceId.trim().length > 0
+        && msg.instanceId.length <= MAX_TARGET_ID_LENGTH
+        ? msg.instanceId
+        : `ext:${ws.extensionId}`;
 
-      // 同一个实例又连了一条：那是断线重连或重载扩展，旧的那条已经是死的，
+      // 同一个扩展、同一个实例又连了一条：那是断线重连或重载扩展，旧的那条已经是死的，
       // 顶掉它。**只顶同实例的**——顶错了就退回单槽，每秒互踢的老毛病就回来了。
       for (const old of extensions) {
-        if (old.instanceId === ws.instanceId && old !== ws) {
+        if (old.extensionId === ws.extensionId && old.instanceId === ws.instanceId && old !== ws) {
           extensions.delete(old);
           if (old.readyState === 1) old.close(4009, 'replaced');
         }
@@ -272,7 +372,9 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
         extensionProtocol: ext?.extProtocol,
         // 多实例是诊断信息，不是故障。doctor 要能说出「有两个 Chrome 连着」，
         // 否则「命令跑到另一个窗口去了」这种事只能靠猜。
+        capabilities: ['targeted-routing-v1', 'session-pinning-v1', 'tab-owner-routing-v1'],
         extensions: liveExtensions().map((e) => ({
+          extensionId: e.extensionId, instanceId: e.instanceId,
           chrome: e.chromeVersion, version: e.extVersion, headless: e.headless, primary: e === ext,
         })),
       });
@@ -286,9 +388,7 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
     // agent → extension
     if (msg.type === 'cmd') {
       if (!agents.has(ws)) return;
-      const target = primary();
-      if (!target) return enqueue(ws, msg);
-      return dispatch(ws, msg, target);
+      return dispatch(ws, msg);
     }
 
     // extension → agent
@@ -298,20 +398,46 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
   // 扩展不在时先挂起，等它回来（或等到窗口用完）。
   // 窗口取「调用方自己声明的 timeout」和 WAIT_MAX 里更小的那个——
   // 调用方说只等 300ms，桥就不该替它等 40 秒，那只是换了个姿势干等。
-  function enqueue(ws, msg) {
-    const fail = () => send(ws, { type: 'res', id: msg.id, ok: false, error: { code: 'NO_EXTENSION', message: NO_EXT_MSG } });
-    if (waiting.length >= WAIT_CAP) return fail();
+  //
+  // deadline：补发时重新解析路由，若要等的实例还没回来会再次入队——
+  // 带着原来的截止时间，不然每来一个别的实例，等待窗口就被白白续一次。
+  //
+  // route 说明在等谁。等的是本会话绑定的 profile、而别的 profile 都在线时，
+  // 超时就解绑并明说：悄悄换到另一个账号上接着点，比失败危险得多。
+  function enqueue(ws, msg, deadline, route) {
+    const fail = (capped = false) => {
+      const others = liveExtensions().length > 0;
+      if (!capped && others && route?.reason === 'pin' && sessionPins.get(ws.sid) === route.key) {
+        sessionPins.delete(ws.sid);
+        return send(ws, { type: 'res', id: msg.id, ok: false, error: { code: 'PROFILE_OFFLINE',
+          message: 'The Chrome profile this session was working in disconnected and did not come back. '
+            + 'Your next command will go to another connected profile — a different account. '
+            + 'Run tabs(action:"list") to see where you are before continuing.' } });
+      }
+      if (!capped && others && route?.reason === 'tab') {
+        return send(ws, { type: 'res', id: msg.id, ok: false, error: { code: 'TAB_PROFILE_OFFLINE',
+          message: `Tab ${route.tabId} belongs to a Chrome profile that is not connected right now. `
+            + 'Ask the user to open that profile, or work in a tab from tabs(action:"list").' } });
+      }
+      send(ws, { type: 'res', id: msg.id, ok: false, error: { code: 'NO_EXTENSION', message: NO_EXT_MSG } });
+    };
+    if (waiting.length >= WAIT_CAP) return fail(true);
 
-    const ms = Math.min(Number(msg.timeout) || WAIT_MAX, WAIT_MAX);
-    const item = { ws, msg };
+    const end = deadline ?? Date.now() + Math.min(Number(msg.timeout) || WAIT_MAX, WAIT_MAX);
+    const ms = end - Date.now();
+    if (ms <= 0) return fail();
+    const item = { ws, msg, deadline: end };
     item.timer = setTimeout(() => {
       const i = waiting.indexOf(item);
       if (i >= 0) waiting.splice(i, 1);
       fail();
     }, ms);
     waiting.push(item);
-    // 排队本身要留痕：否则「这条命令为什么慢了 8 秒」在审计里是查不出来的
-    audit({ ev: 'queued', id: `${ws.connId}:${msg.id}`, cmd: msg.cmd, client: ws.client, waitMs: ms });
+    // 排队本身要留痕：否则「这条命令为什么慢了 8 秒」在审计里是查不出来的。
+    // 重新入队（带 deadline）不重复记
+    if (deadline == null) {
+      audit({ ev: 'queued', id: `${ws.connId}:${msg.id}`, cmd: msg.cmd, client: ws.client, waitMs: ms, wait: route?.reason });
+    }
   }
 
   // 扩展一连上就把队列放出去。丢掉那些 agent 已经走掉的——
@@ -320,13 +446,55 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
     const q = waiting.splice(0);
     for (const it of q) {
       clearTimeout(it.timer);
-      if (agents.has(it.ws) && it.ws.readyState === 1) dispatch(it.ws, it.msg);
+      // Re-run target resolution at drain time. The original message stays intact in
+      // the queue, so a targeted command can never silently become an untargeted one.
+      if (agents.has(it.ws) && it.ws.readyState === 1) dispatch(it.ws, it.msg, it.deadline);
     }
-    if (q.length) log(`扩展回来了，补发 ${q.length} 条排队的命令`);
+    if (q.length) log(`扩展回来了，重新路由 ${q.length} 条排队的命令`);
   }
 
-  function dispatch(ws, msg, target = primary()) {
-    if (!target) return enqueue(ws, msg);
+  function targetError(ws, msg, code, message) {
+    send(ws, { type: 'res', id: msg.id, ok: false, error: { code, message } });
+  }
+
+  function selectTarget(msg) {
+    if (!Object.hasOwn(msg, 'target')) return { targeted: false };
+    const value = msg.target;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return { targeted: true, error: { code: 'TARGET_INVALID', message: 'target must contain extensionId and instanceId strings' } };
+    }
+    const keys = Object.keys(value);
+    const validId = (id) => typeof id === 'string' && id.trim().length > 0 && id.length <= MAX_TARGET_ID_LENGTH;
+    if (keys.length !== 2 || !keys.includes('extensionId') || !keys.includes('instanceId')
+      || !validId(value.extensionId) || !validId(value.instanceId)) {
+      return { targeted: true, error: { code: 'TARGET_INVALID', message: `target must contain only nonempty extensionId and instanceId strings of at most ${MAX_TARGET_ID_LENGTH} characters` } };
+    }
+
+    const matches = liveExtensions().filter((e) => e.extensionId === value.extensionId && e.instanceId === value.instanceId);
+    if (!matches.length) {
+      return { targeted: true, error: { code: 'TARGET_NOT_FOUND', message: 'target instance is not connected' } };
+    }
+    if (matches.length > 1) {
+      return { targeted: true, error: { code: 'TARGET_AMBIGUOUS', message: 'target matches more than one connected instance' } };
+    }
+    return { targeted: true, extension: matches[0], selector: { extensionId: value.extensionId, instanceId: value.instanceId } };
+  }
+
+  function dispatch(ws, msg, deadline) {
+    const selection = selectTarget(msg);
+    if (selection.error) return targetError(ws, msg, selection.error.code, selection.error.message);
+    let target = selection.extension;
+    if (!selection.targeted) {
+      const route = resolveRoute(ws, msg);
+      if (route.error) return targetError(ws, msg, route.error.code, route.error.message);
+      target = route.ext;
+      if (!target) return enqueue(ws, msg, deadline, route);
+      if (route.reason === 'new' && ws.sid) {
+        pinSession(ws.sid, route.key);
+        if (liveExtensions().length > 1) log(`会话 ${ws.sid} 绑定到 ${extLabel(target)}`);
+      }
+    }
+    if (!target) return targetError(ws, msg, 'TARGET_NOT_FOUND', 'target instance is not connected');
     const gate = checkSite(msg);
     if (gate) {
       audit({ ev: 'blocked', cmd: msg.cmd, client: ws.client, reason: gate.code });
@@ -343,7 +511,11 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
     }, ms);
 
     // 记下**是哪个实例接的**：它断线时只该失败自己承接的这些，别误伤其他实例
-    pending.set(key, { agent: ws, ext: target, cmd: msg.cmd, timer, startedAt: Date.now(), id: msg.id });
+    pending.set(key, {
+      agent: ws, ext: target, extensionId: target.extensionId, instanceId: target.instanceId,
+      target: selection.selector, cmd: msg.cmd, timer, startedAt: Date.now(), id: msg.id,
+      tabId: cmdTabId(msg), action: msg.params?.action,
+    });
     // 审计里的 id 必须全局唯一，否则 cmd 和 res 根本配不上对：
     // msg.id 是每个 agent 进程内自增的（都从 c1 开始数），实测 5381 条 cmd
     // 只有 281 个不同的 id，最多的一个出现了 1088 次。
@@ -353,7 +525,9 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
     // sid 盖章：扩展据此维护每个会话自己的受控 tab 槽（多 agent 并发隔离）。
     // live 是此刻还连着的会话，扩展拿它判断某个标签页「还有没有主」。
     // client / label 是给人看的：页面上的控制标记要写出「Codex CLI」而不是一串 sid。
-    send(target, { ...msg, __k: key, sid: ws.sid, client: ws.client, label: ws.label, live: liveSessions() });   // __k 原样带回，用于精确路由
+    const command = { ...msg };
+    delete command.target;
+    send(target, { ...command, __k: key, sid: ws.sid, client: ws.client, label: ws.label, live: liveSessions() });   // __k 原样带回，用于精确路由
   }
 
   function routeBack(ws, msg) {
@@ -366,16 +540,24 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
     // extension → agent
     if (msg.type === 'res') {
       if (!extensions.has(ws)) return;
+      const ownsPending = (p) => p && p.extensionId === ws.extensionId && p.instanceId === ws.instanceId;
       let key = msg.__k;
       let p = key ? pending.get(key) : null;
-      if (!p) {
-        // 老版本扩展不回传路由键——退回按 id 找，单会话下仍能工作
-        for (const [k, v] of pending) if (v.id === msg.id) { key = k; p = v; break; }
+      if (key) {
+        // A routing key is authoritative. A replacement socket may deliver a
+        // stashed reply during orphan grace only when it proves the same
+        // extension+instance identity; another profile cannot guess its way in.
+        if (!ownsPending(p)) return;
+      } else {
+        // 老版本扩展不回传路由键——退回按 id 找，但只能在当前连接承接的
+        // 扩展身份承接的请求里找，不能借另一个实例的裸 id 冒充回执。
+        for (const [k, v] of pending) if (v.id === msg.id && ownsPending(v)) { key = k; p = v; break; }
       }
       if (!p) return; // 已超时，丢弃
       clearTimeout(p.timer);
       clearTimeout(p.orphanTimer);   // 断线宽限期里补发回来的，正是宽限的意义
       pending.delete(key);
+      learnTabs(p, ws, msg);
       // bytes：回执体积。回合空档中位从 5.3s 涨到 9.9s，怀疑是上下文变重，
       // 而审计里没有任何一个字段能证实或证伪——没有量就没法治。
       audit({ ev: 'res', id: key, cmd: p.cmd, ok: msg.ok, ms: Date.now() - p.startedAt, error: msg.error?.code,
