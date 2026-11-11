@@ -3,7 +3,7 @@
 // The reply holds only ciphertext, so cookie values never reach the bridge
 // log, the audit file, or an agent's context.
 import {
-  HANDOFF_FORMAT, handoffError, requireGrantReady, grantUrl, cookieDomainAllowed, GRANT_ID,
+  HANDOFF_FORMAT, handoffError, requireGrantReady, grantUrl, cookieDomainAllowed, GRANT_ID, onSignInPage, signedOut,
 } from './grants.js';
 
 const COOKIE_FIELDS = ['name', 'value', 'domain', 'path', 'secure', 'httpOnly', 'sameSite', 'session', 'expirationDate'];
@@ -116,6 +116,7 @@ export async function handoffSession(params, tabId, chromeApi = globalThis.chrom
   if (!grantUrl(grant, tab?.url)) {
     throw handoffError('TAB_INVALID', `The selected tab must be an HTTPS ${grant.label} tab.`);
   }
+  if (onSignInPage(grant, tab.url)) throw signedOut(grant);
 
   let storeId;
   try {

@@ -24,6 +24,8 @@ const PRESETS = [
     ],
     cookieDomains: ['amazon.com', 'sellercentral.amazon.com'],
     openUrl: 'https://sellercentral.amazon.com/manage/shipments',
+    // A tab here is signed out; its cookies would not log anything in.
+    signInPaths: ['/ap/signin', '/signin'],
   },
 ];
 
@@ -91,6 +93,14 @@ export function grantUrl(grant, value) {
     return null;
   }
 }
+
+/** On the grant's own host but on its sign-in page. */
+export function onSignInPage(grant, url) {
+  const u = grantUrl(grant, url);
+  return !!u && (grant.signInPaths || []).some((p) => u.pathname === p || u.pathname.startsWith(`${p}/`));
+}
+
+export const signedOut = (grant) => handoffError('SIGNED_OUT', `${grant.label} is signed out in this Chrome profile. Sign in there, then retry.`);
 
 export function cookieDomainAllowed(grant, domain) {
   if (typeof domain !== 'string') return false;

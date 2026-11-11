@@ -2,11 +2,14 @@
 // before asking for a session. Neither command reads cookie values.
 import {
   listGrants, enabledGrants, cookiePermission, cookieApiAvailable,
-  grantUrl, requireGrantReady, handoffError, GRANT_ID,
+  grantUrl, requireGrantReady, handoffError, GRANT_ID, onSignInPage, signedOut,
 } from './grants.js';
 
-const LOAD_TIMEOUT_MS = 10000;
+// Seller Central often takes more than 10s on a cold start. The command itself has 30s.
+const LOAD_TIMEOUT_MS = 20000;
 const LOAD_POLL_MS = 100;
+// Finished loading somewhere else (a sign-in host) and stayed there this long: signed out, not slow.
+const OFF_SITE_SETTLE_MS = 1500;
 
 const invalidRequest = () => handoffError('INVALID_REQUEST', 'Invalid session handoff request.');
 const isRecord = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -122,10 +125,16 @@ async function openGrantTab(grant, chromeApi) {
   try { created = await chromeApi.tabs.create({ windowId, url: grant.openUrl, active: false }); } catch { created = null; }
   if (!validTabId(created?.id)) throw handoffError('TAB_CREATE_FAILED', `Could not open a ${grant.label} tab.`);
   const deadline = Date.now() + LOAD_TIMEOUT_MS;
+  let offSince = null;
   while (Date.now() <= deadline) {
     let tab;
     try { tab = await chromeApi.tabs.get(created.id); } catch { break; }
+    if (tab?.status === 'complete' && onSignInPage(grant, tab.url)) throw signedOut(grant);
     if (tab?.incognito !== true && tab.status === 'complete' && grantUrl(grant, tab.url)) return created.id;
+    if (tab?.status === 'complete' && tab.url && !grantUrl(grant, tab.url)) {
+      offSince ??= Date.now();
+      if (Date.now() - offSince >= OFF_SITE_SETTLE_MS) throw signedOut(grant);
+    } else offSince = null;
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
     await new Promise((r) => setTimeout(r, Math.min(LOAD_POLL_MS, remaining)));
@@ -149,6 +158,7 @@ export async function handoffResolveTab(params, chromeApi = globalThis.chrome) {
       throw handoffError('TAB_UNAVAILABLE', 'The selected tab is unavailable.');
     }
     if (!tabMatches(grant, tab)) throw handoffError('TAB_INVALID', `The selected tab must be an HTTPS ${grant.label} tab.`);
+    if (onSignInPage(grant, tab.url)) throw signedOut(grant);
     const storeId = storeIdForTab(storeMap, params.tabId);
     if (params.storeId !== undefined && storeId !== params.storeId) {
       throw handoffError('TAB_STORE_MISMATCH', 'The selected tab is not in the requested cookie store.');
@@ -158,7 +168,7 @@ export async function handoffResolveTab(params, chromeApi = globalThis.chrome) {
 
   // Automatic choice never picks incognito: that is a different login.
   const entries = (await queryTabs(chromeApi))
-    .filter((tab) => validTabId(tab?.id) && tab.incognito === false && tabMatches(grant, tab))
+    .filter((tab) => validTabId(tab?.id) && tab.incognito === false && tabMatches(grant, tab) && !onSignInPage(grant, tab.url))
     .map((tab) => ({ tab, storeId: storeIdForTab(storeMap, tab.id) }));
   const selected = chooseTab(entries, params.storeId);
   if (selected) return { tabId: selected.tab.id, created: false, storeId: selected.storeId };

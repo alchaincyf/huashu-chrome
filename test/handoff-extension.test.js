@@ -51,7 +51,7 @@ function fakeChrome(o = {}) {
       query: async () => [...tabs.values()].map((t) => ({ ...t })),
       create: async (props) => {
         calls.create.push(props);
-        const tab = { id: 55, windowId: props.windowId, incognito: false, status: 'complete', url: props.url };
+        const tab = { id: 55, windowId: props.windowId, incognito: false, status: 'complete', url: o.redirectTo ?? props.url };
         tabs.set(55, tab);
         return { ...tab };
       },
@@ -247,4 +247,34 @@ test('resolve_tab checks params first and needs the grant on', async () => {
   assert.equal(calls.storage, 0);
   await assert.rejects(handoffResolveTab({ grant: 'amazon-sc' }, api), code('HANDOFF_GRANT_DISABLED'));
   assert.equal(calls.create.length, 0);
+});
+
+// ---------- signed out ----------
+
+test('opening lands on a sign-in host: SIGNED_OUT in about a second and a half, not a 20s timeout', async () => {
+  const { api } = fakeChrome({ tabs: [], redirectTo: 'https://www.amazon.com/ap/signin?openid.return_to=x' });
+  const started = Date.now();
+  await assert.rejects(handoffResolveTab({ grant: 'amazon-sc' }, api), (e) => e.code === 'HANDOFF_SIGNED_OUT' && /Sign in/.test(e.message));
+  const took = Date.now() - started;
+  assert.ok(took >= 1400 && took < 5000, `took ${took}ms`);
+});
+
+test('the grant host\'s own sign-in page counts as signed out everywhere', async () => {
+  const signin = 'https://sellercentral.amazon.com/ap/signin?x=1';
+  const opened = fakeChrome({ tabs: [], redirectTo: signin });
+  await assert.rejects(handoffResolveTab({ grant: 'amazon-sc' }, opened.api), code('HANDOFF_SIGNED_OUT'));
+
+  // auto choice skips a signed-out tab and takes the signed-in one
+  const tabs = [
+    { id: 20, windowId: 1, incognito: false, status: 'complete', url: signin },
+    { id: 21, windowId: 1, incognito: false, status: 'complete', url: SC },
+  ];
+  const auto = fakeChrome({ tabs, stores: [{ id: 's', tabIds: [20, 21] }] });
+  assert.equal((await handoffResolveTab({ grant: 'amazon-sc' }, auto.api)).tabId, 21);
+  await assert.rejects(handoffResolveTab({ grant: 'amazon-sc', tabId: 20 }, auto.api), code('HANDOFF_SIGNED_OUT'));
+
+  const r = await recipient();
+  const s = fakeChrome({ tabs: [{ id: TAB, windowId: 1, incognito: false, status: 'complete', url: signin }] });
+  await assert.rejects(handoffSession({ grant: 'amazon-sc', recipientPublicKey: r.publicJwk }, TAB, s.api, webcrypto), code('HANDOFF_SIGNED_OUT'));
+  assert.equal(s.calls.cookieQueries.length, 0);
 });

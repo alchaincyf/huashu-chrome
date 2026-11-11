@@ -373,6 +373,10 @@ async function onMessage(msg) {
   // 不带教练，也不进 MCP 工具表。桥只放行 huashu-handoff 客户端发来的这几条（见 bridge.js）。
   const handoff = HANDOFF_HANDLERS[msg.cmd];
   if (handoff) {
+    // 再挡一层：老桥（1.4 之前）不认识这几条命令，会照转任何客户端发来的。桥给每条命令盖了 client 章
+    if (msg.client !== 'huashu-handoff') {
+      return reply(msg.id, false, { code: 'HANDOFF_FORBIDDEN', message: `${msg.cmd} is only available to huashu-chrome run` }, msg.__k);
+    }
     try { return reply(msg.id, true, await handoff(msg.params || {}, msg.tabId), msg.__k); } catch (e) { return reply(msg.id, false, { code: e.code || 'INTERNAL', message: e.message || String(e) }, msg.__k); }
   }
   try {

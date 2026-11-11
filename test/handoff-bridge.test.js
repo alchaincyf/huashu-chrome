@@ -162,3 +162,10 @@ test('contract: background answers handoff_* before session slots, marks and coa
   assert.ok(!(manifest.permissions || []).includes('cookies'), 'cookie access is opt-in per profile, never install-time');
   assert.equal(manifest.options_ui.page, 'options.html');
 });
+
+test('contract: the extension itself refuses handoff_* not stamped huashu-handoff (an older bridge forwards anything)', () => {
+  const bg = fs.readFileSync(path.join(ROOT, 'extension/background.js'), 'utf8');
+  const block = bg.slice(bg.indexOf('const handoff = HANDOFF_HANDLERS[msg.cmd];'), bg.indexOf('await noteSession(msg.sid'));
+  assert.match(block, /if \(msg\.client !== 'huashu-handoff'\)[\s\S]*HANDOFF_FORBIDDEN/);
+  assert.ok(block.indexOf("msg.client !== 'huashu-handoff'") < block.indexOf('await handoff('), 'checked before the handler runs');
+});
