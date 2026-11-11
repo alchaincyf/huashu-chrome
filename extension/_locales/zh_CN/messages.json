@@ -294,5 +294,47 @@
   },
   "ui_document_language": {
     "message": "zh-CN"
+  },
+  "ui_panel_profile_heading": {
+    "message": "当前 Chrome 配置文件"
+  },
+  "ui_panel_copy_instance_id": {
+    "message": "复制实例 ID"
+  },
+  "ui_panel_instance_hint": {
+    "message": "使用此 ID 指定当前 Chrome 配置文件。重启 Chrome 或重新加载扩展后，ID 保持不变。"
+  },
+  "ui_panel_instance_unavailable": {
+    "message": "暂时无法读取实例 ID。请重新打开侧栏重试。"
+  },
+  "ui_panel_instance_copied": {
+    "message": "已复制实例 ID。"
+  },
+  "ui_panel_instance_copy_manual": {
+    "message": "无法自动复制。请选中完整的实例 ID 并手动复制。"
+  },
+  "ui_panel_instance_label": {
+    "message": "实例 ID"
+  },
+  "ui_panel_profile_name_label": {
+    "message": "名字"
+  },
+  "ui_panel_profile_name_placeholder": {
+    "message": "比如：工作、Amazon US"
+  },
+  "ui_panel_profile_name_save": {
+    "message": "保存"
+  },
+  "ui_panel_profile_name_hint": {
+    "message": "连着多个 Chrome profile 时，Claude 看到的就是这个名字，也能按名字切换。"
+  },
+  "ui_panel_profile_name_saved": {
+    "message": "已保存，Claude 马上就能看到。"
+  },
+  "ui_panel_profile_name_cleared": {
+    "message": "已清除名字，Claude 会用实例 ID 称呼这个 profile。"
+  },
+  "ui_panel_profile_name_error": {
+    "message": "保存失败，重新打开侧栏再试一次。"
   }
 }

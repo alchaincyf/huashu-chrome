@@ -96,6 +96,8 @@ async function connect() {
       // 桥按实例区分连接，靠这两个字段：同 instanceId = 同一个 Chrome 断线重连，
       // 该顶掉旧连接；不同 = 另一个 Chrome，该并存。headless 的那个不抢主。
       instanceId: who.instanceId,
+      // 用户起的 profile 名字（侧栏里设）。多 profile 时 agent 靠它分清账号
+      profileLabel: who.profileLabel || '',
       headless: !!who.headless,
       chrome: (navigator.userAgent.match(/Chrome\/([\d.]+)/) || [])[1],
       v: 1,

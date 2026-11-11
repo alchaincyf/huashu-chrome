@@ -40,11 +40,18 @@ const ORPHAN_GRACE_MS = 15000;       // 扩展断开时在途命令的宽限：�
 const MAX_TARGET_ID_LENGTH = 128;
 const PIN_CAP = 1000;                // 会话→实例的绑定上限（按最近使用淘汰）
 const TAB_OWNER_CAP = 5000;          // tabId→实例的户口簿上限
+const PROFILE_INFO_MS = 2500;        // profiles 向每个实例要概况的等待上限
+
+// profile 名字是用户在侧栏里起的，要进日志、进 agent 的 context：去控制字符、限长
+export function cleanProfileLabel(v) {
+  if (typeof v !== 'string') return '';
+  return v.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40);
+}
 
 // writeInfo=false 供测试用：不写 bridge.json，否则测试桥的 token 会盖掉
 // 真在跑的那个桥，用户所有 agent 会话当场断连。
 export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo = true, orphanGraceMs = ORPHAN_GRACE_MS,
-  silenceMs = EXT_SILENCE_MS, probeMs = EXT_PROBE_MS, tickMs = 20000 } = {}) {
+  silenceMs = EXT_SILENCE_MS, probeMs = EXT_PROBE_MS, tickMs = 20000, profileInfoMs = PROFILE_INFO_MS } = {}) {
   ensureHome();
 
   const agents = new Set();      // role=agent 的连接
@@ -115,7 +122,10 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
     return pool.reduce((a, b) => (a.lastRx >= b.lastRx ? a : b));
   }
   const extLabel = (ws) => `Chrome ${ws.chromeVersion || '?'}${ws.headless ? ' · headless' : ''} · 扩展 ${ws.extVersion}`
-    + `${ws.instanceId ? ` · ${String(ws.instanceId).slice(0, 8)}` : ''}`;
+    + `${ws.instanceId ? ` · ${String(ws.instanceId).slice(0, 8)}` : ''}${ws.profileLabel ? ` 「${ws.profileLabel}」` : ''}`;
+  // 给 agent 看的名字：有名字用名字，没有就用 instanceId 前 8 位
+  const profileName = (e) => e.profileLabel || `id ${String(e.instanceId).slice(0, 8)}`;
+  const headedCount = () => liveExtensions().filter((e) => !e.headless).length;
 
   // ---------- 多 profile 路由 ----------
   //
@@ -309,6 +319,7 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
       ws.extProtocol = msg.v ?? PROTOCOL;
       ws.chromeVersion = msg.chrome || '?';
       ws.headless = !!msg.headless;
+      ws.profileLabel = cleanProfileLabel(msg.profileLabel);
       // 老扩展不报 instanceId 时，用实际 Origin 的扩展 id 退回兼容身份。
       // 不采信 hello 里的 extId：它是客户端字段，不能作为连接身份。
       ws.instanceId = typeof msg.instanceId === 'string'
@@ -372,10 +383,11 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
         extensionProtocol: ext?.extProtocol,
         // 多实例是诊断信息，不是故障。doctor 要能说出「有两个 Chrome 连着」，
         // 否则「命令跑到另一个窗口去了」这种事只能靠猜。
-        capabilities: ['targeted-routing-v1', 'session-pinning-v1', 'tab-owner-routing-v1'],
+        capabilities: ['targeted-routing-v1', 'session-pinning-v1', 'tab-owner-routing-v1', 'profiles-v1'],
         extensions: liveExtensions().map((e) => ({
           extensionId: e.extensionId, instanceId: e.instanceId,
           chrome: e.chromeVersion, version: e.extVersion, headless: e.headless, primary: e === ext,
+          label: e.profileLabel || undefined,
         })),
       });
       return;
@@ -480,7 +492,87 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
     return { targeted: true, extension: matches[0], selector: { extensionId: value.extensionId, instanceId: value.instanceId } };
   }
 
+  // 桥自己向某个实例要一份数据（不经过任何 agent）。回执照常按 __k 配对，
+  // 配上后交给 internal 而不是转发。拿不到（超时、老扩展不认）就给 null。
+  let internalSeq = 0;
+  function askInstance(ext, cmd, params = {}, ms = profileInfoMs) {
+    return new Promise((resolve) => {
+      const key = `bridge:${++internalSeq}`;
+      const timer = setTimeout(() => { pending.delete(key); resolve(null); }, ms);
+      pending.set(key, {
+        internal: (res) => resolve(res.ok ? res.data ?? null : null),
+        ext, extensionId: ext.extensionId, instanceId: ext.instanceId,
+        cmd, timer, startedAt: Date.now(), id: key,
+      });
+      send(ext, { type: 'cmd', id: key, cmd, params, __k: key });
+    });
+  }
+
+  // profiles：列出连着的 Chrome profile（=账号），以及本会话落在哪个上；
+  // {use} 把本会话改绑到指定的那个。名字 > 完整 instanceId > instanceId 前缀（≥4 位）。
+  async function handleProfiles(ws, msg) {
+    const reply = (ok, payload) => send(ws, ok
+      ? { type: 'res', id: msg.id, ok: true, data: payload }
+      : { type: 'res', id: msg.id, ok: false, error: payload });
+    const live = liveExtensions();
+    if (!live.length) return enqueue(ws, msg, undefined, { reason: 'none' });
+
+    let switched = null;
+    const want = msg.params?.use;
+    if (want != null) {
+      const q = String(want).trim().toLowerCase();
+      const byLabel = live.filter((e) => e.profileLabel && e.profileLabel.toLowerCase() === q);
+      const byId = live.filter((e) => String(e.instanceId).toLowerCase() === q);
+      const byPrefix = q.length >= 4 ? live.filter((e) => String(e.instanceId).toLowerCase().startsWith(q)) : [];
+      const hits = byLabel.length ? byLabel : byId.length ? byId : byPrefix;
+      if (hits.length !== 1) {
+        const names = live.map((e) => `"${profileName(e)}"`).join(', ');
+        return reply(false, hits.length
+          ? { code: 'PROFILE_AMBIGUOUS', message: `"${want}" matches ${hits.length} profiles. Use the full instance id. Connected: ${names}.` }
+          : { code: 'PROFILE_NOT_FOUND', message: `No connected Chrome profile is named "${want}". Connected: ${names}.` });
+      }
+      switched = hits[0];
+      pinSession(ws.sid, identityKey(switched));
+      log(`会话 ${ws.sid} 改绑到 ${extLabel(switched)}`);
+    }
+
+    const pinKey = sessionPins.get(ws.sid);
+    const current = (pinKey && liveByKey(pinKey)) || null;
+    const next = current || primary();
+    const infos = await Promise.all(live.map((e) => askInstance(e, 'profile_info')));
+    const profiles = live.map((e, i) => {
+      const info = infos[i] || {};
+      return {
+        name: e.profileLabel || null,
+        instanceId: e.instanceId,
+        headless: !!e.headless,
+        current: pinKey && !current ? false : e === next,
+        tabs: Number.isInteger(info.tabs) ? info.tabs : null,
+        focused: !!info.focused,
+        sites: Array.isArray(info.sites) ? info.sites.slice(0, 6) : [],
+      };
+    });
+    const lines = profiles.map((p) => {
+      const site = p.sites.map((s) => (s.count > 1 ? `${s.host} ×${s.count}` : s.host)).join(', ');
+      return `${p.current ? '→' : ' '} ${p.name ? `"${p.name}"` : '(unnamed)'}  id ${p.instanceId}`
+        + `${p.headless ? '  headless' : ''}${p.tabs != null ? `  ${p.tabs} tabs` : ''}${p.focused ? '  [user is here]' : ''}`
+        + `${site ? `  — ${site}` : ''}`;
+    });
+    const head = switched
+      ? `This session now works in "${profileName(switched)}".`
+      : current ? `This session works in "${profileName(current)}".`
+        : pinKey ? 'This session\'s profile is disconnected right now; its commands wait for it to come back.'
+          : `This session is not bound yet; its next command goes to "${profileName(next)}".`;
+    const text = `${live.length} Chrome profile${live.length > 1 ? 's' : ''} connected (each one is a separate set of logins). ${head}\n`
+      + lines.join('\n')
+      + '\nSwitch: profiles({use:"<name or id>"}). A tabId you pass always goes to the profile that owns that tab.'
+      + (profiles.some((p) => !p.name && !p.headless) ? '\nUnnamed profiles: the user can name them in the huashu-chrome side panel.' : '');
+    reply(true, { text, profiles });
+  }
+
   function dispatch(ws, msg, deadline) {
+    if (msg.cmd === 'profiles') return void handleProfiles(ws, msg);
+    let note = '';
     const selection = selectTarget(msg);
     if (selection.error) return targetError(ws, msg, selection.error.code, selection.error.message);
     let target = selection.extension;
@@ -492,6 +584,12 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
       if (route.reason === 'new' && ws.sid) {
         pinSession(ws.sid, route.key);
         if (liveExtensions().length > 1) log(`会话 ${ws.sid} 绑定到 ${extLabel(target)}`);
+        // 多个有窗口的 profile 时，绑定是个 agent 必须知道的事实：它落在哪个账号里。
+        // 搭在这条回执尾部说一次，不占 STRATEGY 的预算
+        if (headedCount() > 1) {
+          note = `\n\nℹ️ ${headedCount()} Chrome profiles (accounts) are connected; this session is working in `
+            + `"${profileName(target)}". profiles() lists them, profiles({use}) switches.`;
+        }
       }
     }
     if (!target) return targetError(ws, msg, 'TARGET_NOT_FOUND', 'target instance is not connected');
@@ -514,7 +612,7 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
     pending.set(key, {
       agent: ws, ext: target, extensionId: target.extensionId, instanceId: target.instanceId,
       target: selection.selector, cmd: msg.cmd, timer, startedAt: Date.now(), id: msg.id,
-      tabId: cmdTabId(msg), action: msg.params?.action,
+      tabId: cmdTabId(msg), action: msg.params?.action, note,
     });
     // 审计里的 id 必须全局唯一，否则 cmd 和 res 根本配不上对：
     // msg.id 是每个 agent 进程内自增的（都从 c1 开始数），实测 5381 条 cmd
@@ -536,6 +634,14 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
     // 单向发等于只续了一半。回一条 pong，让扩展那侧也有「收到」这个事件。
     if (msg.type === 'ping') return send(ws, { type: 'pong' });
     if (msg.type === 'pong') return;   // 桥主动探活的回音，收到本身就是目的（lastRx 已刷新）
+    // 用户在侧栏里给 profile 改了名：不必重连，就地更新
+    if (msg.type === 'meta') {
+      if (extensions.has(ws) && Object.hasOwn(msg, 'profileLabel')) {
+        ws.profileLabel = cleanProfileLabel(msg.profileLabel);
+        log(`实例改名：${extLabel(ws)}`);
+      }
+      return;
+    }
 
     // extension → agent
     if (msg.type === 'res') {
@@ -557,7 +663,19 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
       clearTimeout(p.timer);
       clearTimeout(p.orphanTimer);   // 断线宽限期里补发回来的，正是宽限的意义
       pending.delete(key);
+      if (p.internal) return p.internal(msg);
       learnTabs(p, ws, msg);
+      if (msg.ok) {
+        let tail = p.note || '';
+        // 多 profile 时 tabs list 只列本 profile 的页——说清楚，免得 agent 以为另一个账号的页面没了
+        if (p.cmd === 'tabs' && p.action === 'list' && headedCount() > 1) {
+          tail += `\n(Chrome profile "${profileName(ws)}" only. Other profiles' tabs: profiles({use}) then tabs list.)`;
+        }
+        if (tail) {
+          if (typeof msg.data === 'string') msg.data += tail;
+          else if (msg.data && typeof msg.data.text === 'string') msg.data = { ...msg.data, text: msg.data.text + tail };
+        }
+      }
       // bytes：回执体积。回合空档中位从 5.3s 涨到 9.9s，怀疑是上下文变重，
       // 而审计里没有任何一个字段能证实或证伪——没有量就没法治。
       audit({ ev: 'res', id: key, cmd: p.cmd, ok: msg.ok, ms: Date.now() - p.startedAt, error: msg.error?.code,

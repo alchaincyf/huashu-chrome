@@ -73,6 +73,18 @@
                    background: #fff; transition: transform .15s; box-shadow: 0 1px 2px rgba(0,0,0,.2); }
   .toggle:checked { background: var(--ok); }
   .toggle:checked::after { transform: translateX(14px); }
+  .toggle:disabled { opacity: .45; cursor: default; }
+  .toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .setting-status { color: var(--mute); font-size: 11.5px; margin: 0; }
+  .instance-value { min-width: 0; flex: 1; width: 100%; resize: none; user-select: all;
+                    font: 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+                    padding: 6px 7px; border: 1px solid var(--line); border-radius: 6px;
+                    color: var(--ink); background: var(--soft); word-break: break-all; }
+  .instance-value:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .profile-name { min-width: 0; flex: 1; font: inherit; font-size: 12.5px; padding: 5px 7px;
+                  border: 1px solid var(--line); border-radius: 6px; color: var(--ink); background: var(--soft); }
+  .profile-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   footer { color: var(--mute); font-size: 11.5px; padding: 0 16px 18px; }
 </style>
 
@@ -83,6 +95,22 @@
 </header>
 
 <main>
+  <section aria-labelledby="instanceHeading">
+    <h2 id="instanceHeading" data-i18n="panel_profile_heading">This Chrome profile</h2>
+    <label class="lab" for="profileName" data-i18n="panel_profile_name_label">Name</label>
+    <div class="cmd">
+      <input class="profile-name" id="profileName" maxlength="40" spellcheck="false" autocomplete="off" aria-describedby="profileNameStatus" data-i18n-placeholder="panel_profile_name_placeholder" placeholder="e.g. Work, Amazon US" />
+      <button class="btn ghost" id="saveProfileName" disabled data-i18n="panel_profile_name_save">Save</button>
+    </div>
+    <p class="setting-status" id="profileNameStatus" role="status" aria-live="polite" data-i18n="panel_profile_name_hint">Claude sees this name when several Chrome profiles are connected.</p>
+    <label class="lab" id="instanceLabel" for="instanceId" data-i18n="panel_instance_label">Instance ID</label>
+    <div class="cmd">
+      <textarea class="instance-value" id="instanceId" rows="2" readonly spellcheck="false" aria-describedby="instanceStatus" data-i18n-placeholder="panel_loading" placeholder="Loading…"></textarea>
+      <button class="btn ghost" id="copyInstanceId" disabled data-i18n="panel_copy" data-i18n-aria-label="panel_copy_instance_id">Copy</button>
+    </div>
+    <p class="setting-status" id="instanceStatus" role="status" aria-live="polite" data-i18n="panel_instance_hint">Use this ID to target this Chrome profile.</p>
+  </section>
+
   <section>
     <h2 data-i18n="panel_current_page_heading">这一页</h2>
     <div id="page"><div class="empty" data-i18n="panel_loading">读取中…</div></div>

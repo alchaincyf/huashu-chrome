@@ -34,7 +34,10 @@ switch (cmd) {
   case 'mcp': {
     const { startMcpServer } = await import('./mcp-server.js');
     // stdio 是 MCP 的传输通道，任何 console.log 都会污染协议流。全部日志走 stderr。
-    await startMcpServer({ client: flag('--client', 'unknown') });
+    // --profile <名字或 id>：这个 MCP 条目只在指定的 Chrome profile 里干活
+    // （给每个账号配一个 MCP server）。不给就跟随 HUASHU_CHROME_PROFILE，再不给就自动绑定。
+    const profile = flag('--profile');
+    await startMcpServer({ client: flag('--client', 'unknown'), ...(typeof profile === 'string' ? { profile } : {}) });
     break;
   }
 
@@ -195,7 +198,8 @@ async function doctor() {
         console.log(`  ℹ️  ${t('multipleInstances', { count: r.extensions.length })}`);
         for (const e of r.extensions) {
           console.log(`       ${t('chromeInstance', {
-            arrow: e.primary ? '→' : ' ', chrome: e.chrome, version: e.version,
+            arrow: e.primary ? '→' : ' ', version: e.version,
+            chrome: `${e.chrome}${e.label ? ` 「${e.label}」` : ''}${e.instanceId ? ` · ${String(e.instanceId).slice(0, 8)}` : ''}`,
             headless: e.headless ? t('headless') : '', primary: e.primary ? t('primaryInstance') : '',
           })}`);
         }

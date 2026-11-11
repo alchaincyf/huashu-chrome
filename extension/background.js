@@ -184,6 +184,46 @@ async function instanceId() {
   }
 }
 
+// profile 名字：用户在侧栏里给这个 Chrome profile 起的名（「工作」「Amazon US」）。
+// 同一份扩展被多个 profile 加载时，agent 靠它分清哪个是哪个账号。
+// 跟 instanceId 一样存 storage.local：只属于这个 profile。
+const PROFILE_LABEL_KEY = 'hcProfileLabel';
+const cleanProfileLabel = (v) => (typeof v === 'string'
+  ? v.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40) : '');
+async function profileLabel() {
+  try {
+    const { [PROFILE_LABEL_KEY]: v } = await chrome.storage.local.get(PROFILE_LABEL_KEY);
+    return cleanProfileLabel(v);
+  } catch {
+    return '';
+  }
+}
+// 改名不必重连：直接告诉桥。没连着也无妨，下次握手会带上新名字
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local' || !changes[PROFILE_LABEL_KEY]) return;
+  void toBridge({ type: 'meta', profileLabel: cleanProfileLabel(changes[PROFILE_LABEL_KEY].newValue) });
+});
+
+// 桥的 profiles 命令向每个实例要一份概况：开了几个页、用户此刻是不是在这个 profile 里、
+// 主要开着哪些站——名字没起的时候，agent 和用户靠这几样认出它是哪个账号。
+async function profileInfo() {
+  const [tabs, focusedWin] = await Promise.all([
+    chrome.tabs.query({}),
+    chrome.windows.getLastFocused({ windowTypes: ['normal'] }).catch(() => null),
+  ]);
+  const counts = new Map();
+  for (const t of tabs) {
+    let host = '';
+    try {
+      const u = new URL(t.url || t.pendingUrl || '');
+      if (u.protocol === 'http:' || u.protocol === 'https:') host = u.hostname.replace(/^www\./, '');
+    } catch { /* chrome:// 之类不算 */ }
+    if (host) counts.set(host, (counts.get(host) || 0) + 1);
+  }
+  const sites = [...counts].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([host, count]) => ({ host, count }));
+  return { label: await profileLabel(), tabs: tabs.length, focused: !!focusedWin?.focused, sites };
+}
+
 // headless 实例是 agent 起来抓页面的，没有窗口也没有用户的登录态在用，
 // 桥路由命令时要让着有窗口的那个——UA 是唯一稳定的判据。
 const isHeadless = () => /HeadlessChrome/.test(navigator.userAgent);
@@ -208,6 +248,7 @@ async function directConnect() {
   // 两条腿必须报同一个 instanceId：桥认的是实例不是连接，报岔了
   // 就会被当成两个 Chrome 并存，谁也不替换谁。
   const iid = await instanceId();
+  const label = await profileLabel();
   for (const port of PORTS) {
     try {
       directWs = await new Promise((resolve, reject) => {
@@ -216,7 +257,7 @@ async function directConnect() {
         sock.onopen = () => sock.send(JSON.stringify({
           type: 'hello', role: 'extension', extId: chrome.runtime.id,
           version: chrome.runtime.getManifest().version,
-          instanceId: iid, headless: isHeadless(),
+          instanceId: iid, profileLabel: label, headless: isHeadless(),
           chrome: (navigator.userAgent.match(/Chrome\/([\d.]+)/) || [])[1], v: 1,
         }));
         sock.onmessage = (ev) => {
@@ -303,6 +344,10 @@ const NO_SLOT_CMDS = new Set(['tabs', 'download', 'reload', 'status']);
 async function onMessage(msg) {
   if (msg.type === 'event') return onBridgeEvent(msg);
   if (msg.type !== 'cmd') return;
+  // 桥自己发起的概况查询：不属于任何会话，不碰槽、不刷标记、不带教练
+  if (msg.cmd === 'profile_info') {
+    try { return reply(msg.id, true, await profileInfo(), msg.__k); } catch (e) { return reply(msg.id, false, { code: 'INTERNAL', message: e.message || String(e) }, msg.__k); }
+  }
   try {
     const handler = HANDLERS[msg.cmd];
     if (!handler) throw err('INTERNAL', `未知命令 ${msg.cmd}`);
@@ -2767,10 +2812,11 @@ chrome.runtime.onMessage.addListener((m, sender, sendResponse) => {
   }
   // offscreen 拿不到 chrome.runtime.getManifest()，握手身份只能由这边供给
   if (m?.__hcBridge === 'identity') {
-    instanceId().then((iid) => sendResponse({
+    Promise.all([instanceId(), profileLabel()]).then(([iid, label]) => sendResponse({
       extId: chrome.runtime.id,
       version: chrome.runtime.getManifest().version,
       instanceId: iid,
+      profileLabel: label,
       headless: isHeadless(),
     }));
     return true;   // 异步回答，通道要留着

@@ -40,6 +40,57 @@ const relTime = (timestamp) => {
 
 let winId = null, tabId = null, actTimer = null;
 
+// Use the same background identity provider as the bridge handshake. Never
+// create an ID here: a separate value would route the agent to the wrong profile.
+let currentInstanceId = null;
+async function renderIdentity() {
+  const identity = await send({ __hcBridge: 'identity' });
+  const value = identity?.instanceId;
+  currentInstanceId = typeof value === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(value) ? value : null;
+  $('instanceId').value = currentInstanceId || '';
+  $('instanceId').placeholder = currentInstanceId ? '' : '—';
+  $('copyInstanceId').disabled = !currentInstanceId;
+  $('instanceStatus').textContent = t(currentInstanceId ? 'panel_instance_hint' : 'panel_instance_unavailable');
+}
+
+// ---------- profile 名字 ----------
+// 多个 profile 加载同一份扩展时，agent 只能靠这个名字分清哪个是哪个账号。
+// 只写 storage；background 监听变化后通知桥，不必重连。
+const PROFILE_LABEL_KEY = 'hcProfileLabel';
+const cleanLabel = (v) => String(v || '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40);
+let savedLabel = '';
+async function renderProfileName() {
+  const { [PROFILE_LABEL_KEY]: v } = await chrome.storage.local.get(PROFILE_LABEL_KEY).catch(() => ({}));
+  savedLabel = cleanLabel(v);
+  if (document.activeElement !== $('profileName')) $('profileName').value = savedLabel;
+  $('saveProfileName').disabled = cleanLabel($('profileName').value) === savedLabel;
+}
+async function saveProfileName() {
+  const next = cleanLabel($('profileName').value);
+  $('profileName').value = next;
+  try {
+    await chrome.storage.local.set({ [PROFILE_LABEL_KEY]: next });
+    savedLabel = next;
+    $('profileNameStatus').textContent = t(next ? 'panel_profile_name_saved' : 'panel_profile_name_cleared');
+  } catch {
+    $('profileNameStatus').textContent = t('panel_profile_name_error');
+  }
+  $('saveProfileName').disabled = true;
+}
+$('profileName').oninput = () => { $('saveProfileName').disabled = cleanLabel($('profileName').value) === savedLabel; };
+$('profileName').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); void saveProfileName(); } };
+$('saveProfileName').onclick = () => void saveProfileName();
+
+$('copyInstanceId').onclick = async () => {
+  if (!currentInstanceId) return;
+  try {
+    await navigator.clipboard.writeText(currentInstanceId);
+    $('instanceStatus').textContent = t('panel_instance_copied');
+  } catch {
+    $('instanceStatus').textContent = t('panel_instance_copy_manual');
+  }
+};
+
 // ---------- 这一页 ----------
 
 async function renderPage() {
@@ -244,6 +295,8 @@ chrome.tabs.onActivated.addListener(({ windowId }) => { if (windowId === winId) 
 chrome.tabs.onUpdated.addListener((id, info) => { if (info.title) refreshAll(); if (id === tabId && info.status === 'complete') renderPage(); });
 
 renderPage();
+renderIdentity();
+renderProfileName();
 refreshAll();
 // 相对时间要走字，连接状态要跟上（桥的心跳不写 storage）
 setInterval(() => { renderPage(); refreshAll(); }, 15000);

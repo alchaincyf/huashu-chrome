@@ -447,6 +447,13 @@ const TOOLS = [
     },
   },
   {
+    name: 'profiles',
+    description:
+      'Connected Chrome profiles (separate logins): name, tabs, top sites, and which one this session drives. '
+      + '{use:"name or id"} switches. A tabId always reaches the profile that owns it.',
+    inputSchema: { type: 'object', properties: { use: { type: 'string' } } },
+  },
+  {
     name: 'eval',
     description:
       'Run JS in the page (sees its vars): expression or statements, last value returned, promises awaited ' +
@@ -538,8 +545,18 @@ function wrapUntrusted(body, meta = '') {
   );
 }
 
-export async function startMcpServer({ client = 'unknown' } = {}) {
+export async function startMcpServer({ client = 'unknown', profile = process.env.HUASHU_CHROME_PROFILE } = {}) {
   const bridge = new BridgeClient({ client });
+  // 本会话要在哪个 Chrome profile 里干活。来源：--profile / HUASHU_CHROME_PROFILE
+  // （一个 MCP 条目钉一个账号），或 agent 自己调过的 profiles({use})。
+  // 桥把绑定存在内存里，桥一换代就没了——所以这一侧记着，每条新连接上先补一次。
+  let wantProfile = typeof profile === 'string' && profile.trim() ? profile.trim() : null;
+  let profiledWs = null;
+  const ensureProfile = async () => {
+    if (!wantProfile || !bridge.ws || profiledWs === bridge.ws) return;
+    await bridge.call('profiles', { use: wantProfile });
+    profiledWs = bridge.ws;
+  };
   const server = new Server(
     { name: 'huashu-chrome', version: VERSION },
     { capabilities: { tools: {} }, instructions: STRATEGY }
@@ -573,6 +590,13 @@ export async function startMcpServer({ client = 'unknown' } = {}) {
       }
 
       if (!bridge.ws) await bridge.connect();
+
+      if (name === 'profiles') {
+        const data = await bridge.call('profiles', args.use != null ? { use: String(args.use) } : {});
+        if (args.use != null) { wantProfile = String(args.use); profiledWs = bridge.ws; }
+        return { content: [{ type: 'text', text: data.text }] };
+      }
+      await ensureProfile();
 
       // 翻页在这一侧循环：审计里 fetch→fetch 相邻 386 次，agent 在一页一个回合地
       // 手动翻。扩展只管发单次请求，翻页的循环、落盘、停机判定都不该经过模型。

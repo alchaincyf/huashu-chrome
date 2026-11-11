@@ -294,5 +294,47 @@
   },
   "ui_document_language": {
     "message": "en"
+  },
+  "ui_panel_profile_heading": {
+    "message": "This Chrome profile"
+  },
+  "ui_panel_copy_instance_id": {
+    "message": "Copy instance ID"
+  },
+  "ui_panel_instance_hint": {
+    "message": "Use this ID to target this Chrome profile. It stays the same after restarting Chrome or reloading the extension."
+  },
+  "ui_panel_instance_unavailable": {
+    "message": "Instance ID unavailable. Reopen this side panel to try again."
+  },
+  "ui_panel_instance_copied": {
+    "message": "Instance ID copied."
+  },
+  "ui_panel_instance_copy_manual": {
+    "message": "Could not copy automatically. Select the full instance ID and copy it manually."
+  },
+  "ui_panel_instance_label": {
+    "message": "Instance ID"
+  },
+  "ui_panel_profile_name_label": {
+    "message": "Name"
+  },
+  "ui_panel_profile_name_placeholder": {
+    "message": "e.g. Work, Amazon US"
+  },
+  "ui_panel_profile_name_save": {
+    "message": "Save"
+  },
+  "ui_panel_profile_name_hint": {
+    "message": "Claude sees this name when several Chrome profiles are connected, and can switch between them by name."
+  },
+  "ui_panel_profile_name_saved": {
+    "message": "Name saved. Claude sees it right away."
+  },
+  "ui_panel_profile_name_cleared": {
+    "message": "Name cleared. Claude will see this profile by its instance ID."
+  },
+  "ui_panel_profile_name_error": {
+    "message": "Could not save the name. Reopen this panel and try again."
   }
 }
