@@ -17,11 +17,11 @@
 
 **Let any AI agent operate your own Chrome—with all your existing login sessions.**
 
-<sub>One MCP server + one Chrome extension, with 22 browser tools. Works with Claude Code, Codex CLI, Cursor, Gemini CLI, Cline, Windsurf and more.</sub>
+<sub>One MCP server + one Chrome extension, with 24 browser tools. Works with Claude Code, Codex CLI, Cursor, Gemini CLI, Cline, Windsurf and more.</sub>
 
 <br>
 
-[See it in action](#see-it-in-action) · [Installation](#installation) · [22 tools](#22-browser-tools-by-the-webs-three-information-carriers) · [Learnings](#learnings-that-compound) · [Safety](#safety) · [Troubleshooting](#troubleshooting)
+[See it in action](#see-it-in-action) · [Installation](#installation) · [24 tools](#24-browser-tools-by-the-webs-three-information-carriers) · [Learnings](#learnings-that-compound) · [Safety](#safety) · [Troubleshooting](#troubleshooting)
 
 </div>
 
@@ -159,9 +159,9 @@ To install the extension manually, run npx huashu-chrome extension to print its 
 
 </details>
 
-## 22 browser tools by the web’s three information carriers
+## 24 browser tools by the web’s three information carriers
 
-The 22 tools are not a flat list; they form layers. This ordering tells an agent what to try first on an unfamiliar site. The full reasoning is in [docs/能力模型.md](docs/能力模型.md) (**Chinese**); each rule there came from hitting a real limitation.
+The 24 tools are not a flat list; they form layers. This ordering tells an agent what to try first on an unfamiliar site. The full reasoning is in [docs/能力模型.md](docs/能力模型.md) (**Chinese**); each rule there came from hitting a real limitation.
 
 **Data layer (for numbers, lists and tables; start here)**
 
@@ -196,6 +196,12 @@ The 22 tools are not a flat list; they form layers. This ordering tells an agent
 | Tool | What it does |
 |---|---|
 | ask | Hand a captcha, QR login, SMS code or decision back to you. A small panel appears at the lower right without blocking the page, highlights the target element and sends a desktop notification, then waits. Clicking “Cancel” means “do not do this”; the agent stops instead of trying another route. |
+
+**Profiles (accounts)**
+
+| Tool | What it does |
+|---|---|
+| profiles | List the Chrome profiles connected right now—each one is a separate set of logins—with name, tab count, top sites and the one you are using. profiles({use:"Work"}) moves this session to that profile. See [Several Chrome profiles](#several-chrome-profiles-accounts). |
 
 **Fallback layer**
 
@@ -323,6 +329,23 @@ The session color is a pure function of session ID, so it is as stable across br
 
 When a click opens a new tab (target="_blank" / window.open), the controlled tab follows automatically, and the receipt gives both the old and new tabId. Otherwise, the agent would keep retrying on the unchanged old page while the result sits in the tab next door.
 
+### Several Chrome profiles (accounts)
+
+Each Chrome profile that loads the extension is its own instance with its own logins: “Work” and “Personal” are different accounts, not different windows. The bridge keeps an agent inside one of them.
+
+- **A session stays in one profile.** Its first command binds it to a profile, and its commands do not move after that, even when you switch to another profile yourself. If that profile disconnects (a service-worker restart usually takes about a second), commands wait for it. If it does not come back within about 40 seconds, the agent gets PROFILE_OFFLINE and only its *next* command goes elsewhere. It never switches accounts silently in the middle of a task.
+- **A tabId always reaches the profile that owns it.** The bridge learns which profile owns each tab from replies, so a tabId from another profile is sent there and not to whatever happens to have the same number. If one tab number shows up in two profiles (possible when profiles run as separate Chrome processes), the session’s own profile wins; otherwise the bridge refuses with TAB_AMBIGUOUS rather than guess.
+- **Name your profiles.** In each profile, open the side panel → “This Chrome profile” → Name (for example Work or Amazon US). The agent sees the new name immediately; nothing needs to reconnect.
+- **The agent can see and switch.** profiles lists the connected profiles with name, tab count, top sites and which one you are looking at; profiles({use:"Work"}) moves the session. When two or more profiles are connected, the first reply of each session says which profile it landed in, and tabs list says it only covers the current profile.
+- **One MCP entry per account (optional).** Pin an entry to a profile with --profile or the HUASHU_CHROME_PROFILE environment variable:
+
+```bash
+claude mcp add chrome-work -- npx -y huashu-chrome mcp --client claude-code --profile Work
+claude mcp add chrome-personal -- npx -y huashu-chrome mcp --client claude-code --profile Personal
+```
+
+The MCP server remembers the chosen profile (from --profile or the agent’s last profiles({use})) and re-applies it after a bridge restart. doctor lists every connected profile with its name and ID.
+
 ### Two implementation choices
 
 **Why WebSocket instead of Native Messaging:** no native-host configuration needs to be added to a macOS plist or Windows registry—the longest troubleshooting chapter in the official approach.
@@ -376,6 +399,12 @@ npx huashu-chrome audit --stats     # Real-agent usage: idle gaps, common calls 
 | STALE_SNAPSHOT | The page changed and all ref IDs are stale. | This is normal; the agent will take another snapshot. |
 | Every command is stuck | A page alert or confirm is blocking it. | Close the dialog manually. |
 | Nothing works on a chrome:// page | Browser-protected pages do not allow script injection. | Use a regular webpage. The Chrome Web Store is protected too; see its [field note (Chinese)](docs/经验/chrome.google.com.md). |
+| The agent is working in the wrong account | The session is bound to another Chrome profile. | profiles() shows which one; profiles({use:"…"}) switches. Name your profiles in the side panel so they are easy to tell apart. |
+| PROFILE_OFFLINE | The profile this session was working in disconnected and did not come back. | Open a window of that profile. Otherwise the agent’s next command goes to another connected profile—a different account—so it should check profiles() first. |
+| TAB_PROFILE_OFFLINE | The tab belongs to a profile that is not connected. | Open that profile, or work in a tab from tabs list. |
+| TAB_AMBIGUOUS | The same tab number exists in two profiles and the session’s profile is not one of them. | Switch with profiles({use}) to the profile you mean, or open a new tab. |
+| PROFILE_NOT_FOUND | No connected profile has that name. | Check names with profiles(); names are set in each profile’s side panel. |
+| doctor: “Running older code than the extension folder” | Several profiles load the same folder and one of them was not reloaded after a change. | Run huashu-chrome dev --once, or reload it from chrome://extensions in that profile. |
 
 ## Development
 
@@ -390,9 +419,11 @@ test:live runs against a local playground (test/fixtures/playground.html) contai
 
 The playground has no CSP and includes an event recorder, making it much faster than testing on a real site when diagnosing whether an event arrived.
 
-After changing code under extension/, run node src/cli.js call reload '{}' to reload the extension from the bridge; there is no need to click through chrome://extensions.
+After changing code under extension/, run node src/cli.js dev. It watches extension/ and, on every save, reloads the extension in **every** connected Chrome profile, then reports which profiles came back (dev --once reloads once and exits). You do not need to click through chrome://extensions in each profile. A profile that misses a reload keeps running old code under the same version number; doctor flags it by comparing each profile’s load time with the newest file in extension/. Agents can do the same with reload({all:true}).
 
 Bridge code does **not** reload automatically when the version number is unchanged: the bridge is a persistent singleton and does not reread files after startup. If you changed src/bridge.js without changing the version, stop the process manually; the next command will start a new one.
+
+npm test points HUASHU_CHROME_HOME at a throwaway directory, so test bridges never write to your real ~/.huashu-chrome (audit log, bridge.json). Set HUASHU_CHROME_HOME yourself to run a second, fully separate bridge.
 
 To inspect sidebar changes visually, open it as a regular page at <code>chrome-extension://&lt;extension-id&gt;/panel.html</code>. chrome.storage and runtime.sendMessage work there as usual. However, the extension cannot call executeScript on its own page (chrome-extension:// is not included in <code>&lt;all_urls&gt;</code>), and it cannot capture a screenshot of it, so that page can only be inspected by a person. For automated screenshots, give panel.html a fake chrome object and render it from a local HTTP server.
 
@@ -402,7 +433,7 @@ To inspect sidebar changes visually, open it as a regular page at <code>chrome-e
 huashu-chrome/
 ├── src/
 │   ├── cli.js              # Entry point: install / mcp / bridge / doctor / audit / extension
-│   ├── mcp-server.js       # 22 browser tools and handshake instructions; learnings are described separately
+│   ├── mcp-server.js       # 24 browser tools and handshake instructions; learnings are described separately
 │   ├── bridge.js           # Persistent singleton on 127.0.0.1: routing · permissions · audit · sessions
 │   ├── install.js          # Detect agents, write MCP config, open extension guide
 │   └── agents.json         # Known-agent list; add one line to support another client

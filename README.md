@@ -17,11 +17,11 @@
 
 **让任何 AI agent 操控你自己的 Chrome——带着你全部的登录态。**
 
-<sub>一个 MCP server + 一个 Chrome 扩展，22 个浏览器工具。Claude Code、Codex CLI、Cursor、Gemini CLI、Cline、Windsurf 通用。</sub>
+<sub>一个 MCP server + 一个 Chrome 扩展，24 个浏览器工具。Claude Code、Codex CLI、Cursor、Gemini CLI、Cline、Windsurf 通用。</sub>
 
 <br>
 
-[看效果](#看效果) · [安装](#安装) · [22 个工具](#工具按网页只有三种信息载体来分) · [经验回流](#越用越快经验回流) · [安全](#安全) · [排错](#排错)
+[看效果](#看效果) · [安装](#安装) · [24 个工具](#工具按网页只有三种信息载体来分) · [经验回流](#越用越快经验回流) · [安全](#安全) · [排错](#排错)
 
 </div>
 
@@ -182,7 +182,7 @@ args = ["-y", "huashu-chrome", "mcp", "--client", "codex"]
 
 ## 工具：按「网页只有三种信息载体」来分
 
-22 个工具不是一堆平铺的功能，是三层。这个分层决定了 agent 面对陌生网站时按什么顺序出牌，
+24 个工具不是一堆平铺的功能，是三层。这个分层决定了 agent 面对陌生网站时按什么顺序出牌，
 完整推演见 [`docs/能力模型.md`](docs/能力模型.md)——里面每条规则都跟着撞出它的那堵墙。
 
 **数据层（要数字、列表、表格，从这里开始）**
@@ -218,6 +218,12 @@ args = ["-y", "huashu-chrome", "mcp", "--client", "codex"]
 | 工具 | 干什么 |
 |---|---|
 | `ask` | 验证码、扫码登录、短信验证码、要你拍板的确认——把这一步交还给你。页面右下角浮一个小面板（不挡内容），高亮该点的元素，同时发桌面通知，然后等你。你点「取消」是明确的「别做这件事」，agent 会停下而不是换个姿势再来 |
+
+**账号（Chrome profile）**
+
+| 工具 | 干什么 |
+|---|---|
+| `profiles` | 列出此刻连着的 Chrome profile——每个都是一套独立的登录态——带名字、开了几页、主要开着哪些站、你正在用哪个。`profiles({use:"工作"})` 把本会话换到那个 profile。见[多个 Chrome profile](#多个-chrome-profile多个账号) |
 
 **兜底层**
 
@@ -384,6 +390,23 @@ L2 只在需要真实事件、后台截图、或页面 CSP 拦下求值时才接
 回执里写明新旧两个 `tabId`。不跟的话，agent 会对着一个「什么都没变」的原页面
 换着花样重试，而它要的东西就在隔壁。
 
+### 多个 Chrome profile（多个账号）
+
+每个加载了扩展的 Chrome profile 都是一个独立实例，带着自己的登录态：「工作」和「管理员」是两个账号，不是两个窗口。桥负责让 agent 一直待在其中一个里面。
+
+- **一个会话只在一个 profile 里干活。** 第一条命令落到哪个 profile 就绑定哪个，之后的命令都去那里——你自己切到另一个 profile 也不会带跑它。绑定的 profile 掉线了（SW 重启通常一秒就回来）就等它；约 40 秒还不回来，agent 收到 `PROFILE_OFFLINE`，只有**下一条**命令才会落到别处。绝不会任务做到一半悄悄换了账号。
+- **tabId 只去它真正的主人那里。** 桥从回执里记下每个标签页属于哪个 profile，另一个 profile 的 tabId 会送回那个 profile，而不是送给碰巧同号的页面。同一个编号在两个 profile 里都见过（profile 分属不同 Chrome 进程时可能发生），本会话的 profile 说了算；否则直接报 `TAB_AMBIGUOUS`，不猜。
+- **给 profile 起名。** 在每个 profile 里打开侧栏 →「This Chrome profile」→ 名字（比如「工作」「Amazon US」）。agent 立刻就能看到新名字，不用重连。
+- **agent 看得见、切得动。** `profiles` 列出连着的 profile：名字、页数、主要站点、你正在看哪个；`profiles({use:"工作"})` 换过去。连着两个以上 profile 时，每个会话的第一条回执会说明它落在哪个账号里，`tabs list` 也会注明只列了当前 profile 的页。
+- **一个账号一个 MCP 条目（可选）。** 用 `--profile` 或环境变量 `HUASHU_CHROME_PROFILE` 把条目钉在一个 profile 上：
+
+```bash
+claude mcp add chrome-work -- npx -y huashu-chrome mcp --client claude-code --profile 工作
+claude mcp add chrome-personal -- npx -y huashu-chrome mcp --client claude-code --profile Personal
+```
+
+MCP 这一侧记着选定的 profile（来自 `--profile` 或 agent 最近一次 `profiles({use})`），桥重启后自动补上。`doctor` 会列出每个连着的 profile 的名字和 ID。
+
 ### 两个实现选择
 
 **为什么用 WebSocket 而不是 Native Messaging**：不必往 macOS plist / Windows 注册表
@@ -471,6 +494,12 @@ npx huashu-chrome audit --stats     # 真实 agent 的用法统计：回合空�
 | `STALE_SNAPSHOT` | 页面变了，ref 全作废 | 正常现象，agent 会自己重拍 |
 | 命令全部卡住 | 页面有 alert/confirm 挡着 | 手动关掉弹窗 |
 | 在 `chrome://` 页面没反应 | 浏览器保护页面，注入不了脚本 | 换普通网页（Chrome 应用商店也属这一类，见[那份笔记](docs/经验/chrome.google.com.md)） |
+| agent 在错的账号里干活 | 会话绑定在另一个 Chrome profile 上 | `profiles()` 看是哪个，`profiles({use:"…"})` 切过去。在侧栏给 profile 起名，就不容易认错 |
+| `PROFILE_OFFLINE` | 本会话所在的 profile 掉线了，没回来 | 打开那个 profile 的窗口；不然 agent 的下一条命令会落到另一个 profile——另一个账号——先 `profiles()` 看清楚 |
+| `TAB_PROFILE_OFFLINE` | 这个标签页属于一个没连着的 profile | 打开那个 profile，或改用 `tabs list` 里的页 |
+| `TAB_AMBIGUOUS` | 同一个标签页编号在两个 profile 里都有，且都不是本会话的 | 用 `profiles({use})` 换到你要的那个，或新开一页 |
+| `PROFILE_NOT_FOUND` | 没有叫这个名字的 profile 连着 | 用 `profiles()` 看名字；名字在各 profile 的侧栏里设 |
+| doctor 报「这些 profile 跑的代码比扩展文件夹旧」 | 几个 profile 加载同一个文件夹，改完代码有一个没重载 | 跑 `huashu-chrome dev --once`，或在那个 profile 的 `chrome://extensions` 里重载 |
 
 ## 开发
 
@@ -487,10 +516,17 @@ node src/cli.js bridge --foreground
 
 靶场无 CSP 且自带事件记录仪，定位「事件到底有没有到」这类问题比在真站上试快得多。
 
-改了 `extension/` 下的代码，用 `node src/cli.js call reload '{}'` 让扩展自己重载，
-不必去 `chrome://extensions` 点。桥的代码改了**在版本号没变时不会自动换代**——
-桥是长驻单例，起来之后再也不读磁盘。改了 `src/bridge.js` 又不想动版本号，
-就手动把它杀掉，下一条命令会拉起新的。
+改 `extension/` 下的代码时跑着 `node src/cli.js dev`：它盯着 `extension/`，每次保存都在
+**所有**连着的 Chrome profile 里重载扩展，并报告哪些 profile 回来了（`dev --once` 只重载一次就退出）。
+不必再去每个 profile 的 `chrome://extensions` 点。漏重载的那个 profile 会顶着同样的版本号继续跑旧代码，
+`doctor` 拿每个 profile 的装载时刻跟 `extension/` 里最新的修改比，能把它指出来。agent 也可以用
+`reload({all:true})` 做同样的事。
+
+桥的代码改了**在版本号没变时不会自动换代**——桥是长驻单例，起来之后再也不读磁盘。
+改了 `src/bridge.js` 又不想动版本号，就手动把它杀掉，下一条命令会拉起新的。
+
+`npm test` 会把 `HUASHU_CHROME_HOME` 指到一次性的临时目录，测试起的桥不会写进你真实的
+`~/.huashu-chrome`（审计日志、`bridge.json`）。想在同一台机器上跑第二套完全独立的桥，也是设这个变量。
 
 要肉眼核验侧栏改动，可以把它当普通页面打开：`chrome-extension://<扩展id>/panel.html`，
 `chrome.storage` 和 `runtime.sendMessage` 在那里照常能用。但**扩展没法对自己的页面
@@ -503,7 +539,7 @@ node src/cli.js bridge --foreground
 huashu-chrome/
 ├── src/
 │   ├── cli.js              # 入口：install / mcp / bridge / doctor / audit / extension
-│   ├── mcp-server.js       # 22 个工具的定义与握手 instructions
+│   ├── mcp-server.js       # 24 个工具的定义与握手 instructions
 │   ├── bridge.js           # 127.0.0.1 常驻单例：路由 · 授权 · 审计 · 多会话
 │   ├── install.js          # 检测 agent、写 MCP 配置、拉起扩展引导页
 │   └── agents.json         # 已知 agent 表，加一行就多支持一个
