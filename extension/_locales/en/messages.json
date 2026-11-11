@@ -295,6 +295,30 @@
   "ui_document_language": {
     "message": "en"
   },
+  "ui_panel_grants_heading": {
+    "message": "Share login with local scripts"
+  },
+  "ui_panel_grant_hint": {
+    "message": "Scripts you run with huashu-chrome run --grant can use this profile’s login for this site. Cookie values never pass through the agent. Turning the last site off gives back cookie permission."
+  },
+  "ui_panel_grant_active": {
+    "message": "On in this Chrome profile."
+  },
+  "ui_panel_grant_inactive": {
+    "message": "Off in this Chrome profile."
+  },
+  "ui_panel_grant_loading": {
+    "message": "Checking cookie permission…"
+  },
+  "ui_panel_grant_denied": {
+    "message": "Chrome did not grant cookie permission. Sharing stays off."
+  },
+  "ui_panel_grant_error": {
+    "message": "Could not update the setting. Reopen this panel and try again."
+  },
+  "ui_panel_grant_revokeError": {
+    "message": "Sharing is off, but cookie permission could not be removed; check the extension’s permissions in Chrome."
+  },
   "ui_panel_profile_heading": {
     "message": "This Chrome profile"
   },

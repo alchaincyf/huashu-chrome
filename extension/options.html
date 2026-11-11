@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title data-i18n="panel_grants_heading">Share login with local scripts</title>
+<style>
+  :root { color-scheme: light dark; --bg: #fafaf9; --card: #fff; --ink: #1c1917; --mute: #78716c; --line: rgba(0,0,0,.07); --ok: #16a34a; --accent: #2563eb; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161616; --card: #1f1f1f; --ink: #f2f2f2; --mute: #a1a1aa; --line: rgba(255,255,255,.08); --ok: #22c55e; --accent: #60a5fa; }
+  }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif; }
+  main { max-width: 640px; margin: 40px auto; padding: 0 16px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+  h1 { font-size: 18px; margin: 0 0 6px; }
+  .hint { color: var(--mute); font-size: 13px; margin: 0 0 10px; }
+  .sw-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; }
+  .sw-row .txt { flex: 1; }
+  .sw-row .sub { color: var(--mute); font-size: 12px; }
+  .toggle { appearance: none; width: 34px; height: 20px; border-radius: 10px; background: #d6d3d1; position: relative; cursor: pointer; flex: none; margin: 0; }
+  .toggle::after { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform .15s; }
+  .toggle:checked { background: var(--ok); }
+  .toggle:checked::after { transform: translateX(14px); }
+  .toggle:disabled { opacity: .45; cursor: default; }
+  .toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .setting-status { color: var(--mute); font-size: 12px; margin: 0; }
+</style>
+<main>
+  <section>
+    <h1 data-i18n="panel_grants_heading">Share login with local scripts</h1>
+    <p class="hint" data-i18n="panel_grant_hint"></p>
+    <div id="grants"></div>
+  </section>
+</main>
+<script type="module" src="options.js"></script>
+</html>

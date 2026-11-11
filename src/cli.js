@@ -122,6 +122,14 @@ switch (cmd) {
   // 就得去每个 profile 的 chrome://extensions 点一次。dev 替你点：
   //   huashu-chrome dev          盯着 extension/，一改就 reload 所有 profile
   //   huashu-chrome dev --once   只重载一次就退出
+  // 本机脚本借某个 Chrome profile 的登录（session grant）。cookie 只走子进程的 stdin
+  case 'run':
+  case 'grants': {
+    const { runCli } = await import('./handoff/cli.js');
+    process.exitCode = await runCli(cmd, argv.slice(1));
+    break;
+  }
+
   case 'dev':
     await dev({ once: has('--once'), debounceMs: Number(flag('--debounce', 400)) || 400 });
     break;
@@ -155,6 +163,8 @@ switch (cmd) {
   huashu-chrome extension      ${t('helpExtension')}
   huashu-chrome dev [--once]   ${t('helpDev')}
   huashu-chrome audit [-n 30]  ${t('helpAudit')}
+  huashu-chrome grants        ${t('helpGrants')}
+  huashu-chrome run --grant ID [--profile NAME] -- COMMAND   ${t('helpRun')}
   huashu-chrome audit --stats [--days 7]   ${t('helpAuditStats')}
   huashu-chrome bridge --foreground   ${t('helpBridge')}
   huashu-chrome install --dry-run     ${t('helpDryRun')}

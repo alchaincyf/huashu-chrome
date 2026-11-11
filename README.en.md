@@ -346,6 +346,25 @@ claude mcp add chrome-personal -- npx -y huashu-chrome mcp --client claude-code 
 
 The MCP server remembers the chosen profile (from --profile or the agent’s last profiles({use})) and re-applies it after a bridge restart. doctor lists every connected profile with its name and ID.
 
+### Lend a profile’s login to a local script
+
+Some jobs belong in a script, not an agent: a Python report that calls a site’s API every hour, a Playwright run, a `curl`. `huashu-chrome run` gives such a script the login of one Chrome profile for one site, without the cookies ever passing through an agent, the bridge log or the audit file.
+
+1. In the profile whose login you want, open the side panel → **Share login with local scripts** and turn the site on. Chrome asks for the optional cookie permission once. Turning the last site off gives it back.
+2. Run your script through huashu-chrome:
+
+```bash
+huashu-chrome grants                                   # which profile shares which site
+huashu-chrome run --grant amazon-sc -- python report.py  # session JSON on the script's stdin
+huashu-chrome run --grant amazon-sc --format storage-state -- node scrape.js   # Playwright storageState
+huashu-chrome run --grant amazon-sc --format netscape -- curl -b /dev/stdin https://…
+```
+
+- **Sites are fixed grants, not URLs.** The script names a grant (`amazon-sc` = Amazon Seller Central); which hosts and cookie domains that covers is defined in the extension, so a caller cannot widen it to another site.
+- **The right account or nothing.** With one profile sharing the site, run uses it and remembers it (`~/.huashu-chrome/handoff.json`). With several, pass `--profile Work` (name or ID). If the remembered profile is closed, run fails instead of taking a different account.
+- **Encrypted on the way.** The script side makes a one-time key pair; the extension encrypts the cookies to it; the bridge only relays ciphertext. Without `-- COMMAND`, run prints a summary (profile, cookie count, earliest expiry) and no values.
+- **Not for agents.** These commands are not MCP tools, and the bridge refuses them from any client other than `huashu-chrome run`.
+
 ### Two implementation choices
 
 **Why WebSocket instead of Native Messaging:** no native-host configuration needs to be added to a macOS plist or Windows registry—the longest troubleshooting chapter in the official approach.
@@ -436,6 +455,7 @@ huashu-chrome/
 │   ├── mcp-server.js       # 24 browser tools and handshake instructions; learnings are described separately
 │   ├── bridge.js           # Persistent singleton on 127.0.0.1: routing · permissions · audit · sessions
 │   ├── install.js          # Detect agents, write MCP config, open extension guide
+│   ├── handoff/            # huashu-chrome run / grants: lend a profile's login to a local script
 │   └── agents.json         # Known-agent list; add one line to support another client
 ├── extension/              # Chrome MV3: content script · offscreen · debugger · sidebar
 ├── docs/

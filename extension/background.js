@@ -14,6 +14,8 @@ import { matchChallenge, hostOf, hostMatches, L2_ORIGINS_SEED } from './risk.js'
 import { CRED_URL, redactCreds } from './redact.js';
 import { identityOf, stripMarkPrefix } from './identity.js';
 import { validateScript, condText, repeatMax, EXEC_BUDGET, collectRefs, toRecipe } from './script.js';
+import { handoffSession } from './handoff/session.js';
+import { handoffStatus, handoffResolveTab } from './handoff/control.js';
 
 // Human-facing ask/payment copy uses Chrome's native catalog. Keep a Chinese
 // fallback so mocked tests without chrome.i18n exercise the same flow.
@@ -366,6 +368,12 @@ async function onMessage(msg) {
   // 桥自己发起的概况查询：不属于任何会话，不碰槽、不刷标记、不带教练
   if (msg.cmd === 'profile_info') {
     try { return reply(msg.id, true, await profileInfo(), msg.__k); } catch (e) { return reply(msg.id, false, { code: 'INTERNAL', message: e.message || String(e) }, msg.__k); }
+  }
+  // 本机脚本借登录（huashu-chrome run --grant）。不属于任何 agent 会话：不占槽、不贴标记、
+  // 不带教练，也不进 MCP 工具表。桥只放行 huashu-handoff 客户端发来的这几条（见 bridge.js）。
+  const handoff = HANDOFF_HANDLERS[msg.cmd];
+  if (handoff) {
+    try { return reply(msg.id, true, await handoff(msg.params || {}, msg.tabId), msg.__k); } catch (e) { return reply(msg.id, false, { code: e.code || 'INTERNAL', message: e.message || String(e) }, msg.__k); }
   }
   try {
     const handler = HANDLERS[msg.cmd];
@@ -1947,6 +1955,16 @@ function sparse(text) {
   const excerpt = String(text || '').split('--- 正文节选')[1] || '';
   return n <= 3 && excerpt.replace(/\s+/g, '').length < 160;
 }
+
+const HANDOFF_HANDLERS = {
+  async handoff_status(p) {
+    const manifest = chrome.runtime.getManifest();
+    return handoffStatus(p, { extensionId: chrome.runtime.id, instanceId: await instanceId(), version: manifest.version });
+  },
+  handoff_resolve_tab: (p) => handoffResolveTab(p),
+  // 回执里只有密文：私钥在发起请求的本机进程手里，cookie 值不进桥日志、审计和对话
+  handoff_session: (p, tabId) => handoffSession(p, tabId),
+};
 
 const HANDLERS = {
   async snapshot(p, tabId, ctx) {

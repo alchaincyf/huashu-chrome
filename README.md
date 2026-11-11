@@ -407,6 +407,25 @@ claude mcp add chrome-personal -- npx -y huashu-chrome mcp --client claude-code 
 
 MCP 这一侧记着选定的 profile（来自 `--profile` 或 agent 最近一次 `profiles({use})`），桥重启后自动补上。`doctor` 会列出每个连着的 profile 的名字和 ID。
 
+### 把某个 profile 的登录借给本机脚本
+
+有些活该交给脚本而不是 agent：每小时调一次站点 API 的 Python 报表、Playwright、`curl`。`huashu-chrome run` 把一个 Chrome profile 在某个站点的登录交给这样的脚本，cookie 全程不经过 agent、桥日志和审计文件。
+
+1. 在要借登录的那个 profile 里打开侧栏 →「把登录状态借给本机脚本」，打开对应站点。Chrome 会请求一次可选的 cookie 权限；最后一个站点关掉时权限会交还。
+2. 用 huashu-chrome 启动脚本：
+
+```bash
+huashu-chrome grants                                   # 哪个 profile 借出了哪个站点
+huashu-chrome run --grant amazon-sc -- python report.py  # 会话 JSON 走脚本的 stdin
+huashu-chrome run --grant amazon-sc --format storage-state -- node scrape.js   # Playwright 的 storageState
+huashu-chrome run --grant amazon-sc --format netscape -- curl -b /dev/stdin https://…
+```
+
+- **站点是固定的 grant，不是 URL。** 脚本只说 grant 名（`amazon-sc` = Amazon Seller Central），它覆盖哪些域名、哪些 cookie 由扩展定义，调用方没法把范围扩到别的站。
+- **要么对的账号，要么失败。** 只有一个 profile 借出该站点时自动用它并记下（`~/.huashu-chrome/handoff.json`）；有好几个时用 `--profile 工作`（名字或 ID）指定。记下的那个 profile 没开着就直接失败，不会换成别的账号。
+- **路上是密文。** 脚本这一侧生成一次性密钥对，扩展用它加密 cookie，桥只转发密文。不带 `-- COMMAND` 时只打印摘要（profile、cookie 数、最早过期时间），不打印值。
+- **不给 agent 用。** 这几条命令不是 MCP 工具；除了 `huashu-chrome run`，桥对任何客户端都拒绝。
+
 ### 两个实现选择
 
 **为什么用 WebSocket 而不是 Native Messaging**：不必往 macOS plist / Windows 注册表
@@ -542,6 +561,7 @@ huashu-chrome/
 │   ├── mcp-server.js       # 24 个工具的定义与握手 instructions
 │   ├── bridge.js           # 127.0.0.1 常驻单例：路由 · 授权 · 审计 · 多会话
 │   ├── install.js          # 检测 agent、写 MCP 配置、拉起扩展引导页
+│   ├── handoff/            # huashu-chrome run / grants：把 profile 的登录借给本机脚本
 │   └── agents.json         # 已知 agent 表，加一行就多支持一个
 ├── extension/              # Chrome MV3 扩展：content script · offscreen · debugger · 侧栏
 ├── docs/

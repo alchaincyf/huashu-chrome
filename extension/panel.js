@@ -10,6 +10,7 @@
 
 import { compat, compatNote, cmpVersion } from './compat.js';
 import { localizeDocument, t } from './i18n.js';
+import { renderGrantRows } from './handoff/rows.js';
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => {
@@ -263,6 +264,9 @@ $('reconn').onclick = async () => {
 };
 
 // ---------- 设置 ----------
+
+// 每个 session grant 一行开关：本机脚本借这个 profile 的登录（huashu-chrome run --grant）
+renderGrantRows($('grants'), t);
 
 chrome.storage.local.get('l2Disabled', ({ l2Disabled }) => { $('l2').checked = !l2Disabled; });
 

@@ -78,6 +78,12 @@ test('agent 能通过 stdio 挂上 MCP server 并拿到工具表', async () => {
   assert.match(r.content[0].text, /多维表格/);
   assert.match(r.content[0].text, /经验仅供参考/);
 
+  // 借登录给本机脚本的命令不是工具：不在表里，硬叫也在连桥之前就被挡下
+  assert.ok(!names.some((n) => n.startsWith('handoff_')));
+  const h = await client.callTool({ name: 'handoff_session', arguments: { grant: 'amazon-sc' } });
+  assert.equal(h.isError, true);
+  assert.match(h.content[0].text, /Unknown tool handoff_session/);
+
   } finally {
     await client.close();
   }

@@ -295,6 +295,30 @@
   "ui_document_language": {
     "message": "zh-CN"
   },
+  "ui_panel_grants_heading": {
+    "message": "把登录状态借给本机脚本"
+  },
+  "ui_panel_grant_hint": {
+    "message": "用 huashu-chrome run --grant 启动的脚本可以使用此 Chrome 配置文件在这个站点的登录。Cookie 值不经过 agent。最后一个站点关闭时会交还 Cookie 权限。"
+  },
+  "ui_panel_grant_active": {
+    "message": "此 Chrome 配置文件已开启。"
+  },
+  "ui_panel_grant_inactive": {
+    "message": "此 Chrome 配置文件未开启。"
+  },
+  "ui_panel_grant_loading": {
+    "message": "正在检查 Cookie 权限…"
+  },
+  "ui_panel_grant_denied": {
+    "message": "Chrome 未授予 Cookie 权限，共享仍处于关闭状态。"
+  },
+  "ui_panel_grant_error": {
+    "message": "无法更新设置，请重新打开侧栏后重试。"
+  },
+  "ui_panel_grant_revokeError": {
+    "message": "共享已关闭，但未能撤销 Cookie 权限，请检查扩展程序在 Chrome 中的权限。"
+  },
   "ui_panel_profile_heading": {
     "message": "当前 Chrome 配置文件"
   },

@@ -76,6 +76,7 @@
   .toggle:disabled { opacity: .45; cursor: default; }
   .toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
   .setting-status { color: var(--mute); font-size: 11.5px; margin: 0; }
+  .grants-hint { color: var(--mute); font-size: 11.5px; margin: 0 0 4px; }
   .instance-value { min-width: 0; flex: 1; width: 100%; resize: none; user-select: all;
                     font: 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
                     padding: 6px 7px; border: 1px solid var(--line); border-radius: 6px;
@@ -138,6 +139,12 @@
       <span class="txt"><span data-i18n="panel_page_marking">页面标记</span><div class="sub" data-i18n="panel_page_marking_hint">被操作的页面带彩色描边、光标和小头像；录屏演示时可以关掉</div></span>
       <input type="checkbox" class="toggle" id="mark" />
     </label>
+  </section>
+
+  <section>
+    <h2 data-i18n="panel_grants_heading">Share login with local scripts</h2>
+    <p class="sub grants-hint" id="grantsHint" data-i18n="panel_grant_hint"></p>
+    <div id="grants"></div>
   </section>
 </main>
 

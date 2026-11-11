@@ -590,6 +590,9 @@ export async function startMcpServer({ client = 'unknown', profile = process.env
         return { content: [{ type: 'text', text }] };
       }
 
+      // 借登录给本机脚本的命令不是工具：cookie 不该经过 agent。桥那边也会拒，这里先挡住
+      if (/^handoff_/.test(name)) throw Object.assign(new Error(`Unknown tool ${name}`), { code: 'UNKNOWN_TOOL' });
+
       if (!bridge.ws) await bridge.connect();
 
       if (name === 'profiles') {

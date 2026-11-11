@@ -42,6 +42,11 @@ const PIN_CAP = 1000;                // 会话→实例的绑定上限（按最�
 const TAB_OWNER_CAP = 5000;          // tabId→实例的户口簿上限
 const PROFILE_INFO_MS = 2500;        // profiles 向每个实例要概况的等待上限
 const RELOAD_WAIT_MS = 15000;        // reload all 等每个实例重连回来的上限
+// 本机脚本借登录的命令（huashu-chrome run --grant）。只放行这一个客户端，而且必须点名实例：
+// agent（MCP、CLI call）发来一律拒绝。这不是真正的安全边界——本机进程谁都能自称这个名字——
+// 真正的边界是扩展里的 grant 开关和加密回执；这一层只保证 agent 不会顺手把它当成普通工具用。
+export const HANDOFF_CLIENT = 'huashu-handoff';
+const HANDOFF_CMDS = new Set(['handoff_status', 'handoff_resolve_tab', 'handoff_session']);
 
 // profile 名字是用户在侧栏里起的，要进日志、进 agent 的 context：去控制字符、限长
 export function cleanProfileLabel(v) {
@@ -385,7 +390,7 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
         extensionProtocol: ext?.extProtocol,
         // 多实例是诊断信息，不是故障。doctor 要能说出「有两个 Chrome 连着」，
         // 否则「命令跑到另一个窗口去了」这种事只能靠猜。
-        capabilities: ['targeted-routing-v1', 'session-pinning-v1', 'tab-owner-routing-v1', 'profiles-v1'],
+        capabilities: ['targeted-routing-v1', 'session-pinning-v1', 'tab-owner-routing-v1', 'profiles-v1', 'session-handoff-v1'],
         extensions: liveExtensions().map((e) => ({
           extensionId: e.extensionId, instanceId: e.instanceId,
           chrome: e.chromeVersion, version: e.extVersion, headless: e.headless, primary: e === ext,
@@ -615,6 +620,13 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
   function dispatch(ws, msg, deadline) {
     if (msg.cmd === 'profiles') return void handleProfiles(ws, msg);
     if (msg.cmd === 'reload' && msg.params?.all === true) return void handleReloadAll(ws, msg);
+    if (HANDOFF_CMDS.has(msg.cmd)) {
+      if (ws.client !== HANDOFF_CLIENT) {
+        audit({ ev: 'blocked', cmd: msg.cmd, client: ws.client, reason: 'HANDOFF_FORBIDDEN' });
+        return targetError(ws, msg, 'HANDOFF_FORBIDDEN', `${msg.cmd} is only available to huashu-chrome run, not to agents`);
+      }
+      if (!Object.hasOwn(msg, 'target')) return targetError(ws, msg, 'TARGET_REQUIRED', `${msg.cmd} must name a Chrome profile`);
+    }
     let note = '';
     const selection = selectTarget(msg);
     if (selection.error) return targetError(ws, msg, selection.error.code, selection.error.message);
