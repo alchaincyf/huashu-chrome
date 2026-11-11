@@ -4,7 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
-export const HOME = path.join(os.homedir(), '.huashu-chrome');
+// HUASHU_CHROME_HOME：换掉整个配置目录。npm test 用它把测试和用户的真实审计隔开
+// （见 test/isolated-home.js）；同一台机器上想跑第二套独立的桥也靠它。
+export const HOME = process.env.HUASHU_CHROME_HOME || path.join(os.homedir(), '.huashu-chrome');
 export const BRIDGE_FILE = path.join(HOME, 'bridge.json');
 export const LOCK_FILE = path.join(HOME, 'bridge.lock');
 export const AUDIT_FILE = path.join(HOME, 'audit.jsonl');

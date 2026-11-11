@@ -41,6 +41,7 @@ const MAX_TARGET_ID_LENGTH = 128;
 const PIN_CAP = 1000;                // 会话→实例的绑定上限（按最近使用淘汰）
 const TAB_OWNER_CAP = 5000;          // tabId→实例的户口簿上限
 const PROFILE_INFO_MS = 2500;        // profiles 向每个实例要概况的等待上限
+const RELOAD_WAIT_MS = 15000;        // reload all 等每个实例重连回来的上限
 
 // profile 名字是用户在侧栏里起的，要进日志、进 agent 的 context：去控制字符、限长
 export function cleanProfileLabel(v) {
@@ -51,7 +52,7 @@ export function cleanProfileLabel(v) {
 // writeInfo=false 供测试用：不写 bridge.json，否则测试桥的 token 会盖掉
 // 真在跑的那个桥，用户所有 agent 会话当场断连。
 export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo = true, orphanGraceMs = ORPHAN_GRACE_MS,
-  silenceMs = EXT_SILENCE_MS, probeMs = EXT_PROBE_MS, tickMs = 20000, profileInfoMs = PROFILE_INFO_MS } = {}) {
+  silenceMs = EXT_SILENCE_MS, probeMs = EXT_PROBE_MS, tickMs = 20000, profileInfoMs = PROFILE_INFO_MS, reloadWaitMs = RELOAD_WAIT_MS } = {}) {
   ensureHome();
 
   const agents = new Set();      // role=agent 的连接
@@ -320,6 +321,7 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
       ws.chromeVersion = msg.chrome || '?';
       ws.headless = !!msg.headless;
       ws.profileLabel = cleanProfileLabel(msg.profileLabel);
+      ws.loadedAt = Number.isSafeInteger(msg.loadedAt) && msg.loadedAt > 0 ? msg.loadedAt : null;
       // 老扩展不报 instanceId 时，用实际 Origin 的扩展 id 退回兼容身份。
       // 不采信 hello 里的 extId：它是客户端字段，不能作为连接身份。
       ws.instanceId = typeof msg.instanceId === 'string'
@@ -387,7 +389,7 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
         extensions: liveExtensions().map((e) => ({
           extensionId: e.extensionId, instanceId: e.instanceId,
           chrome: e.chromeVersion, version: e.extVersion, headless: e.headless, primary: e === ext,
-          label: e.profileLabel || undefined,
+          label: e.profileLabel || undefined, loadedAt: e.loadedAt || undefined,
         })),
       });
       return;
@@ -495,7 +497,8 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
   // 桥自己向某个实例要一份数据（不经过任何 agent）。回执照常按 __k 配对，
   // 配上后交给 internal 而不是转发。拿不到（超时、老扩展不认）就给 null。
   let internalSeq = 0;
-  function askInstance(ext, cmd, params = {}, ms = profileInfoMs) {
+  // extra：要以某个会话的名义发时（reload 会刷标记、记会话），带上 sid/client/label/live
+  function askInstance(ext, cmd, params = {}, ms = profileInfoMs, extra = {}) {
     return new Promise((resolve) => {
       const key = `bridge:${++internalSeq}`;
       const timer = setTimeout(() => { pending.delete(key); resolve(null); }, ms);
@@ -504,8 +507,47 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
         ext, extensionId: ext.extensionId, instanceId: ext.instanceId,
         cmd, timer, startedAt: Date.now(), id: key,
       });
-      send(ext, { type: 'cmd', id: key, cmd, params, __k: key });
+      send(ext, { ...extra, type: 'cmd', id: key, cmd, params, __k: key });
     });
+  }
+
+  // reload({all:true})：同一个文件夹被多个 profile 加载，改完代码要每个都重载。
+  // 逐个发 reload，再等它们各自带着同一个 instanceId 重连回来（新连接 = 新代码）。
+  // 回执逐个报：谁回来了、用了多久、谁没回来——没回来的那个多半还在跑旧代码。
+  async function handleReloadAll(ws, msg) {
+    const targets = liveExtensions();
+    if (!targets.length) return enqueue(ws, msg, undefined, { reason: 'none' });
+    const as = { sid: ws.sid, client: ws.client, label: ws.label, live: liveSessions() };
+    const started = Date.now();
+    const acks = await Promise.all(targets.map((e) => askInstance(e, 'reload', {}, profileInfoMs, as)));
+    audit({ ev: 'reload_all', client: ws.client, sid: ws.sid, instances: targets.map((e) => String(e.instanceId).slice(0, 8)) });
+    const waitMs = Math.min(Math.max(Number(msg.params?.waitMs) || reloadWaitMs, 500), 60000);
+    const backAt = new Map();
+    while (Date.now() - started < waitMs && backAt.size < targets.length) {
+      for (const old of targets) {
+        if (backAt.has(old)) continue;
+        const fresh = liveExtensions().find((e) => e !== old && identityKey(e) === identityKey(old));
+        if (fresh) backAt.set(old, { ext: fresh, ms: Date.now() - started });
+      }
+      if (backAt.size < targets.length) await new Promise((r) => setTimeout(r, 100));
+    }
+    const instances = targets.map((old, i) => {
+      const back = backAt.get(old);
+      return {
+        name: old.profileLabel || null, instanceId: old.instanceId,
+        acked: !!acks[i], back: !!back, ms: back?.ms ?? null, version: back?.ext.extVersion ?? null,
+      };
+    });
+    const lines = instances.map((r) => `${r.back ? '✓' : '✗'} "${r.name || `id ${String(r.instanceId).slice(0, 8)}`}" `
+      + (r.back ? `reloaded, back in ${(r.ms / 1000).toFixed(1)}s (v${r.version})`
+        : r.acked ? `reload sent, not back after ${(waitMs / 1000).toFixed(0)}s — it may still be restarting`
+          : 'did not answer the reload — reload it from chrome://extensions'));
+    const ok = instances.every((r) => r.back);
+    log(`reload all：${instances.filter((r) => r.back).length}/${instances.length} 个实例重载完成`);
+    send(ws, { type: 'res', id: msg.id, ok: true, data: {
+      text: `${ok ? 'Reloaded' : 'Reload incomplete for'} ${instances.length} Chrome profile${instances.length > 1 ? 's' : ''}:\n${lines.join('\n')}`,
+      instances, ok,
+    } });
   }
 
   // profiles：列出连着的 Chrome profile（=账号），以及本会话落在哪个上；
@@ -572,6 +614,7 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
 
   function dispatch(ws, msg, deadline) {
     if (msg.cmd === 'profiles') return void handleProfiles(ws, msg);
+    if (msg.cmd === 'reload' && msg.params?.all === true) return void handleReloadAll(ws, msg);
     let note = '';
     const selection = selectTarget(msg);
     if (selection.error) return targetError(ws, msg, selection.error.code, selection.error.message);

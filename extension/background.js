@@ -184,6 +184,24 @@ async function instanceId() {
   }
 }
 
+// 这份代码是什么时候装载的。storage.session 在扩展重载、浏览器重启时清空，
+// 而 SW 被回收再唤醒时保留——所以这里记下的就是「上一次重载」的时刻。
+// 多个 profile 加载同一个文件夹：改了代码只重载了其中一个，另一个还在跑旧代码，
+// doctor 拿它跟文件夹里最新的修改时间一比就看得出来。
+let loadedAtCache = null;
+async function loadedAt() {
+  if (loadedAtCache) return loadedAtCache;
+  try {
+    const { hcLoadedAt } = await chrome.storage.session.get('hcLoadedAt');
+    if (hcLoadedAt) return (loadedAtCache = hcLoadedAt);
+    const now = Date.now();
+    await chrome.storage.session.set({ hcLoadedAt: now });
+    return (loadedAtCache = now);
+  } catch {
+    return null;
+  }
+}
+
 // profile 名字：用户在侧栏里给这个 Chrome profile 起的名（「工作」「Amazon US」）。
 // 同一份扩展被多个 profile 加载时，agent 靠它分清哪个是哪个账号。
 // 跟 instanceId 一样存 storage.local：只属于这个 profile。
@@ -249,6 +267,7 @@ async function directConnect() {
   // 就会被当成两个 Chrome 并存，谁也不替换谁。
   const iid = await instanceId();
   const label = await profileLabel();
+  const at = await loadedAt();
   for (const port of PORTS) {
     try {
       directWs = await new Promise((resolve, reject) => {
@@ -257,7 +276,7 @@ async function directConnect() {
         sock.onopen = () => sock.send(JSON.stringify({
           type: 'hello', role: 'extension', extId: chrome.runtime.id,
           version: chrome.runtime.getManifest().version,
-          instanceId: iid, profileLabel: label, headless: isHeadless(),
+          instanceId: iid, profileLabel: label, loadedAt: at, headless: isHeadless(),
           chrome: (navigator.userAgent.match(/Chrome\/([\d.]+)/) || [])[1], v: 1,
         }));
         sock.onmessage = (ev) => {
@@ -2812,11 +2831,12 @@ chrome.runtime.onMessage.addListener((m, sender, sendResponse) => {
   }
   // offscreen 拿不到 chrome.runtime.getManifest()，握手身份只能由这边供给
   if (m?.__hcBridge === 'identity') {
-    Promise.all([instanceId(), profileLabel()]).then(([iid, label]) => sendResponse({
+    Promise.all([instanceId(), profileLabel(), loadedAt()]).then(([iid, label, at]) => sendResponse({
       extId: chrome.runtime.id,
       version: chrome.runtime.getManifest().version,
       instanceId: iid,
       profileLabel: label,
+      loadedAt: at,
       headless: isHeadless(),
     }));
     return true;   // 异步回答，通道要留着

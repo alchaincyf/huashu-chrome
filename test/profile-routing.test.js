@@ -383,7 +383,7 @@ test('profile 名字的跨文件契约：同一个存储键，两条腿的握手
   assert.ok(key, 'background 里找不到 PROFILE_LABEL_KEY');
   assert.ok(panel.includes(`PROFILE_LABEL_KEY = '${key}'`), '侧栏和 background 必须用同一个存储键');
   assert.match(bg, /instanceId: iid, profileLabel: label/, 'SW 直连那条腿的 hello 要带名字');
-  assert.match(bg, /profileLabel: label,\s*\n\s*headless: isHeadless\(\)/, 'identity 应答要带名字（offscreen 那条腿靠它）');
+  assert.match(bg, /sendResponse\(\{[^}]*profileLabel: label,/, 'identity 应答要带名字（offscreen 那条腿靠它）');
   assert.match(off, /profileLabel: who\.profileLabel/, 'offscreen 的 hello 要带名字');
   assert.match(bg, /type: 'meta', profileLabel/, '改名要发 meta');
   assert.match(br, /msg\.type === 'meta'/, '桥要认 meta');

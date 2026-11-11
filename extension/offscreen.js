@@ -98,6 +98,7 @@ async function connect() {
       instanceId: who.instanceId,
       // 用户起的 profile 名字（侧栏里设）。多 profile 时 agent 靠它分清账号
       profileLabel: who.profileLabel || '',
+      loadedAt: who.loadedAt || null,
       headless: !!who.headless,
       chrome: (navigator.userAgent.match(/Chrome\/([\d.]+)/) || [])[1],
       v: 1,

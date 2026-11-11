@@ -486,10 +486,11 @@ const TOOLS = [
     description:
       'Reload the huashu-chrome extension (chrome.runtime.reload()) so an updated build takes effect — ' +
       'no manual chrome://extensions visit needed. ~2s; bridge auto-reconnects, tabs keep state. ' +
+      'all:true = every connected profile. ' +
       'DISRUPTIVE: the extension is shared by every tab and every other agent session on this machine — ' +
       'anything mid-flight elsewhere gets cut. Only call right after installing/updating, or when ' +
       '\`doctor\`/a version-mismatch warning says to — never speculatively.',
-    inputSchema: { type: 'object', properties: {} },
+    inputSchema: { type: 'object', properties: { all: { type: 'boolean' } } },
   },
 ];
 

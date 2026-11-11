@@ -4,6 +4,7 @@
 //   bridge   桥 daemon。正常不用手动跑，mcp 会自己拉起。
 //   doctor   诊断：这类产品的头号支持成本就是「连不上」，把排查做成一条命令。
 //   extension  打印扩展路径和加载步骤
+//   dev      盯着扩展文件夹，一改就把所有连着的 Chrome profile 一起重载
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -13,6 +14,7 @@ import { VERSION } from './lib/version.js';
 import { createTranslator, parseLanguageArgs, resolveLocale } from './lib/i18n.js';
 import { cliMessages } from './locales/cli.js';
 import { compat, compatNote } from '../extension/compat.js';
+import { isNoiseFile, newestFile, staleInstances } from './lib/ext-files.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(HERE, '..');
@@ -116,6 +118,14 @@ switch (cmd) {
     await doctor();
     break;
 
+  // 开发 unpacked 扩展：同一个文件夹被几个 Chrome profile 加载，改一次代码
+  // 就得去每个 profile 的 chrome://extensions 点一次。dev 替你点：
+  //   huashu-chrome dev          盯着 extension/，一改就 reload 所有 profile
+  //   huashu-chrome dev --once   只重载一次就退出
+  case 'dev':
+    await dev({ once: has('--once'), debounceMs: Number(flag('--debounce', 400)) || 400 });
+    break;
+
   case 'extension':
     printExtension();
     // --reveal：在访达 / 资源管理器里选中扩展文件夹，用户拖进 chrome://extensions 就装好了。
@@ -143,6 +153,7 @@ switch (cmd) {
   huashu-chrome mcp            ${t('helpMcp')}
   huashu-chrome doctor         ${t('helpDoctor')}
   huashu-chrome extension      ${t('helpExtension')}
+  huashu-chrome dev [--once]   ${t('helpDev')}
   huashu-chrome audit [-n 30]  ${t('helpAudit')}
   huashu-chrome audit --stats [--days 7]   ${t('helpAuditStats')}
   huashu-chrome bridge --foreground   ${t('helpBridge')}
@@ -206,6 +217,15 @@ async function doctor() {
         if (r.extensions.some((e) => e.headless)) {
           console.log(`       ${t('headlessOrphan')}`);
         }
+      }
+      // 同一个文件夹被几个 profile 加载：改了代码只重载了其中一个，另一个还跑旧代码，
+      // 版本号却一模一样——只能拿「装载时刻」跟文件夹里最新的修改比。
+      // 比的是本 CLI 旁边的 extension/，Chrome 加载的若是另一份拷贝，这条不适用。
+      const newest = newestFile(path.join(ROOT, 'extension'));
+      const stale = staleInstances(r.extensions, newest);
+      if (stale.length) {
+        const names = stale.map((e) => (e.label ? `「${e.label}」` : String(e.instanceId).slice(0, 8))).join(', ');
+        bad(t('staleInstances', { names, file: newest.file.replace(/\\/g, '/') }), t('staleFix'));
       }
       if (r.ok && !r.extensionOnline) {
         // 话术和 popup、mcp-server 的 hint 一致：首选动作是弹窗里的「重连」。
@@ -344,6 +364,46 @@ function auditStats(days, t) {
     console.log(t('learningsStats', { count: lrn.length, saved: save, adopted: adopt }));
   }
   console.log('');
+}
+
+async function dev({ once, debounceMs }) {
+  const dir = path.join(ROOT, 'extension');
+  const { BridgeClient } = await import('./lib/rpc.js');
+  const client = new BridgeClient({ client: 'dev', label: 'huashu-chrome dev' });
+  const stamp = () => new Date().toLocaleTimeString();
+  const reloadAll = async () => {
+    try {
+      const r = await client.call('reload', { all: true }, { timeoutMs: 60000 });
+      console.log(r.text);
+      return r.ok !== false;
+    } catch (e) {
+      console.log(`[${e.code || 'INTERNAL'}] ${e.message}`);
+      return false;
+    }
+  };
+  await client.connect();
+  if (once) process.exit((await reloadAll()) ? 0 : 1);
+
+  console.log(t('devWatching', { dir }));
+  const changed = new Set();
+  let timer = null, running = false, again = false;
+  const run = async () => {
+    if (running) { again = true; return; }
+    running = true;
+    const files = [...changed];
+    changed.clear();
+    const shown = files.slice(0, 5).join(', ') + (files.length > 5 ? ` +${files.length - 5}` : '');
+    console.log(`\n[${stamp()}] ${t('devChanged', { files: shown })}`);
+    await reloadAll();
+    running = false;
+    if (again) { again = false; void run(); }
+  };
+  fs.watch(dir, { recursive: true }, (_ev, file) => {
+    if (!file || isNoiseFile(file)) return;
+    changed.add(String(file).replace(/\\/g, '/'));
+    clearTimeout(timer);
+    timer = setTimeout(run, debounceMs);
+  });
 }
 
 function probe(info, t) {

@@ -13,6 +13,9 @@ test('agent 能通过 stdio 挂上 MCP server 并拿到工具表', async () => {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [CLI, 'mcp', '--client', 'test'],
+    // SDK 默认只给子进程传一小撮环境变量，HUASHU_CHROME_HOME 会被丢掉，
+    // 子进程的审计就写回用户真实的 audit.jsonl（见 test/isolated-home.js）
+    env: { ...process.env },
   });
   const client = new Client({ name: 'test', version: '0' }, { capabilities: {} });
   await client.connect(transport);
