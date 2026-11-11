@@ -64,3 +64,11 @@ test('BridgeClient 在连桥之前可以改口，连上之后不行', () => {
   assert.equal(c.identify('gemini'), false);
   assert.equal(c.client, 'codex');
 });
+
+test('只换比自己旧的桥：新旧客户端混用时不会互相把对方的桥杀掉', async () => {
+  const { shouldReplaceBridge } = await import('../src/lib/rpc.js');
+  assert.equal(shouldReplaceBridge('1.3.1', '1.4.0'), true, '旧桥让位');
+  assert.equal(shouldReplaceBridge('1.4.0', '1.4.0'), false);
+  assert.equal(shouldReplaceBridge('1.4.0', '1.3.1'), false, 'npx 旧版不该杀掉本地新版的桥');
+  assert.equal(shouldReplaceBridge('1.10.0', '1.9.0'), false, '按数字比，不按字符串');
+});

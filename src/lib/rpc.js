@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { DEFAULT_PORT, LOCK_FILE, LOG_FILE, BRIDGE_FILE, readBridgeInfo, ensureHome } from './paths.js';
 import { VERSION } from './version.js';
+import { cmpVersion } from '../../extension/compat.js';
 
 const CLI = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'cli.js');
 
@@ -62,7 +63,10 @@ export class BridgeClient {
       // 桥是长驻单例：它一旦起来就再也不会读磁盘上的代码。用户 npm update 之后
       // 老桥还在跑老逻辑，症状是「新版本的修复没生效」，而且不报错。
       // 版本对不上就当场换掉——这是唯一能自动发现的时机。
-      if (info && info.version && info.version !== VERSION && !spawned) {
+      // 只换**比自己旧**的桥。以前是「不一样就换」：同一台机器上 npx 拉的旧版和本地仓库的
+      // 新版各连一个 agent，两边每次重连都把对方的桥杀掉，所有会话一起断。新桥兼容旧客户端，
+      // 让最新的那个留下来。
+      if (info && info.version && shouldReplaceBridge(info.version) && !spawned) {
         stopBridge(info);
         spawned = tryStartBridge();
         await sleep(400);
@@ -162,6 +166,11 @@ export class BridgeClient {
 // 抢锁开桥：拿到锁的那个进程 spawn，其余的什么都不做、轮询等它起来
 // 停掉旧桥。只认 bridge.json 里记的 pid，且发的是 SIGTERM——桥收到会先把
 // 在途命令回成错误再退，不会让 agent 干等到超时。
+/** 桥比本进程旧才换；一样或更新都留着（新桥向下兼容旧客户端）。 */
+export function shouldReplaceBridge(bridgeVersion, mine = VERSION) {
+  return cmpVersion(bridgeVersion, mine) < 0;
+}
+
 export function stopBridge(info) {
   if (!info?.pid) return false;
   try {
