@@ -1,0 +1,18 @@
+<!doctype html><meta charset="utf-8"><title>frames range</title>
+<style>body{font:13px system-ui;margin:8px} .ads iframe{width:110px;height:50px;border:1px solid #ccc;margin:2px}
+#main{width:900px;height:620px;border:2px solid #888;padding:6px} #ghost{width:0;height:0;border:0}</style>
+<h1>Frame range</h1>
+<!-- nine small "ad" frames come first in document order, like a console page full of widgets -->
+<div class="ads">
+  <iframe src="frame-inner.html?ad=1"></iframe><iframe src="frame-inner.html?ad=2"></iframe><iframe src="frame-inner.html?ad=3"></iframe>
+  <iframe src="frame-inner.html?ad=4"></iframe><iframe src="frame-inner.html?ad=5"></iframe><iframe src="frame-inner.html?ad=6"></iframe>
+  <iframe src="frame-inner.html?ad=7"></iframe><iframe src="frame-inner.html?ad=8"></iframe><iframe src="frame-inner.html?ad=9"></iframe>
+</div>
+<iframe id="ghost" src="frame-inner.html?ghost=1"></iframe>
+<!-- the real work surface: cross-origin, and the editor sits one level deeper -->
+<iframe id="main" title="work"></iframe>
+<script>
+  // same port, other host name: a genuinely cross-site (out-of-process) frame
+  const other = location.hostname === 'localhost' ? '127.0.0.1' : 'localhost';
+  document.getElementById('main').src = `http://${other}:${location.port}/frames-mid.html`;
+</script>

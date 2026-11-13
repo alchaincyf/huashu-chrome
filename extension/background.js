@@ -9,6 +9,7 @@
 // 漂移记录和 iframe 快照在 storage.session，连接状态由 offscreen 维护。
 
 import * as cdp from './cdp.js';
+import { imageSize } from './image-size.js';
 import { compat, compatNote } from './compat.js';
 import { matchChallenge, hostOf, hostMatches, L2_ORIGINS_SEED } from './risk.js';
 import { CRED_URL, redactCreds } from './redact.js';
@@ -983,39 +984,213 @@ const frameSnapKey = (tabId) => `frames:${tabId}`;
 const getFrameSnaps = async (tabId) => (await chrome.storage.session.get(frameSnapKey(tabId)))[frameSnapKey(tabId)] || null;
 const setFrameSnaps = (tabId, snaps) => chrome.storage.session.set({ [frameSnapKey(tabId)]: snaps });
 
-async function listFrames(tabId) {
+// 每个框架的地址，外加它在顶层视口里实际露出来的那块区域（box）。
+//
+// box 一举两得：snapshot 按露出面积挑框架（Fabric 这类控制台常有十几个 iframe，
+// 真正在用的那个往往不在前 8 个里，0×0 的隐藏框架反而排在前面）；
+// L2 用它把框架内的坐标换算成顶层坐标——CDP 的 Input 域只认顶层视口。
+//
+// 框架 ↔ DOM 里的 <iframe> 元素怎么对上：chrome.runtime.getFrameId(元素) 本来是
+// 现成的，但这台机器的 Chrome 里它在注入脚本中不存在（2026-11-13 实测 undefined）。
+// 所以用握手：每个父框架给自己的每个 <iframe> 发一条带随机 nonce 的 postMessage，
+// 子框架（只认来自 window.parent 的）记下收到的 nonce，再按 nonce 把子框架的
+// frameId 和父框架里那个元素的位置拼起来。跨源也成立：每个框架只量自己的子元素。
+// 三步：所有框架先装好接收器 → 父框架量位置并发送 → 收集（没到齐的稍等再收一次）。
+const GEO_KEY = '__hcGeo';
+async function frameGeometry(tabId) {
+  const all = { tabId, allFrames: true };
+  let res = [];
   try {
-    const res = await chrome.scripting.executeScript({
-      target: { tabId, allFrames: true },
-      func: () => ({ url: location.href, title: document.title }),
+    const nonce = Math.random().toString(36).slice(2, 10);
+    await chrome.scripting.executeScript({
+      target: all,
+      func: (key) => {
+        window.__hcGeoGot = null;
+        if (!window.__hcGeoListening) {
+          window.__hcGeoListening = true;
+          addEventListener('message', (e) => {
+            if (e.source === window.parent && e.data && typeof e.data[key] === 'string') window.__hcGeoGot = e.data[key];
+          }, true);
+        }
+      },
+      args: [GEO_KEY],
     });
-    return res
-      .filter((r) => r.result?.url && !/^about:/.test(r.result.url))
-      .map((r) => ({ frameId: r.frameId, ...r.result }));
-  } catch {
-    return [{ frameId: 0, url: '', title: '' }];
+    res = await chrome.scripting.executeScript({
+      target: all,
+      func: (key, nonce) => {
+        const kids = [];
+        let i = 0;
+        for (const f of document.querySelectorAll('iframe,frame')) {
+          const tag = `${nonce}:${Math.random().toString(36).slice(2, 8)}:${i++}`;
+          const r = f.getBoundingClientRect();
+          const cs = getComputedStyle(f);
+          const pl = parseFloat(cs.paddingLeft) || 0;
+          const pt = parseFloat(cs.paddingTop) || 0;
+          const shown = cs.display !== 'none' && cs.visibility !== 'hidden';
+          kids.push({
+            tag,
+            x: r.left + f.clientLeft + pl,
+            y: r.top + f.clientTop + pt,
+            w: shown ? Math.max(0, f.clientWidth - pl - (parseFloat(cs.paddingRight) || 0)) : 0,
+            h: shown ? Math.max(0, f.clientHeight - pt - (parseFloat(cs.paddingBottom) || 0)) : 0,
+          });
+          try { f.contentWindow?.postMessage({ [key]: tag }, '*'); } catch { /* 没有文档 */ }
+        }
+        return { url: location.href, title: document.title, vw: innerWidth, vh: innerHeight, kids };
+      },
+      args: [GEO_KEY, nonce],
+    });
+    // 收集：postMessage 是异步的，跨进程的子框架可能晚一拍
+    const got = new Map();   // frameId -> tag
+    const want = res.filter((r) => r.frameId !== 0).length;
+    for (let round = 0; round < 4 && got.size < want; round++) {
+      if (round) await sleep(40 * round);
+      const g = await chrome.scripting.executeScript({ target: all, func: () => window.__hcGeoGot });
+      for (const r of g) if (typeof r.result === 'string' && r.result.startsWith(nonce)) got.set(r.frameId, r.result);
+    }
+    const byTag = new Map([...got].map(([fid, tag]) => [tag, fid]));
+    for (const r of res) {
+      for (const k of r.result?.kids || []) k.child = byTag.has(k.tag) ? byTag.get(k.tag) : -1;
+    }
+  } catch { /* 受限页面：只剩顶层 */ }
+  const frames = new Map();   // frameId -> { url, title, vw, vh, doc }
+  const parentOf = new Map(); // childFrameId -> { parent, x, y, w, h }
+  for (const r of res) {
+    if (!r.result) continue;
+    frames.set(r.frameId, { ...r.result, doc: r.documentId || '' });
+    for (const k of r.result.kids) {
+      if (k.child >= 0) parentOf.set(k.child, { parent: r.frameId, x: k.x, y: k.y, w: k.w, h: k.h });
+    }
   }
+  const top = frames.get(0);
+  // 顶层坐标系下的原点和露出区域。链断了（getFrameId 拿不到）返回 null
+  const boxOf = (frameId) => {
+    if (!frameId) return { x: 0, y: 0, l: 0, t: 0, r: top?.vw ?? Infinity, b: top?.vh ?? Infinity };
+    const chain = [];
+    for (let cur = frameId, n = 0; cur !== 0; n++) {
+      const g = parentOf.get(cur);
+      if (!g || n > 16) return null;
+      chain.unshift(g);
+      cur = g.parent;
+    }
+    let x = 0, y = 0;
+    let l = 0, t = 0, r = top?.vw ?? Infinity, b = top?.vh ?? Infinity;
+    for (const g of chain) {
+      x += g.x; y += g.y;
+      l = Math.max(l, x); t = Math.max(t, y);
+      r = Math.min(r, x + g.w); b = Math.min(b, y + g.h);
+    }
+    return { x, y, l, t, r, b };
+  };
+  const areaOf = (frameId) => {
+    const bx = boxOf(frameId);
+    return bx ? Math.max(0, bx.r - bx.l) * Math.max(0, bx.b - bx.t) : null;
+  };
+  return { frames, parentOf, boxOf, areaOf };
 }
 
-// "e5@f2" → { ref:"e5", frameId:2 }
+const sizeOf = (bx) => (bx ? `${Math.round(Math.max(0, bx.r - bx.l))}×${Math.round(Math.max(0, bx.b - bx.t))}` : '?');
+// 框架句柄 "6131:1a2b3c4d"：frameId + 文档代次（documentId 前 8 位）。
+// 框架导航到新文档时 frameId 不变、documentId 变——带句柄的命令据此拒绝打到新文档上。
+const handleOf = (frameId, doc) => (doc ? `${frameId}:${doc.slice(0, 8).toLowerCase()}` : String(frameId));
+
+// 清点一个标签页里的全部框架，含注入不了的（父框架里看得见 <iframe>，但脚本进不去：
+// sandbox、chrome-error、还没加载完）。status：
+//   visible —— 在页面上露出面积 > 0；hidden —— 0×0 / display:none / 被裁到看不见；
+//   unknown —— 量不出几何（iframe 在 shadow DOM 里等）；inaccessible —— 进不去
+async function listFrames(tabId, { all = false } = {}) {
+  const geo = await frameGeometry(tabId);
+  if (!geo.frames.size) return [{ frameId: 0, url: '', title: '', area: null, size: '?', status: 'unknown', parent: null, handle: '0' }];
+  const out = [...geo.frames]
+    .filter(([, f]) => all || (f.url && !/^about:/.test(f.url)))
+    .map(([frameId, f]) => {
+      const bx = geo.boxOf(frameId);
+      const area = geo.areaOf(frameId);
+      return {
+        frameId, url: f.url, title: f.title, area, size: sizeOf(bx), doc: f.doc,
+        handle: handleOf(frameId, f.doc),
+        parent: frameId === 0 ? null : (geo.parentOf.get(frameId)?.parent ?? null),
+        status: area === null ? 'unknown' : area > 0 ? 'visible' : 'hidden',
+      };
+    });
+  if (all) {
+    for (const [child, g] of geo.parentOf) {
+      if (geo.frames.has(child)) continue;
+      const bx = geo.boxOf(child);
+      out.push({ frameId: child, url: '', title: '', area: geo.areaOf(child), size: sizeOf(bx), doc: '', handle: String(child), parent: g.parent, status: 'inaccessible' });
+    }
+  }
+  return out;
+}
+
+// 哪些框架里有（匹配 selector 的）file input。隐藏的也算——上传 input 几乎总是隐藏的
+async function fileInputFrames(tabId, selector) {
+  let res = [];
+  try {
+    res = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: (sel) => {
+        try { return { n: document.querySelectorAll(sel || 'input[type=file]').length, url: location.href }; } catch { return { n: -1 }; }
+      },
+      args: [selector || ''],
+    });
+  } catch { return []; }
+  if (res.some((r) => r.result?.n === -1)) throw err('BAD_PARAMS', `不是合法的 CSS 选择器：${selector}`);
+  return res.filter((r) => r.result?.n > 0).map((r) => ({ frameId: r.frameId, count: r.result.n, url: r.result.url }));
+}
+
+// "e5@f2" → { ref:"e5", frameId:2 }；不带后缀的 frameId 为 null
 function splitRef(ref) {
   const m = /^(.*)@f(\d+)$/.exec(String(ref || ''));
-  return m ? { ref: m[1], frameId: Number(m[2]) } : { ref, frameId: 0 };
+  return m ? { ref: m[1], frameId: Number(m[2]) } : { ref, frameId: null };
+}
+
+// 显式的 frameId 参数：数字 N（快照里「iframe fN」那个），或句柄 "N:文档代次"。
+// selector / find / 坐标这些不带 @fN 的定位方式，只能靠它进 iframe
+function parseFrame(p) {
+  const v = p?.frameId;
+  if (v === undefined || v === null || v === '') return null;
+  const m = /^f?(\d+)(?::([0-9a-f]{4,64}))?$/i.exec(String(v).trim());
+  if (!m) throw err('BAD_PARAMS', `frameId 要是快照里「iframe fN」的那个数字 N，或 frames 给的句柄 "N:xxxxxxxx"，收到 ${JSON.stringify(v)}`);
+  return { id: Number(m[1]), doc: m[2] ? m[2].toLowerCase() : null };
+}
+const frameOf = (p) => parseFrame(p)?.id ?? null;
+
+// 句柄带了文档代次就核对一遍：框架换了文档（导航、重新加载）就拒绝，
+// 不然 selector 会悄悄打到一个新页面上，而 agent 以为还是刚才那个。
+async function checkFrame(tabId, p) {
+  const f = parseFrame(p);
+  if (!f) return null;
+  if (f.doc) {
+    let res = null;
+    try {
+      [res] = await chrome.scripting.executeScript({ target: { tabId, frameIds: [f.id] }, func: () => location.href });
+    } catch { /* 下面统一报 */ }
+    if (!res) throw err('STALE_FRAME', `框架 f${f.id} 已经不存在（iframe 被移除或整页重新加载）。frames 重新清点。`);
+    if (!String(res.documentId || '').toLowerCase().startsWith(f.doc)) {
+      throw err('STALE_FRAME', `框架 f${f.id} 已经导航到新文档（${shortUrl(res.result || '')}），句柄 ${f.id}:${f.doc} 作废。frames 重新清点，确认是你要的页面再操作。`);
+    }
+  }
+  return f.id;
 }
 
 // 一条命令带的所有 ref 必须落在同一个框架里——跨框架的一次操作没有意义，
 // 与其让它悄悄打到顶层框架去，不如明确拒绝。
+// 不带 @fN 的 ref 属于显式给的 frameId（没给就是顶层）。
 function routeOf(p) {
+  const explicit = frameOf(p);
   const refs = [p.ref, p.submitRef, ...(Array.isArray(p.fields) ? p.fields.map((f) => f.ref) : [])]
     .filter(Boolean).map(splitRef);
-  const frames = [...new Set(refs.map((r) => r.frameId))];
-  if (frames.length > 1) throw err('REF_NOT_FOUND', `一次操作里混了不同框架的 ref（${frames.map((f) => 'f' + f).join('、')}）。分开调用。`);
-  const frameId = frames[0] ?? 0;
+  const frames = new Set(refs.map((r) => r.frameId ?? explicit ?? 0));
+  if (explicit !== null) frames.add(explicit);
+  if (frames.size > 1) throw err('REF_NOT_FOUND', `一次操作里混了不同框架的 ref / frameId（${[...frames].map((f) => 'f' + f).join('、')}）。分开调用。`);
+  const frameId = [...frames][0] ?? 0;
   const out = { ...p };
+  delete out.frameId;
   if (p.ref) out.ref = splitRef(p.ref).ref;
   if (p.submitRef) out.submitRef = splitRef(p.submitRef).ref;
   if (Array.isArray(p.fields)) out.fields = p.fields.map((f) => ({ ...f, ref: f.ref ? splitRef(f.ref).ref : f.ref }));
-  return { frameId, params: out };
+  return { frameId, params: out, hasRef: refs.length > 0 };
 }
 
 // 页面里的对话框会把整条链路挂死，而这是唯一一种「扩展完全够不着」的状态：
@@ -1223,40 +1398,76 @@ async function ensureNetHook() {
 }
 
 // 顶层框架的快照 + 各子框架的快照，拼成一份。子框架的 ref 打上 @fN。
+const FRAME_SNAP_MAX = 8;   // 广告位常有十几个 iframe，全抓会把快照撑爆
+const shortUrl = (u) => (String(u).length > 140 ? String(u).slice(0, 140) + '…' : String(u));
+
 async function snapshotAll(tabId, p = {}) {
-  const top = await toContent(tabId, { __hc: 'snapshot', ...p });
+  const only = await checkFrame(tabId, p);
+  if (only) return snapshotFrame(tabId, only);
+  const top = await toContent(tabId, { __hc: 'snapshot', ...p, frameId: undefined });
   const snaps = { 0: top.snapshotId };
 
-  const frames = (await listFrames(tabId)).filter((f) => f.frameId !== 0);
+  const all = (await listFrames(tabId)).filter((f) => f.frameId !== 0);
+  // 按露出面积挑：看得见的大框架优先，量不出几何的（getFrameId 拿不到）排在其后，
+  // 0×0 / display:none 的不拍——那些是隐藏的通信通道和预加载的对话框壳，
+  // 拍了只占名额。真弹出来的时候它有面积，下一次快照自然就进来了。
+  const rank = (f) => (f.area === null ? 0.5 : f.area);
+  const visible = all.filter((f) => f.area === null || f.area > 0).sort((a, b) => rank(b) - rank(a));
+  const picked = visible.slice(0, FRAME_SNAP_MAX);
+  const skipped = visible.slice(FRAME_SNAP_MAX);
+  const hidden = all.filter((f) => f.area === 0);
   const parts = [];
   // 并行拍。串行的时候每个框架都要付一次完整往返，而带广告的页面动辄七八个——
   // 一次快照就变成八次的时间，全花在等，没有一次是必须排在另一次后面的。
-  // Promise.all 保序，所以输出跟串行版一模一样。
   const subs = await Promise.all(
-    frames.slice(0, 8)   // 广告位常有十几个 iframe，全抓会把快照撑爆
-      .map((f) => toContent(tabId, { __hc: 'snapshot' }, f.frameId)
-        .then((sub) => ({ f, sub }))
-        .catch(() => ({ f, sub: null })))
+    picked.map((f) => toContent(tabId, { __hc: 'snapshot' }, f.frameId)
+      .then((sub) => ({ f, sub }))
+      .catch(() => ({ f, sub: null })))
   );
+  const empty = [];
   for (const { f, sub } of subs) {
     if (!sub) {
-      parts.push(`\n--- iframe f${f.frameId} · ${f.url} ---\n  （注入不了，多半是 sandbox 或已跳走）`);
+      parts.push(`\n--- iframe f${f.frameId} · ${f.size} · ${shortUrl(f.url)} ---\n  （注入不了，多半是 sandbox 或已跳走）`);
       continue;
     }
     snaps[f.frameId] = sub.snapshotId;
     // 只把 ref 编号加后缀，别的原样保留
     const body = String(sub.text || '').replace(/^\[(e\d+)\]/gm, `[$1@f${f.frameId}]`);
     const rows = (body.match(/^\[e\d+@f\d+\]/gm) || []).length;
-    if (rows) parts.push(`\n--- iframe f${f.frameId} · ${f.url} ---\n${body.split('\n--- 正文节选')[0].split('\n').slice(2).join('\n')}`);
+    if (rows) parts.push(`\n--- iframe f${f.frameId} · ${f.size} · ${shortUrl(f.url)} ---\n${body.split('\n--- 正文节选')[0].split('\n').slice(2).join('\n')}`);
+    else empty.push(`f${f.frameId}`);
   }
+  // 没展开的框架也要点名：不点名，agent 根本不知道还有一块界面没看见
+  const tail = [];
+  if (skipped.length) {
+    tail.push(`另有 ${skipped.length} 个 iframe 没展开（按面积只拍前 ${FRAME_SNAP_MAX} 个）：`
+      + skipped.map((f) => `f${f.frameId} ${f.size} ${shortUrl(f.url).slice(0, 80)}`).join('；'));
+  }
+  if (empty.length) tail.push(`没有可交互元素的 iframe：${empty.join('、')}`);
+  if (hidden.length) tail.push(`隐藏（0×0）的 iframe：${hidden.map((f) => `f${f.frameId}`).join('、')}`);
+  if (tail.length) parts.push(`\n--- 其它 iframe ---\n${tail.join('\n')}\n单独拍一个：snapshot({frameId:N})；selector/find/eval/query/read_text/upload 进框架同样带 frameId。`);
   await setFrameSnaps(tabId, snaps);
   return parts.length ? { ...top, text: top.text + '\n' + parts.join('\n') } : top;
 }
 
+// 只拍一个框架：完整输出（含正文节选），ref 带 @fN。和整页快照共用同一张
+// 框架快照表——只更新这一格，别把其它框架刚拍的 ref 作废掉。
+async function snapshotFrame(tabId, frameId) {
+  const f = (await listFrames(tabId)).find((x) => x.frameId === frameId);
+  if (!f) throw err('REF_NOT_FOUND', `这个标签页里没有框架 f${frameId}（可能已经重新加载，换了编号）。不带 frameId 重新 snapshot 看现在的编号。`);
+  const sub = await toContent(tabId, { __hc: 'snapshot' }, frameId);
+  const snaps = { ...((await getFrameSnaps(tabId)) || {}), [frameId]: sub.snapshotId };
+  await setFrameSnaps(tabId, snaps);
+  const body = String(sub.text || '').replace(/^\[(e\d+)\]/gm, `[$1@f${frameId}]`);
+  return { ...sub, text: `--- iframe f${frameId}（句柄 ${f.handle}）· ${f.size} · ${shortUrl(f.url)} ---\n${body}` };
+}
+
 // 拆框架号、还原 ref、换上那个框架自己的 snapshotId。
+// 只有 ref 需要快照：selector / find / 坐标在框架里照样能用，不该逼 agent 先拍一张
 async function prepare(tabId, p) {
-  const { frameId, params } = routeOf(p);
-  if (frameId !== 0) {
+  const { frameId, params, hasRef } = routeOf(p);
+  await checkFrame(tabId, p);
+  if (frameId !== 0 && hasRef) {
     const known = (await getFrameSnaps(tabId))?.[frameId];
     if (!known) throw err('STALE_SNAPSHOT', `没有框架 f${frameId} 的快照，重新 snapshot 一次`);
     params.snapshotId = known;   // agent 只认顶层那个 id，框架内部的 id 由这里补
@@ -1325,25 +1536,122 @@ async function rememberL2Origin(url, why) {
   return true;
 }
 
-async function execL2(id, cmd, params, loc) {
-  const label = params.ref || params.selector || '';
+// 框架内的定位结果 → 顶层视口坐标。逐层累加每个祖先 <iframe> 内容区的偏移
+// （各层自己的滚动已体现在各层的 getBoundingClientRect 里），再确认那一点
+// 落在框架真正露出来的区域内。
+// 站点（≈ 浏览器按它做进程隔离）：IP / localhost 原样，域名取最后两段
+const siteOf = (u) => {
+  try {
+    const h = new URL(u).hostname;
+    return /^[\d.]+$|^\[|^localhost$/.test(h) ? h : h.split('.').slice(-2).join('.');
+  } catch { return ''; }
+};
+
+async function topLocOf(id, frameId, loc) {
+  if (!frameId) return { loc, why: '' };
+  if (!loc || !Number.isFinite(loc.x)) return { loc: null, why: '目标没有坐标' };
+  const geo = await frameGeometry(id);
+  const bx = geo.boxOf(frameId);
+  if (!bx) return { loc: null, why: `量不出框架 f${frameId} 在页面上的位置` };
+  const x = loc.x + bx.x, y = loc.y + bx.y;
+  if (!(x >= bx.l && x < bx.r && y >= bx.t && y < bx.b)) return { loc: null, why: `目标在框架 f${frameId} 露出页面的区域之外` };
+  const out = { ...loc, x, y };
+  // 目标在跨站（进程外）框架里：记下离它最近的那道进程边界和边界内坐标，
+  // 点击直接发给那个框架的 target（见 cdp.clickInFrame）
+  for (let cur = frameId; cur; ) {
+    const par = geo.parentOf.get(cur)?.parent;
+    if (par === undefined) break;
+    if (siteOf(geo.frames.get(cur)?.url) !== siteOf(geo.frames.get(par)?.url)) {
+      const rb = geo.boxOf(cur);
+      if (rb) out.oopif = { frameId: cur, x: x - rb.x, y: y - rb.y };
+      break;
+    }
+    cur = par;
+  }
+  return { loc: out, why: '' };
+}
+
+// 真实点击：同进程的直接打顶层坐标；跨站框架里的发给那个框架自己的 target
+async function realClick(id, loc) {
+  if (loc?.oopif) {
+    try {
+      const { selector } = await toContent(id, { __hc: 'markDoc' }, loc.oopif.frameId);
+      return await cdp.clickInFrame(id, selector, loc.oopif.x, loc.oopif.y);
+    } catch (e) {
+      if (e.code !== 'OOPIF') throw e;   // 找不到子会话才退回顶层坐标
+    }
+  }
+  return cdp.click(id, loc.x, loc.y);
+}
+
+const SELECT_ALL = () => ({ mods: IS_MAC ? ['meta'] : ['ctrl'] });
+
+// 真实点进去之后、发 Ctrl+A / Delete 之前：焦点不在目标里就停。
+// 不停的话那几下真实按键会落在宿主页面上（全选 + 删除用户正在编辑的东西）。
+async function requireFocus(id, frameId, label) {
+  const fc = await toContent(id, { __hc: 'focusCheck' }, frameId).catch((e) => ({ ok: false, why: e.message }));
+  if (!fc?.ok) {
+    throw err('FOCUS_LOST', `点了 [${label}] 之后焦点没有进到目标里（${fc?.why || '未知'}），`
+      + '没有发送全选/删除/输入按键，页面没被改动。目标可能被遮挡或还没就绪：snapshot 看一眼再试。');
+  }
+}
+
+// 回执里怎么称呼目标：ref（框架里的补回 @fN）、selector，或 find 的 role "name"
+function targetLabel(params, frameId = 0) {
+  if (params.ref) return frameId ? `${params.ref}@f${frameId}` : params.ref;
+  if (params.selector) return params.selector;
+  if (params.find) return `${params.find.role || ''} "${params.find.name || params.find.selector || ''}"`.trim();
+  return '';
+}
+
+// 整段持一份调试器租约：点击、全选、粘贴之间夹着 content script 往返，
+// 不持的话空闲计时可能在半路把调试器摘掉
+const execL2 = (id, cmd, params, loc, frameId = 0) => cdp.lease(id, () => execL2Steps(id, cmd, params, loc, frameId));
+
+// loc 的坐标此时已是顶层视口坐标（框架里的目标在 performCore 里换算过）
+async function execL2Steps(id, cmd, params, loc, frameId = 0) {
+  const label = targetLabel(params, frameId);
+  // 后台标签页先推一帧：命中测试按最近一次合成的布局做
+  if (!(await chrome.tabs.get(id).catch(() => ({ active: true }))).active) await cdp.forceFrame(id, { timeout: 1500 }).catch(() => {});
   if (cmd === 'click') {
-    await cdp.click(id, loc.x, loc.y);
+    await realClick(id, loc);
     return `已点击 [${label}]（真实事件）`;
   }
   if (cmd === 'type') {
-    await cdp.click(id, loc.x, loc.y);          // 先真实点击聚焦，和人的顺序一致
+    await realClick(id, loc);                   // 先真实点击聚焦，和人的顺序一致
     await sleep(80);
-    if (params.clear !== false) {
-      await cdp.key(id, 'a', { mods: IS_MAC ? ['meta'] : ['ctrl'] });
-      await cdp.key(id, 'Delete');
+    const text = String(params.text ?? '');
+    const clear = params.clear !== false;
+    await requireFocus(id, frameId, label);
+    if (clear) await cdp.key(id, 'a', SELECT_ALL());
+    // 代码编辑器（Monaco / CodeMirror …）不能逐字输入：insertText 在 Monaco 里
+    // 被当成键盘输入，每个字符都过一遍自动补括号、自动缩进——一段 JSON 打进去，
+    // 括号被补成双份、每一行的缩进叠两层。粘贴走的是另一条路：编辑器原样插入。
+    // 粘贴事件是合成的（不碰用户的系统剪贴板），选区是上面那下真实 Ctrl+A 选的。
+    // 编辑器没接住（没人 preventDefault）才退回逐字输入。
+    let pasted = false;
+    if (text && (params.paste || loc?.editor)) {
+      const r = await toContent(id, { __hc: 'pasteText', text }, frameId).catch(() => null);
+      pasted = !!r?.handled;
     }
-    if (params.text) await cdp.insertText(id, String(params.text));
+    if (!pasted) {
+      if (clear) await cdp.key(id, 'Delete');
+      if (text) await cdp.insertText(id, text);
+    }
     if (params.submit) await cdp.key(id, 'Enter');
-    return `已在 [${label}] 输入${params.submit ? '并回车' : ''}（真实事件）`;
+    return `已在 [${label}] ${pasted ? `粘贴 ${text.length} 字符${loc?.editor ? `（${loc.editor} 编辑器，${clear ? '先全选替换' : '插在光标处'}）` : ''}` : '输入'}${params.submit ? '并回车' : ''}（真实事件）`;
   }
   if (cmd === 'key') {
-    if (loc) { await cdp.click(id, loc.x, loc.y); await sleep(80); }
+    if (loc && Number.isFinite(loc.x)) {
+      await realClick(id, loc);
+      await sleep(80);
+      await requireFocus(id, frameId, label);
+    } else if (frameId) {
+      // 没有目标、指定了框架：真实按键发给「当前有焦点的那个框架」，
+      // 所以先确认焦点确实在这个框架里，不然会按到宿主页面上
+      const fc = await toContent(id, { __hc: 'focusCheck', any: true }, frameId).catch((e) => ({ ok: false, why: e.message }));
+      if (!fc?.ok) throw err('FOCUS_LOST', `框架 f${frameId} 现在没有焦点（${fc?.why || '未知'}），没有发送按键。先 click 一下框架里的目标。`);
+    }
     const specs = Array.isArray(params.key) ? params.key : [params.key];
     for (const s of specs) await cdp.key(id, s, { mods: params.mods || [], repeat: params.repeat || 1 });
     return `${specs.join(' → ')}（真实事件）`;
@@ -1747,17 +2055,22 @@ async function performCore(id, cmd, p, { blockSensitive = false } = {}, ctx) {
     const after = (await chrome.tabs.get(id)).url;
     return { note, l2note: '', ev, navigated: before !== after, upgraded: false };
   }
-  const loc = await toContent(id,
-    // fields 要带过去：fill 没有单一目标，它的效果证据靠逐个字段的状态，
-    // 不然填表这条最高频的路上永远报「页面没有反应」。
-    // forCmd 给虚拟光标定动画（点击是涟漪、输入是脉动），不参与定位本身
-    hasTarget ? { __hc: 'locate', forCmd: cmd, ...params } : { __hc: 'locate', baselineOnly: true, fields: params.fields },
-    frameId);
+  // fields 要带过去：fill 没有单一目标，它的效果证据靠逐个字段的状态，
+  // 不然填表这条最高频的路上永远报「页面没有反应」。
+  // forCmd 给虚拟光标定动画（点击是涟漪、输入是脉动），不参与定位本身
+  const locMsg = hasTarget ? { __hc: 'locate', forCmd: cmd, ...params } : { __hc: 'locate', baselineOnly: true, fields: params.fields };
+  let loc;
+  try {
+    loc = await toContent(id, locMsg, frameId);
+  } catch (e) {
+    // find 在后台标签页上找不到东西，常常只是页面还没渲染（框架等 rAF 才挂 DOM）。
+    // 推一帧、等安静，再找一次——和 snapshot 的稀疏重拍是同一个道理
+    if (!(e.code === 'REF_NOT_FOUND' && params.find) || (await chrome.tabs.get(id)).active || !(await cdp.isEnabled())) throw e;
+    await cdp.forceFrame(id, { timeout: 2000 }).catch(() => {});
+    await domQuiet(id, { quiet: 300, cap: 1500, deadline: Date.now() + 2500 }).catch(() => {});
+    loc = await toContent(id, locMsg, frameId);
+  }
 
-  // iframe 内元素的坐标是相对该框架视口的，而 CDP 打的是顶层视口坐标；
-  // 换算要知道 iframe 元素在顶层的位置，跨源时子框架自己也不知道。
-  // 所以 v0.3 的 L2 只覆盖顶层框架——iframe 里主要是支付、验证码、OAuth，
-  // 而验证码本来就该交给 ask 让用户来。
   // 批处理不代做敏感动作。一串动作里夹一个「提交订单」，一口气跑完的话
   // 中间没有任何人看得见——而 prompt injection 恰恰会这么用。
   // 停在这一步，让 agent 单独去调 click：那样它会看到完整的效果证据，
@@ -1776,7 +2089,16 @@ async function performCore(id, cmd, p, { blockSensitive = false } = {}, ctx) {
     }
   }
 
-  const l2ok = frameId === 0 && L2_CMDS.has(cmd) && hasTarget && !loc?.outside;
+  // iframe 里的目标：坐标是相对那个框架视口的，CDP 打的是顶层视口。
+  // 用框架几何（frameGeometry）把它平移到顶层，并确认那一点确实露在外面——
+  // 落在框架被裁掉的部分，真实点击会点中盖在上面的别的东西。
+  let l2loc = loc;
+  let frameWhy = '';
+  if (frameId !== 0 && loc && L2_CMDS.has(cmd) && hasTarget && !loc.outside) {
+    ({ loc: l2loc, why: frameWhy } = await topLocOf(id, frameId, loc));
+  }
+  // 没有目标的 key 只在显式 real:true 时走真实事件（发给当前焦点）
+  const l2ok = L2_CMDS.has(cmd) && ((hasTarget && !loc?.outside && !!l2loc) || (cmd === 'key' && !hasTarget && !!params.real));
   // 风控站点从 L2 起步。这里不能等「零证据」再升级——在这类站上 L1 恰恰是有效果的，
   // 那条升级路永远不会触发，而每一次 isTrusted:false 都在给验证码攒分。
   const riskyOrigin = l2ok && await prefersL2(before);
@@ -1790,9 +2112,10 @@ async function performCore(id, cmd, p, { blockSensitive = false } = {}, ctx) {
   };
 
   let note = '', usedL2 = layer === 'L2', l2note = '';
+  if (frameWhy && params.real) l2note = `（没能用真实事件：${frameWhy}，用的是普通事件）`;
   const wmark = await armWrites(id);
   try {
-    note = usedL2 ? await execL2(id, cmd, params, loc) : await runL1();
+    note = usedL2 ? await execL2(id, cmd, params, l2loc, frameId) : await runL1();
   } catch (e) {
     // L2 不可用不该让整条链路失败——降级回 L1，把原因带在返回里说清楚
     if (usedL2 && (e.code === 'NEEDS_L2' || e.code === 'L2_BUSY')) {
@@ -1814,7 +2137,7 @@ async function performCore(id, cmd, p, { blockSensitive = false } = {}, ctx) {
              + '重试可能造成重复执行。确认需要请显式传 real:true）';
     } else {
       try {
-        note = await execL2(id, cmd, params, loc);
+        note = await execL2(id, cmd, params, l2loc, frameId);
         usedL2 = true;
         upgraded = true;
         ev = await settle(id, frameId, params, loc?.baseline, before);
@@ -1983,7 +2306,7 @@ const HANDLERS = {
     // 省掉 agent「以为没登录 / 以为加载失败」之后的那几轮试探
     if (sparse(snap.text) && !(await chrome.tabs.get(id).catch(() => ({ active: true }))).active && await cdp.isEnabled()) {
       try {
-        await cdp.forceFrame(id);
+        await cdp.forceFrame(id, { timeout: 2500 });
         await domQuiet(id, { quiet: 300, cap: 1500, deadline: Date.now() + 2500 });
         const again = await guardCreds(id, await snapshotAll(id, p));
         if (!sparse(again.text)) snap = { ...again, text: '（这一页在后台没渲染完，已自动推了一帧再拍）\n' + again.text };
@@ -2061,7 +2384,7 @@ const HANDLERS = {
       }
       try {
         if (cmd === 'wait') {
-          const r = await toContent(id, { __hc: 'wait', ...rest });
+          const r = await toContent(id, { __hc: 'wait', ...rest, frameId: undefined }, (await checkFrame(id, rest)) ?? 0);
           out.push(`✅ ${label}　${r?.text || ''}`);
           return;
         }
@@ -2072,14 +2395,14 @@ const HANDLERS = {
           return;
         }
         if (cmd === 'scroll') {
-          const r = await toContent(id, { __hc: 'scroll', ...rest });
+          const r = await toContent(id, { __hc: 'scroll', ...rest, frameId: undefined }, (await checkFrame(id, rest)) ?? 0);
           out.push(`✅ ${label}　${(r?.text || '').split('\n')[0]}`);
           return;
         }
         // 观察步：批处理以前只能「做」不能「看」，中途想读一眼就得回模型一趟，
         // 而那正是 act 要省掉的东西。读到的内容原样进回执。
         if (cmd === 'read') {
-          const r = await toContent(id, { __hc: 'read', ...rest });
+          const r = (await toFrame(id, 'read', rest)).data;
           out.push(`📖 ${label}\n     ${String(r?.text || '').split('\n').join('\n     ')}`);
           return;
         }
@@ -2217,19 +2540,19 @@ const HANDLERS = {
   async read_text(p, tabId, ctx) {
     const id = await resolveTab(tabId);
     const drift = await driftNote(id, ctx?.sid);
-    const r = await guardCreds(id, await toContent(id, { __hc: 'read_text', ...p }));
+    const r = await guardCreds(id, await toContent(id, { __hc: 'read_text', ...p, frameId: undefined }, (await checkFrame(id, p)) ?? 0));
     return drift ? { ...r, text: drift + '\n' + r.text } : r;
   },
 
   async wait(p, tabId) {
     const id = await resolveTab(tabId);
-    return toContent(id, { __hc: 'wait', ...p });
+    return toContent(id, { __hc: 'wait', ...p, frameId: undefined }, (await checkFrame(id, p)) ?? 0);
   },
 
   async query(p, tabId, ctx) {
     const id = await resolveTab(tabId);
     const drift = await driftNote(id, ctx?.sid);
-    const r = await guardCreds(id, await toContent(id, { __hc: 'query', ...p }));
+    const r = await guardCreds(id, await toContent(id, { __hc: 'query', ...p, frameId: undefined }, (await checkFrame(id, p)) ?? 0));
     return drift ? { ...r, text: drift + '\n' + r.text } : r;
   },
 
@@ -2262,47 +2585,89 @@ const HANDLERS = {
     });
   },
 
-  async upload(p, tabId) {
+  // 上传：三条路，按调用方给的东西选，不猜。
+  //   trigger      —— 入口是个按钮，点了才临时造 input 并弹系统文件对话框（Fabric Import）。
+  //                   打开文件选择拦截后真实点击它，对话框不弹，文件直接给到那个 input。
+  //   file input   —— inputSelector/selector 指定，或在（指定的 / 自动找到的）框架里按 accept 挑一个。
+  //                   隐藏的 input 也行。有本机路径先走 CDP（浏览器自己读盘），
+  //                   调试器看不到（跨站 iframe）再退回框架内的 DataTransfer。
+  //   dropSelector —— 只收拖放的编辑器；页面不接管 dragover 就报失败，不报成功。
+  async upload(p, tabId, ctx) {
     const id = await resolveTab(tabId);
+    const kb = Math.round((p.bytes || 0) / 1024);
+    const size = kb >= 1024 ? (kb / 1024).toFixed(1) + 'MB' : kb + 'KB';
+    const q = { ...p, selector: p.inputSelector || p.selector };
+    delete q.inputSelector;
 
-    // 有本机路径就先走 CDP：DOM.setFileInputFiles 传的是路径，浏览器自己读盘。
-    // 桥只搬得动几十 MB —— 一支 300MB 的视频编成 base64 是 400MB 字符串，
-    // 桥会当场断开，而断开后当前这个 agent 会话是连不回来的（2026-09-08 实测）。
-    // 拖放那条路必须有文件字节，不在此列。
-    //
-    // `!p.base64` 这个额外条件是 2026-09-09 补的：没有它，MCP 侧的重试（CDP
-    // 失败后带着 base64 再调一次 upload）会在这儿把 CDP 那套流程完整地
-    // 重跑一遍——doUploadTarget 再打一次标记、setFileInput 再拿着同一个理由
-    // 再失败一次，纯属重复劳动。更糟的是 Tripo3D Studio 上实测复现过一次
-    // content.js 那侧 atob(p.base64) 报「不是合法编码」，而这个 base64 是
-    // Node 侧 fs.readFileSync().toString('base64') 刚生成的，理论上不该畸形——
-    // 加这个 guard 之后重试请求会直接跳过 CDP、走最简单的那条路径，
-    // 这一类因为「同一个 tab 短时间内被两套逻辑各摸一遍」触发的诡异态就没有
-    // 复现的机会了。content.js 里也补了诊断信息，万一以后还能在别处摸到，
-    // 报错会直接说清楚 base64 长什么样，不用再像这次一样从头盲猜。
-    if (p.path && !p.dropSelector && !p.base64) {
-      try {
-        const t = (await toFrame(id, 'uploadTarget', p)).data;
-        if (t?.selector) {
-          await cdp.setFileInput(id, t.selector, [p.path]);
-          const kb = Math.round((p.bytes || 0) / 1024);
-          return { text: `已投入 ${p.name}（${kb >= 1024 ? (kb / 1024).toFixed(1) + 'MB' : kb + 'KB'}）到 ${t.accept ? 'accept="' + t.accept + '"' : ''} input` };
-        }
-      } catch (e) {
-        // CDP 不可用（调试器被占、页面是 chrome:// 之类）不算失败，回落到 base64
-        if (!p.base64) return { needBytes: true, reason: String(e?.message || e) };
-      }
-      if (!p.base64) return { needBytes: true, reason: '页面上没有 file input，要走拖放' };
+    if (q.trigger) {
+      if (!q.path) throw err('BAD_PARAMS', 'trigger 需要 path（本机文件的绝对路径）');
+      const trig = { ...(typeof q.trigger === 'string' ? { selector: q.trigger } : q.trigger) };
+      if (trig.frameId === undefined && q.frameId !== undefined) trig.frameId = q.frameId;
+      let clicked = null;
+      const got = await cdp.chooseFiles(id, async () => {
+        // 文件对话框要用户手势才开得出来，合成点击开不了——必须真实事件
+        clicked = await performCore(id, 'click', { ...trig, real: true }, {}, ctx);
+      }, [q.path]);
+      await sleep(800);
+      // 应用的拒绝提示可能出在 trigger 所在框架，也可能在顶层（toast）——两处都看
+      const tf = routeOf(trig).frameId;
+      const errs = [];
+      for (const f of new Set([tf, 0])) errs.push(...((await toContent(id, { __hc: 'editorDiagnostics' }, f).catch(() => null))?.errors || []));
+      const after = { errors: [...new Set(errs)] };
+      return {
+        text: `已通过 trigger 打开的文件选择投入 ${q.name}（${size}），没有弹出系统对话框。${clicked?.note ? `\n${clicked.note}` : ''}`
+          + (after?.errors?.length ? `\n⚠️ 页面上可见的错误提示：${after.errors.join(' | ')}` : '\n页面上没有可见的错误提示（是否被应用接受，看下一份快照确认）。'),
+        mode: got.mode,
+      };
     }
-    return (await toFrame(id, 'upload', p)).data;
+
+    // 定框架：显式 frameId / ref 后缀；都没有就去所有框架里找能匹配的 file input
+    let fid = routeOf(q).frameId;
+    const explicit = frameOf(q) !== null || [q.ref].some((r) => /@f\d+$/.test(String(r || '')));
+    if (explicit) fid = (await checkFrame(id, q)) ?? fid;
+    else if (!q.dropSelector) {
+      const found = await fileInputFrames(id, q.selector);
+      if (found.length === 1) fid = found[0].frameId;
+      else if (found.length > 1 && !found.some((f) => f.frameId === 0)) {
+        throw err('AMBIGUOUS', `好几个框架里都有${q.selector ? `匹配 ${q.selector} 的元素` : ' <input type=file>'}：`
+          + found.map((f) => `f${f.frameId}（${f.count} 个，${shortUrl(f.url).slice(0, 80)}）`).join('；') + '。传 frameId 指定。');
+      } else if (!found.length) {
+        throw err('NO_FILE_INPUT', `所有框架里都没有${q.selector ? `匹配 ${q.selector} 的元素` : ' <input type=file>'}。`
+          + '入口要点一下才弹文件选择的，传 trigger（那个按钮的 ref/selector/find，必要时带 frameId）；只收拖放的，传 dropSelector。');
+      }
+    }
+    const routed = { ...q, frameId: fid };
+
+    if (q.path && !q.dropSelector && !q.base64) {
+      const t = (await toFrame(id, 'uploadTarget', routed)).data;
+      if (t?.none) throw err('NO_FILE_INPUT', `框架 f${fid} 里没有 <input type=file>。入口要点一下才出现的，传 trigger。`);
+      const before = await toContent(id, { __hc: 'fileState', selector: t.selector }, fid).catch(() => null);
+      try {
+        await cdp.setFileInput(id, t.selector, [q.path]);
+      } catch (e) {
+        // 调试器用不上（被占、跨站 iframe、高保真关了）不算失败：退回框架内的 DataTransfer，要字节
+        if (['NEEDS_L2', 'L2_BUSY', 'OOPIF', 'L2_DETACHED'].includes(e.code)) return { needBytes: true, reason: String(e.message || e) };
+        throw e;
+      }
+      await sleep(600);
+      const st = await toContent(id, { __hc: 'fileState', selector: t.selector }, fid).catch(() => null);
+      const fresh = (st?.errors || []).filter((x) => !(before?.errors || []).includes(x));
+      return {
+        text: `已投入 ${q.name}（${size}）到${fid ? `框架 f${fid} 的` : ''}${t.hidden ? '隐藏的' : ''} ${t.accept ? 'accept="' + t.accept + '" ' : ''}input`
+          + (st?.files ? `；input 里现在是 ${st.files.join('、') || '（空——页面读完就清掉了，常见）'}` : '；input 已被页面移除（常见：读完文件就换掉）')
+          + (fresh.length ? `\n⚠️ 投入后出现的错误提示：${fresh.join(' | ')}` : '\n投入后没有新的错误提示。'),
+      };
+    }
+    return (await toFrame(id, 'upload', routed)).data;
   },
 
   // 滚完顺手拍一份：视口一动，快照收的元素集合就变了，agent 下一步几乎必然
   // 要重拍——省它一个回合
   async scroll(p, tabId) {
     const id = await resolveTab(tabId);
-    const r = await toContent(id, { __hc: 'scroll', ...p });
-    const snap = await snapshotAll(id).catch(() => null);
+    const fid = (await checkFrame(id, p)) ?? 0;
+    const r = await toContent(id, { __hc: 'scroll', ...p, frameId: undefined }, fid);
+    const snap = await snapshotAll(id, fid ? { frameId: fid } : {}).catch(() => null);
     return snap ? { ...snap, text: `${r?.text || ''}\n\n${snap.text}` } : r;
   },
 
@@ -2310,6 +2675,127 @@ const HANDLERS = {
   async read(p, tabId) {
     const id = await resolveTab(tabId);
     return (await toFrame(id, 'read', p)).data;
+  },
+
+  // 代码编辑器（Monaco / CodeMirror）的整份内容：读，或整份替换后读回核对。
+  //
+  // 为什么不是 type：type 回执说的是「输入了」，而编辑器的内容在 JS 模型里，
+  // DOM 上只有看得见的几十行，textarea 的 value 只是一小截——「输入了」证明不了
+  // 模型里现在是什么。这里替换完立刻用编辑器自己的复制处理把整份内容读回来，
+  // 和要写的内容逐字比对（换行统一成 \n），回报长度、sha256、是否一致、
+  // 编辑器标出的错误/警告数，以及页面上可见的错误提示。
+  async editor(p, tabId) {
+    const id = await resolveTab(tabId);
+    const action = p.action || (typeof p.text === 'string' ? 'replace' : 'read');
+    if (!['read', 'replace'].includes(action)) throw err('BAD_PARAMS', `editor 的 action 只有 read / replace，收到 ${action}`);
+    if (action === 'replace' && typeof p.text !== 'string') throw err('BAD_PARAMS', 'replace 需要 text（完整的新内容）');
+    if (!(p.ref || p.selector || p.find)) throw err('BAD_PARAMS', 'editor 需要 ref / selector / find 指到编辑器（Monaco 的话 selector:".monaco-editor textarea" 即可，必要时带 frameId）');
+    const { frameId, params } = await prepare(id, p);
+    const label = params.ref || params.selector || (params.find ? `${params.find.role || ''} "${params.find.name || ''}"` : '');
+
+    const loc = await toContent(id, { __hc: 'locate', forCmd: 'type', ...params }, frameId);
+    if (!loc?.editor) {
+      throw err('NOT_EDITOR', `[${label}] 不在代码编辑器（Monaco / CodeMirror / ProseMirror …）里，是 <${String(loc?.tag || '?').toLowerCase()}>。普通输入框用 type，读值用 read。`);
+    }
+    if (loc.outside) throw err('NOT_INTERACTABLE', `编辑器 [${label}] 不在视口里，滚不过去`);
+    const { loc: top, why } = await topLocOf(id, frameId, loc);
+    if (!top) throw err('NOT_INTERACTABLE', `没法对编辑器发真实事件：${why}`);
+
+    const norm = (s) => String(s).replace(/\r\n?/g, '\n');
+    const digest = async (s) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)))]
+      .map((b) => b.toString(16).padStart(2, '0')).join('');
+
+    return cdp.lease(id, async () => {
+      if (!(await chrome.tabs.get(id).catch(() => ({ active: true }))).active) await cdp.forceFrame(id, { timeout: 1500 }).catch(() => {});
+      await realClick(id, top);
+      await sleep(80);
+      await requireFocus(id, frameId, label);
+      if (action === 'replace') {
+        await cdp.key(id, 'a', SELECT_ALL());
+        const r = await toContent(id, { __hc: 'pasteText', text: p.text }, frameId);
+        if (!r?.handled) {
+          throw err('EDITOR_REJECTED', `${loc.editor} 编辑器没有接收粘贴（${r?.why || '没有处理 paste 事件'}）。内容可能已被全选但未改动；没有退回逐字输入，以免自动补全把内容打乱。`);
+        }
+        await sleep(200);
+      }
+      await cdp.key(id, 'a', SELECT_ALL());
+      const c = await toContent(id, { __hc: 'copyText' }, frameId);
+      // 收起选区，别把「全选」状态留给用户或下一步（Ctrl+End 只移动光标，不改内容）
+      await cdp.key(id, 'End', SELECT_ALL()).catch(() => {});
+      if (!c?.handled || typeof c.text !== 'string') {
+        throw err('EDITOR_UNREADABLE', `${loc.editor} 编辑器没有交出内容（复制事件没被处理：${c?.why || '未知'}）。`
+          + (action === 'replace' ? '替换已经做了，但没法核对结果——不要当成成功。' : ''));
+      }
+      await sleep(action === 'replace' ? 700 : 0);   // 给语法检查一点时间（Monaco 的 JSON worker 有去抖）
+      const diag = await toContent(id, { __hc: 'editorDiagnostics' }, frameId).catch(() => null);
+      // 页面自己挂着 monaco 全局时（Fabric / ADF 就是），直接问模型要标记——
+      // DOM 上的波浪线只画在看得见的行上，还常常晚一拍，数不准
+      let markers = null;
+      try {
+        [{ result: markers } = {}] = await chrome.scripting.executeScript({
+          target: frameId ? { tabId: id, frameIds: [frameId] } : { tabId: id },
+          world: 'MAIN',
+          func: () => {
+            const m = window.monaco;
+            const ed = m?.editor?.getEditors?.().find((e) => e.hasTextFocus());
+            if (!ed?.getModel()) return null;
+            const list = m.editor.getModelMarkers({ resource: ed.getModel().uri });
+            return {
+              lang: ed.getModel().getLanguageId(),
+              errors: list.filter((x) => x.severity >= 8).length,
+              warnings: list.filter((x) => x.severity === 4).length,
+              first: list.slice(0, 5).map((x) => `第${x.startLineNumber}行第${x.startColumn}列 ${String(x.message).slice(0, 160)}`),
+            };
+          },
+        });
+      } catch { /* 页面世界进不去就只看 DOM 标记 */ }
+      const got = norm(c.text);
+      const sha = await digest(got);
+      const lines = got ? got.split('\n').length : 0;
+      const head = [`${loc.editor} 编辑器${frameId ? `（框架 f${frameId}）` : ''}：${got.length} 字符 · ${lines} 行 · sha256 ${sha}`];
+      if (action === 'replace') {
+        const want = norm(p.text);
+        if (got === want) head.push('✅ 读回内容与提交内容逐字一致（换行已统一为 \\n）。');
+        else {
+          let i = 0;
+          while (i < got.length && i < want.length && got[i] === want[i]) i++;
+          head.push(`❌ 读回内容与提交内容不一致：第 ${i} 个字符起不同（提交 ${want.length} 字符，读回 ${got.length}）。`
+            + `提交处：${JSON.stringify(want.slice(i, i + 40))}；读回处：${JSON.stringify(got.slice(i, i + 40))}。`
+            + '编辑器可能在粘贴后自动格式化了，或没有整份替换。');
+        }
+      }
+      if (markers) {
+        head.push(`编辑器标记（${markers.lang} 模型）：${markers.errors} 个错误、${markers.warnings} 个警告`
+          + (markers.first.length ? `——${markers.first.join('；')}` : ''));
+      } else if (diag?.diag) head.push(`编辑器标记（按页面上画出的波浪线数）：${diag.diag.errors} 个错误、${diag.diag.warnings} 个警告`);
+      // JSON 内容自己再验一遍：确定性的，不依赖编辑器有没有开语法检查
+      if (markers?.lang === 'json' || /^\s*[{[]/.test(got)) {
+        try { JSON.parse(got); head.push('JSON 语法：有效'); } catch (e) { head.push(`JSON 语法：无效——${e.message}`); }
+      }
+      if (diag?.errors?.length) head.push(`页面上可见的错误提示：${diag.errors.join(' | ')}`);
+      const max = Number(p.maxLength) || 200000;
+      const body = action === 'read' || p.echo
+        ? `\n\n${got.length > max ? got.slice(0, max) + '\n…（已截断）' : got}` : '';
+      return {
+        untrusted: action === 'read' || !!p.echo,
+        text: head.join('\n') + body,
+        length: got.length, sha256: sha, match: action === 'replace' ? got === norm(p.text) : undefined,
+      };
+    });
+  },
+
+  // 框架清单：每个框架的编号、句柄（带文档代次）、父框架、露出尺寸、状态、地址。
+  // 状态 visible / hidden / unknown / inaccessible 把「找到了但看不见」
+  // 「进不去」「量不出位置」分开，不再一律当成不存在。
+  async frames(p, tabId) {
+    const id = await resolveTab(tabId);
+    const list = await listFrames(id, { all: true });
+    const rows = list.map((f) => `f${f.frameId}  句柄 ${f.handle}  ${f.frameId === 0 ? '顶层' : `父 f${f.parent ?? '?'}`}  ${f.size}  ${f.status}  ${shortUrl(f.url || '(未知地址)')}`);
+    return {
+      text: `${list.length} 个框架（句柄 = frameId:文档代次，带句柄调用时框架换了文档会被拒绝）：\n${rows.join('\n')}\n`
+        + '用法：snapshot({frameId}) 单拍一个框架；selector/find/eval/query/read_text/upload/editor 带 frameId 在框架里执行。',
+      frames: list.map(({ frameId, handle, parent, size, status, url, title }) => ({ frameId, handle, parent, size, status, url, title })),
+    };
   },
 
   // 看这个页面调了哪些接口、返回了什么。抓数据的首选入口。
@@ -2436,6 +2922,8 @@ const HANDLERS = {
   // 但那是真实且可解释的边界，不再是「哪儿都不能用」。
   async eval(p, tabId) {
     const id = await resolveTab(tabId);
+    // frameId：在那个 iframe 自己的页面世界里求值（Fabric 的编辑器、表单都在框架里）
+    const fid = (await checkFrame(id, p)) ?? 0;
 
     // eval 不走 performCore，也就绕开了那里的支付闸门——实测一句
     // `document.getElementById('pay').click()` 就能把确认整个跳过去。
@@ -2443,8 +2931,8 @@ const HANDLERS = {
     // 注入失败（chrome:// 之类）不该拖垮 eval 本身：那些页面上也没有支付按钮。
     let guarded = false;
     try {
-      await ensureContent(id);
-      await toContent(id, { __hc: 'payGuard', on: true });
+      await ensureContent(id, fid);
+      await toContent(id, { __hc: 'payGuard', on: true }, fid);
       guarded = true;
     } catch { /* 没有 content script 就没有这道防线，eval 照常跑 */ }
 
@@ -2454,7 +2942,7 @@ const HANDLERS = {
     let result;
     try {
       ([{ result } = {}] = await chrome.scripting.executeScript({
-        target: { tabId: id },
+        target: fid ? { tabId: id, frameIds: [fid] } : { tabId: id },
         world: 'MAIN',
         // 三档解析，只在「语法不对」时才换下一档，所以有副作用的代码不会被跑两遍：
         //   ① 当表达式（对象字面量 {a:1} 要靠这层括号）
@@ -2486,7 +2974,7 @@ const HANDLERS = {
       }));
     } finally {
       if (guarded) {
-        const r = await toContent(id, { __hc: 'payGuard', on: false }).catch(() => null);
+        const r = await toContent(id, { __hc: 'payGuard', on: false }, fid).catch(() => null);
         const hit = r?.blocked;
         if (hit) {
           throw err('PAY_DECLINED',
@@ -2504,7 +2992,11 @@ const HANDLERS = {
       // 走页面世界就够，没必要为它们挂一下黄条。
       if (csp) {
         try {
-          return { untrusted: true, text: await cdp.evaluate(id, src, { maxLength: p.maxLength || 20000 }) };
+          if (!fid) return { untrusted: true, text: await cdp.evaluate(id, src, { maxLength: p.maxLength || 20000 }) };
+          // 框架里：让那个框架的 content script 给自己的 <html> 打一次性标记，
+          // 调试器按标记找到节点，在节点所在的框架上下文里求值
+          const { selector } = await toContent(id, { __hc: 'markDoc' }, fid);
+          return { untrusted: true, text: await cdp.evaluateAt(id, selector, src, { maxLength: p.maxLength || 20000 }) };
         } catch (e) {
           throw err(e.code === 'NEEDS_L2' || e.code === 'L2_BUSY' ? e.code : 'INTERNAL',
             e.code === 'NEEDS_L2'
@@ -2567,10 +3059,25 @@ const HANDLERS = {
       // 用固定等待兜住（tab 不在前台的分支上面已经 sleep(250)，这里覆盖的是
       // 「本来就在前台」那条最短路径）。
       if (veiled) await sleep(60);
-      // 这条老路缩不了尺寸，至少换成 JPEG 省一截
-      return p.full
-        ? { dataUrl: await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' }), scale: 1 }
-        : { dataUrl: await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 80 }), scale: 1 };
+      // 这条老路缩不了尺寸，至少换成 JPEG 省一截。位图是设备像素，
+      // 换算比例照样从字节里量、和 CSS 视口一起交回去
+      const dataUrl = p.full
+        ? await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' })
+        : await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 80 });
+      let vp = null;
+      try {
+        [{ result: vp }] = await chrome.scripting.executeScript({
+          target: { tabId: id },
+          func: () => ({ width: innerWidth, height: innerHeight, dpr: devicePixelRatio, x: Math.round(scrollX), y: Math.round(scrollY) }),
+        });
+      } catch { /* 受限页面量不到 */ }
+      const img = imageSize(dataUrl.split(',')[1]);
+      return {
+        dataUrl,
+        scale: img && vp ? Math.round((img.width / vp.width) * 1000) / 1000 : 1,
+        ...(vp ? { viewport: { width: vp.width, height: vp.height }, dpr: vp.dpr, scroll: { x: vp.x, y: vp.y } } : {}),
+        ...(img ? { image: img } : {}),
+      };
     } finally {
       if (veiled) void veilMarks(id, false);
     }

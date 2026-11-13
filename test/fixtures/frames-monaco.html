@@ -1,0 +1,29 @@
+<!doctype html><meta charset="utf-8"><title>frames monaco</title>
+<style>body{font:13px system-ui;margin:0;padding:6px} #editor{width:820px;height:380px;border:1px solid #ccc}</style>
+<div><button id="import">Import</button> <span id="status">no file</span></div>
+<div id="editor"></div>
+<script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs/loader.js"></script>
+<script>
+  // Import works like many app ribbons: the input exists only after the click, and is clicked at once.
+  document.getElementById('import').onclick = () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json,application/json';
+    input.onchange = async () => {
+      const f = input.files[0];
+      const text = await f.text();
+      try { JSON.parse(text); document.getElementById('status').textContent = `accepted ${f.name}`; window.imported = text; }
+      catch (e) { document.getElementById('status').innerHTML = `<span role="alert">rejected ${f.name}: invalid JSON</span>`; }
+    };
+    input.click();
+  };
+  window.MonacoEnvironment = { getWorkerUrl: () => 'data:text/javascript;charset=utf-8,' + encodeURIComponent(
+    "self.MonacoEnvironment={baseUrl:'https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/'};importScripts('https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs/base/worker/workerMain.js');") };
+  require.config({ paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs' } });
+  require(['vs/editor/editor.main'], () => {
+    window.editor = monaco.editor.create(document.getElementById('editor'), {
+      value: '{\n    "objects": [\n        { "table": "A" }\n    ]\n}', language: 'json', automaticLayout: true,
+    });
+    window.editorReady = true;
+  });
+</script>

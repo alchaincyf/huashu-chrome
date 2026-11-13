@@ -25,6 +25,8 @@
 // ip33 魔方页实测：连续截图的高度在 1610 / 1722 之间来回跳，根因就是它跟着
 // L2 的通断反复出现。screenshot() 里为此钉了一层视口覆盖（见该函数注释）。
 
+import { imageSize } from './image-size.js';
+
 const L2_IDLE_MS = 5000;
 const PROTOCOL = '1.3';
 
@@ -35,6 +37,11 @@ const sessions = new Map();
 // sendMessage 永远不返回，整条链路卡死到超时。attach 状态下 CDP 仍然活着，
 // 所以顺手把它接住——这是 L2 的附带收益里最实用的一条。
 const dialogs = new Map();   // tabId -> { type, message, at }
+// 文件选择拦截期间收到的 Page.fileChooserOpened（见 chooseFiles）
+const choosers = new Map();  // tabId -> [{ backendNodeId, frameId, mode, sessionId }]
+// 进程外 iframe（跨站）的子会话。attach 标签页只拿到主框架那棵 DOM 和那一个
+// Page 域；跨站框架的 DOM、文件选择事件都在它自己的 target 上，要 auto-attach 才够得着。
+const children = new Map();  // tabId -> Map(sessionId -> targetInfo)
 
 export class L2Unavailable extends Error {
   constructor(reason, code = 'NEEDS_L2') {
@@ -93,7 +100,7 @@ async function ensureAttached(tabId) {
     throw new L2Unavailable(`attach 失败：${m}`, 'L2_BUSY');
   }
 
-  sessions.set(tabId, { ready: true, timer: null, metrics: null });
+  sessions.set(tabId, { ready: true, timer: null, leases: 0 });
 
   // 这一行是整个 L2 能不能在后台标签页工作的开关，2026-08-26 实测确认：
   //
@@ -115,11 +122,15 @@ async function ensureAttached(tabId) {
   touch(tabId);
 }
 
+// 空闲计时只在没有人持有租约时走。以前计时器在 attach 时就开始倒数、命令执行
+// 期间也不停——一条跑过 5 秒的命令（长 Monaco 粘贴、慢页面上的文件选择）会在
+// 半路被 detach，报「Detached while handling command」。现在每次 withL2 持一份
+// 租约，最后一份释放后才开始倒数。
 function touch(tabId) {
   const s = sessions.get(tabId);
   if (!s) return;
   if (s.timer) clearTimeout(s.timer);
-  s.timer = setTimeout(() => detach(tabId), L2_IDLE_MS);
+  s.timer = s.leases > 0 ? null : setTimeout(() => detach(tabId), L2_IDLE_MS);
 }
 
 export async function detach(tabId) {
@@ -127,12 +138,9 @@ export async function detach(tabId) {
   if (s?.timer) clearTimeout(s.timer);
   sessions.delete(tabId);
   dialogs.delete(tabId);
-  // 截图时钉的视口要还原，否则用户那一页会一直停在被钉住的尺寸上
-  if (s?.metrics) {
-    await chrome.debugger
-      .sendCommand({ tabId }, 'Emulation.clearDeviceMetricsOverride')
-      .catch(() => { /* 已经断了，浏览器会自己收 */ });
-  }
+  choosers.delete(tabId);
+  children.delete(tabId);
+  attachRefs.delete(tabId);
   try {
     await chrome.debugger.detach({ tabId });
   } catch {
@@ -172,19 +180,37 @@ async function reap(pick) {
   }
 }
 
-function send(tabId, method, params = {}) {
-  return chrome.debugger.sendCommand({ tabId }, method, params);
+// 调试器错误分三类报：被别的调试器顶掉 / 标签页导航走了 / 别的。
+// 「Detached」不再伪装成 INTERNAL——调用方据此决定不要盲目重试。
+async function send(tabId, method, params = {}) {
+  try {
+    return await chrome.debugger.sendCommand({ tabId }, method, params);
+  } catch (e) {
+    const m = String(e?.message || e);
+    if (/Detached while handling|not attached|Debugger is not attached/i.test(m)) {
+      sessions.delete(tabId);
+      throw new L2Unavailable(`调试连接在 ${method} 途中断开（标签页被关闭/重新加载，或用户点了黄条上的「取消」）。没有自动重试。`, 'L2_DETACHED');
+    }
+    throw e;
+  }
 }
 
-// 对外的统一入口：确保 attach 后执行 fn，并重置空闲计时
+// 对外的统一入口：确保 attach 后执行 fn。执行期间持租约，空闲计时不走
 export async function withL2(tabId, fn) {
   await ensureAttached(tabId);
+  const s = sessions.get(tabId);
+  if (s) { s.leases++; if (s.timer) { clearTimeout(s.timer); s.timer = null; } }
   try {
     return await fn((method, params) => send(tabId, method, params));
   } finally {
+    if (s) s.leases = Math.max(0, s.leases - 1);
     touch(tabId);
   }
 }
+
+// 多步操作（点击 → 全选 → 粘贴 → 读回）整段持一份租约：步与步之间夹着
+// content script 的往返，不持租约的话中间任何一次慢应答都可能让调试器在半路断开
+export const lease = (tabId, fn) => withL2(tabId, () => fn());
 
 // ---------- 输入 ----------
 
@@ -277,13 +303,157 @@ export async function insertText(tabId, text) {
 // 原生文件选择。DataTransfer 那条路是伪造 FileList，站点一查 isTrusted 就废；
 // 这条是浏览器自己的路径，和用户手点文件对话框走的是同一条。
 // 传的是本机绝对路径——桥和浏览器在同一台机器上，不必再把文件 base64 搬一遍。
+//
+// selector 可能指向 iframe 里的元素（content script 在那个框架里打的一次性标记）。
+// DOM.querySelector 只查顶层文档，所以先查顶层，查不到再用 performSearch——
+// 它在 pierce 过的整棵树上找，同进程的 iframe（含同站跨源，如 app.powerbi.com 里的
+// pbidpe.powerbi.com）都在里面。跨站的进程外 iframe（OOPIF）不在这棵树上，
+// 抛 OOPIF 让上游退回框架内的 DataTransfer 路径。
+async function nodeBySelector(cmd, selector) {
+  const { root } = await cmd('DOM.getDocument', { depth: -1, pierce: true });
+  const { nodeId } = await cmd('DOM.querySelector', { nodeId: root.nodeId, selector }).catch(() => ({ nodeId: 0 }));
+  if (nodeId) return nodeId;
+  const { searchId, resultCount } = await cmd('DOM.performSearch', { query: selector, includeUserAgentShadowDOM: false });
+  try {
+    if (!resultCount) return 0;
+    const { nodeIds } = await cmd('DOM.getSearchResults', { searchId, fromIndex: 0, toIndex: 1 });
+    return nodeIds?.[0] || 0;
+  } finally {
+    await cmd('DOM.discardSearchResults', { searchId }).catch(() => {});
+  }
+}
+
+// 子会话上的命令：chrome.debugger 从 Chrome 125 起认 { tabId, sessionId }
+const sessionCmd = (tabId, sessionId) => (method, params = {}) =>
+  chrome.debugger.sendCommand({ tabId, sessionId }, method, params);
+
+// 把标签页里所有进程外 iframe 都 attach 上（含嵌套：每个子会话也开 auto-attach），
+// 返回 [{ sessionId, cmd, url }]。用完调 release 摘掉——不摘的话子 target
+// 会一直挂着，后面每个 DOM 事件都多往 SW 里灌一份。
+// 可重入：chooseFiles 里 trigger 的点击也会走 clickInFrame 再 attach 一次，
+// 内层 release 不能把外层还在用的子会话摘掉——按标签页计数，最后一个 release 才真摘
+const attachRefs = new Map();
+async function attachChildren(tabId, cmd) {
+  if (!children.has(tabId)) children.set(tabId, new Map());
+  attachRefs.set(tabId, (attachRefs.get(tabId) || 0) + 1);
+  const auto = { autoAttach: true, waitForDebuggerOnStart: false, flatten: true };
+  await cmd('Target.setAutoAttach', auto);
+  const seen = new Set();
+  for (let round = 0; round < 4; round++) {
+    await new Promise((r) => setTimeout(r, 150));
+    const fresh = [...children.get(tabId).keys()].filter((s) => !seen.has(s));
+    if (!fresh.length && round) break;
+    for (const s of fresh) {
+      seen.add(s);
+      await sessionCmd(tabId, s)('Target.setAutoAttach', auto).catch(() => {});
+    }
+  }
+  const list = [...children.get(tabId)]
+    .filter(([, info]) => info?.type === 'iframe')
+    .map(([sessionId, info]) => ({ sessionId, url: info.url, cmd: sessionCmd(tabId, sessionId) }));
+  let released = false;
+  const release = async () => {
+    if (released) return;
+    released = true;
+    const left = (attachRefs.get(tabId) || 1) - 1;
+    if (left > 0) { attachRefs.set(tabId, left); return; }
+    attachRefs.delete(tabId);
+    await cmd('Target.setAutoAttach', { ...auto, autoAttach: false }).catch(() => {});
+    for (const s of [...(children.get(tabId)?.keys() || [])]) {
+      await cmd('Target.detachFromTarget', { sessionId: s }).catch(() => {});
+    }
+    children.delete(tabId);
+  };
+  return { list, release };
+}
+
+// 跨站 iframe 里的真实点击。坐标打给顶层时，浏览器要靠合成器的命中测试数据
+// 才知道该交给哪个进程——而后台标签页里的进程外框架从不交帧，那份数据是空的/旧的，
+// 点击于是落在父框架上（2026-11-13 实测：焦点进不去、按钮没反应）。
+// 直接把鼠标事件发给那个框架自己的 target，用它自己的坐标系，绕开命中测试。
+// docSelector 是框架 content script 给自己 <html> 打的标记，用来认出是哪个子会话。
+export async function clickInFrame(tabId, docSelector, x, y, { clickCount = 1 } = {}) {
+  return withL2(tabId, async (cmd) => {
+    const { list, release } = await attachChildren(tabId, cmd);
+    try {
+      let target = null;
+      for (const child of list) {
+        if (await nodeBySelector(child.cmd, docSelector).catch(() => 0)) { target = child; break; }
+      }
+      if (!target) throw new L2Unavailable('没找到这个框架对应的调试子会话', 'OOPIF');
+      const t = target.cmd;
+      const base = { x, y, button: 'left', modifiers: 0 };
+      await t('Input.dispatchMouseEvent', { ...base, type: 'mouseMoved', button: 'none', buttons: 0 });
+      await t('Input.dispatchMouseEvent', { ...base, type: 'mousePressed', buttons: 1, clickCount });
+      await t('Input.dispatchMouseEvent', { ...base, type: 'mouseReleased', buttons: 0, clickCount });
+      return true;
+    } finally {
+      await release();
+    }
+  });
+}
+
 export async function setFileInput(tabId, selector, files) {
   return withL2(tabId, async (cmd) => {
-    const { root } = await cmd('DOM.getDocument', { depth: 1 });
-    const { nodeId } = await cmd('DOM.querySelector', { nodeId: root.nodeId, selector });
-    if (!nodeId) throw new L2Unavailable(`页面上没有匹配 ${selector} 的元素`, 'REF_NOT_FOUND');
-    await cmd('DOM.setFileInputFiles', { nodeId, files });
-    return true;
+    const nodeId = await nodeBySelector(cmd, selector);
+    if (nodeId) {
+      await cmd('DOM.setFileInputFiles', { nodeId, files });
+      return true;
+    }
+    // 不在主进程这棵树上：去每个进程外 iframe 的子会话里找
+    const { list, release } = await attachChildren(tabId, cmd);
+    try {
+      for (const child of list) {
+        const id = await nodeBySelector(child.cmd, selector).catch(() => 0);
+        if (!id) continue;
+        await child.cmd('DOM.setFileInputFiles', { nodeId: id, files });
+        return true;
+      }
+    } finally {
+      await release();
+    }
+    throw new L2Unavailable(`调试器在主框架和 ${list.length} 个跨站 iframe 里都没找到 ${selector}`, 'OOPIF');
+  });
+}
+
+// 「点了按钮才临时造一个 input 并立刻 .click()」的上传入口（Fabric 的 Import、
+// 很多 Angular Material 页面）事先根本没有 input 可找，一点就弹系统文件对话框——
+// 那是扩展够不着、只能让用户去点的东西。打开文件选择拦截后，Chrome 不弹对话框，
+// 改发 Page.fileChooserOpened（带那个 input 的 backendNodeId），我们直接把文件塞给它。
+// 拦截要在**每个** target 上开：跨站 iframe 里的 input 只在它自己的子会话上报事件。
+// trigger 是调用方传进来的「执行那次点击」的函数；拦截在 finally 里一定关掉，
+// 否则这一页之后用户自己点上传也不会再弹对话框。
+export async function chooseFiles(tabId, trigger, files, { timeout = 8000 } = {}) {
+  return withL2(tabId, async (cmd) => {
+    choosers.set(tabId, []);
+    const { list, release } = await attachChildren(tabId, cmd);
+    const targets = [cmd, ...list.map((c) => c.cmd)];
+    for (const t of targets) {
+      await t('Page.enable').catch(() => {});
+      await t('Page.setInterceptFileChooserDialog', { enabled: true }).catch(() => {});
+    }
+    try {
+      await trigger();
+      const end = Date.now() + timeout;
+      let hit = null;
+      while (!hit && Date.now() < end) {
+        hit = choosers.get(tabId)?.[0] || null;
+        if (!hit) await new Promise((r) => setTimeout(r, 100));
+      }
+      if (!hit) {
+        throw new L2Unavailable(`点了 trigger 之后 ${timeout / 1000}s 内页面没有打开文件选择（trigger 不是上传入口，或点击没落到它上面）`, 'NO_FILE_CHOOSER');
+      }
+      if (hit.mode === 'selectSingle' && files.length > 1) {
+        throw new L2Unavailable('这个文件选择只接受一个文件', 'BAD_PARAMS');
+      }
+      const on = hit.sessionId ? sessionCmd(tabId, hit.sessionId) : cmd;
+      await on('DOM.setFileInputFiles', { backendNodeId: hit.backendNodeId, files });
+      return { frameId: hit.frameId, mode: hit.mode };
+    } finally {
+      choosers.delete(tabId);
+      for (const t of targets) await t('Page.setInterceptFileChooserDialog', { enabled: false }).catch(() => {});
+      await release();
+    }
   });
 }
 
@@ -295,52 +465,58 @@ export async function setFileInput(tabId, selector, files) {
 //
 // 默认 60% 缩放的 JPEG：视觉 token 按像素数算，缩到 0.6 就是省掉 64%，而
 // 「这一页大概长什么样、按钮在哪」这类问题 60% 足够看清。要读小字、量像素
-// 传 full:true 拿 1:1 PNG。缩放走 clip.scale——Chrome 在合成时缩，不是拍完再缩。
-// 采集期间钉住视口尺寸。
+// 传 full:true 拿 1:1（以 CSS px 计）PNG。缩放走 clip.scale——Chrome 在合成时缩。
 //
-// 黄条跟着 L2 的通断出现/消失，页面跟着重排，同一批截图的前后帧就不是一个
-// 几何（实测 1610 / 1722 两种高度来回跳）。这里在本会话第一次截图时量一次，
-// 之后整段会话都用它：setDeviceMetricsOverride 不改页面此刻的样子，只是让它
-// 在快门落下前后不能再变，拍出来每一帧因此尺寸一致。会话结束（detach）时 clear。
-//
-// 钉不上就静静退回原行为，绝不因为一个取景细节让截图整个失败。
-async function pinViewport(cmd) {
-  const m = await cmd('Page.getLayoutMetrics');
-  const v = m.cssVisualViewport || m.visualViewport || {};
-  return {
-    width: Math.max(1, Math.round(v.clientWidth || 1280)),
-    height: Math.max(1, Math.round(v.clientHeight || 800)),
-  };
-}
+// 不再钉视口（以前用 setDeviceMetricsOverride 钉住第一次量到的尺寸）。钉视口本身
+// 就会改页面：覆盖值按「不含滚动条」的宽度给，页面当场重排；detach 时撤掉又重排一次。
+// 截图那一刻的布局和随后真实点击时的布局因此不是同一个，按截图算出的坐标会偏。
+// 现在一律按此刻的视口拍，并把换算需要的一切跟图一起交回去：CSS 视口尺寸、
+// 实际位图尺寸（从字节里量，不是按请求的比例推）、两者之比、devicePixelRatio、滚动偏移。
+// 高 DPI 屏上 clip.scale 输出的是设备像素，所以按 DPR 折算，让「60%」真的是 CSS 的 60%。
 
 // 后台标签页不出帧：rAF 不跑、IntersectionObserver 不回调，靠它们水合的页面停在骨架屏
 // （经验库约 18 个站记过「骨架，不是未登录」）。截一帧会推一次渲染管线——agent 的绕法
 // 就是「先截个图」，这里做成内建的，结果丢掉不用。
-export async function forceFrame(tabId) {
-  await screenshot(tabId);
+// 截 1×1 像素就够：要的是那一次合成，不是图。真实点击前也用它——刚重新加载、
+// 还没出过一帧的后台标签页，浏览器按旧布局做命中测试，点击会落空（Fabric 实测）。
+//
+// 有上限：页面里有进程外 iframe（跨站）时，后台标签页的截图会等那些子框架交帧，
+// 一等就是 30 秒（2026-11-13 实测）。推帧只是锦上添花，等不到就照常往下走——
+// 没回来的那次截图在浏览器里自己收尾，不挡后面的输入事件。
+export async function forceFrame(tabId, { timeout = 0 } = {}) {
+  const shot = withL2(tabId, (cmd) => cmd('Page.captureScreenshot', {
+    format: 'jpeg', quality: 1, captureBeyondViewport: false, clip: { x: 0, y: 0, width: 1, height: 1, scale: 1 },
+  }));
+  if (!timeout) return shot;
+  shot.catch(() => {});
+  await Promise.race([shot, new Promise((r) => setTimeout(r, timeout))]);
 }
 
 export async function screenshot(tabId, { full = false } = {}) {
   return withL2(tabId, async (cmd) => {
-    const s = sessions.get(tabId);
-    let size = s?.metrics;
-    if (!size) {
-      size = await pinViewport(cmd);
-      try {
-        await cmd('Emulation.setDeviceMetricsOverride', { ...size, deviceScaleFactor: 0, mobile: false });
-        if (s) s.metrics = size;
-      } catch { /* 受限页面钉不上：按当前尺寸截，几何可能跳，但不影响内容 */ }
-    }
-    if (full) {
-      const r = await cmd('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
-      return { dataUrl: `data:image/png;base64,${r.data}`, scale: 1 };
-    }
-    const scale = 0.6;
+    const m = await cmd('Page.getLayoutMetrics');
+    const v = m.cssVisualViewport || {};
+    const width = Math.max(1, Math.round(v.clientWidth || 1));
+    const height = Math.max(1, Math.round(v.clientHeight || 1));
+    const scrollX = Math.round(v.pageX || 0);
+    const scrollY = Math.round(v.pageY || 0);
+    let dpr = 1;
+    try {
+      const r = await cmd('Runtime.evaluate', { expression: 'devicePixelRatio', returnByValue: true });
+      dpr = Number(r?.result?.value) > 0 ? Number(r.result.value) : 1;
+    } catch { /* 量不到按 1 算，实际比例下面从位图里量 */ }
+    const want = full ? 1 : 0.6;
+    // clip 用文档坐标：视口左上角 = 滚动偏移。以前写死 (0,0)，页面一滚就截到别处
     const r = await cmd('Page.captureScreenshot', {
-      format: 'jpeg', quality: 80, captureBeyondViewport: false,
-      clip: { x: 0, y: 0, width: size.width, height: size.height, scale },
+      format: full ? 'png' : 'jpeg', ...(full ? {} : { quality: 80 }), captureBeyondViewport: false,
+      clip: { x: v.pageX || 0, y: v.pageY || 0, width: v.clientWidth || width, height: v.clientHeight || height, scale: want / dpr },
     });
-    return { dataUrl: `data:image/jpeg;base64,${r.data}`, scale };
+    const img = imageSize(r.data) || { width: Math.round(width * want), height: Math.round(height * want) };
+    return {
+      dataUrl: `data:image/${full ? 'png' : 'jpeg'};base64,${r.data}`,
+      scale: Math.round((img.width / width) * 1000) / 1000,
+      viewport: { width, height }, image: img, dpr, scroll: { x: scrollX, y: scrollY },
+    };
   });
 }
 
@@ -372,6 +548,37 @@ export async function evaluate(tabId, src, { maxLength = 20000 } = {}) {
   });
 }
 
+// 在某个 iframe 的上下文里、不受该框架 CSP 管地求值。Runtime.evaluate 只认顶层，
+// 所以借一个节点：框架里的 content script 给 <html> 打了一次性标记，这里按标记
+// 找到节点（同进程框架都在 pierce 树上），callFunctionOn 就在那个节点所在的
+// 框架里执行。函数体由调试器编译，页面 CSP 管不着。
+export async function evaluateAt(tabId, selector, src, { maxLength = 20000 } = {}) {
+  return withL2(tabId, async (cmd) => {
+    const nodeId = await nodeBySelector(cmd, selector);
+    if (!nodeId) throw new L2Unavailable('调试器看不到这个框架（跨站的进程外 iframe），只能在它允许的页面世界里求值', 'OOPIF');
+    const { object } = await cmd('DOM.resolveNode', { nodeId });
+    try {
+      const call = (body) => cmd('Runtime.callFunctionOn', {
+        objectId: object.objectId, functionDeclaration: body,
+        returnByValue: true, awaitPromise: true, userGesture: true,
+      });
+      let r = await call(`async function () { return (${src}\n); }`);
+      if (r.exceptionDetails && /SyntaxError/.test(r.exceptionDetails.exception?.description || r.exceptionDetails.text || '')) {
+        r = await call(`async function () { ${src}\n}`);
+      }
+      if (r.exceptionDetails) {
+        throw new L2Unavailable(`表达式执行失败：${r.exceptionDetails.exception?.description || r.exceptionDetails.text}`, 'INTERNAL');
+      }
+      let s;
+      try { s = JSON.stringify(r.result?.value, null, 2); } catch { s = String(r.result?.value); }
+      if (s === undefined) s = 'undefined';
+      return s.length > maxLength ? s.slice(0, maxLength) + '\n…（已截断）' : s;
+    } finally {
+      await cmd('Runtime.releaseObject', { objectId: object.objectId }).catch(() => {});
+    }
+  });
+}
+
 // ---------- 原生弹窗 ----------
 
 // ⚠️ 这两个监听器必须用可选链挂。
@@ -391,7 +598,14 @@ function wireDebuggerEvents() {
   chrome.debugger.onEvent.addListener((source, method, params) => {
     const tabId = source.tabId;
     if (tabId == null) return;
-    if (method === 'Page.javascriptDialogOpening') {
+    if (method === 'Target.attachedToTarget') {
+      if (!children.has(tabId)) children.set(tabId, new Map());
+      children.get(tabId).set(params.sessionId, params.targetInfo);
+    } else if (method === 'Target.detachedFromTarget') {
+      children.get(tabId)?.delete(params.sessionId);
+    } else if (method === 'Page.fileChooserOpened') {
+      choosers.get(tabId)?.push({ backendNodeId: params.backendNodeId, frameId: params.frameId, mode: params.mode, sessionId: source.sessionId || null });
+    } else if (method === 'Page.javascriptDialogOpening') {
       dialogs.set(tabId, { type: params.type, message: params.message, at: Date.now() });
     } else if (method === 'Page.javascriptDialogClosed') {
       dialogs.delete(tabId);

@@ -32,7 +32,7 @@ test('agent 能通过 stdio 挂上 MCP server 并拿到工具表', async () => {
   const { tools } = await client.listTools();
   const names = tools.map((t) => t.name).sort();
 
-  assert.deepEqual(names, ['act', 'ask', 'click', 'download', 'eval', 'fetch', 'fill', 'key', 'learnings', 'navigate', 'network', 'profiles', 'query', 'read_text', 'reload', 'screenshot', 'scroll', 'select', 'snapshot', 'status', 'tabs', 'type', 'upload', 'wait']);
+  assert.deepEqual(names, ['act', 'ask', 'click', 'download', 'editor', 'eval', 'fetch', 'fill', 'frames', 'key', 'learnings', 'navigate', 'network', 'profiles', 'query', 'read_text', 'reload', 'screenshot', 'scroll', 'select', 'snapshot', 'status', 'tabs', 'type', 'upload', 'wait']);
 
   // 工具描述是每轮都在付的 context 成本，别让它悄悄膨胀
   // （16000 → 16500：v0.8 有意识地加了 learnings 工具，它自身已压到最短；
@@ -63,8 +63,12 @@ test('agent 能通过 stdio 挂上 MCP server 并拿到工具表', async () => {
   //   21800 → 22100：新增 profiles 工具。同一份扩展被多个 Chrome profile（=多个账号）
   //   加载时，桥按会话绑定 profile，agent 必须能看见自己落在哪个账号里、并按名字切换；
   //   这件事只能住在工具表里（STRATEGY 已贴着 2000 字符的截断线），描述已压到两句）
+  //   22100 → 24900：框架与编辑器（Fabric 实测驱动）。frameId 进 snapshot/click/type/key/
+  //   read_text/query/eval/upload/wait/act——selector/find/eval 以前根本进不了 iframe；
+  //   新增 frames（框架清单 + 句柄）和 editor（Monaco 整份替换 + 读回核对）；
+  //   upload 加 trigger/inputSelector。fill/select/scroll 的 ref 自带 @fN，不重复加
   const total = tools.reduce((n, t) => n + t.description.length + JSON.stringify(t.inputSchema).length, 0);
-  assert.ok(total < 22100, `工具表膨胀到 ${total} 字符了，压回 22100 以内`);
+  assert.ok(total < 24900, `工具表膨胀到 ${total} 字符了，压回 24900 以内`);
 
   // click 必须强制要 snapshotId，否则 ref 防呆整套失效
   assert.deepEqual(tools.find((t) => t.name === 'type').inputSchema.required, ['text']);

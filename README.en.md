@@ -17,11 +17,11 @@
 
 **Let any AI agent operate your own Chrome—with all your existing login sessions.**
 
-<sub>One MCP server + one Chrome extension, with 24 browser tools. Works with Claude Code, Codex CLI, Cursor, Gemini CLI, Cline, Windsurf and more.</sub>
+<sub>One MCP server + one Chrome extension, with 26 browser tools. Works with Claude Code, Codex CLI, Cursor, Gemini CLI, Cline, Windsurf and more.</sub>
 
 <br>
 
-[See it in action](#see-it-in-action) · [Installation](#installation) · [24 tools](#24-browser-tools-by-the-webs-three-information-carriers) · [Learnings](#learnings-that-compound) · [Safety](#safety) · [Troubleshooting](#troubleshooting)
+[See it in action](#see-it-in-action) · [Installation](#installation) · [26 tools](#26-browser-tools-by-the-webs-three-information-carriers) · [Learnings](#learnings-that-compound) · [Safety](#safety) · [Troubleshooting](#troubleshooting)
 
 </div>
 
@@ -159,9 +159,9 @@ To install the extension manually, run npx huashu-chrome extension to print its 
 
 </details>
 
-## 24 browser tools by the web’s three information carriers
+## 26 browser tools by the web’s three information carriers
 
-The 24 tools are not a flat list; they form layers. This ordering tells an agent what to try first on an unfamiliar site. The full reasoning is in [docs/能力模型.md](docs/能力模型.md) (**Chinese**); each rule there came from hitting a real limitation.
+The 26 tools are not a flat list; they form layers. This ordering tells an agent what to try first on an unfamiliar site. The full reasoning is in [docs/能力模型.md](docs/能力模型.md) (**Chinese**); each rule there came from hitting a real limitation.
 
 **Data layer (for numbers, lists and tables; start here)**
 
@@ -182,7 +182,9 @@ The 24 tools are not a flat list; they form layers. This ordering tells an agent
 | navigate / tabs / wait / scroll | Navigate, manage tabs, wait and scroll to load more content. |
 | read_text | Extract the article body as Markdown, removing navigation, footers, ads and avatar images. |
 | query | Extract structured data with a CSS selector, useful on sites without a usable API. contains finds elements by text—check whether a phrase is on the page or what a status label says without writing eval. |
-| upload | Put a local file into a page’s upload control. The extension cannot reach the system file dialog; this is the one route. |
+| frames | List every iframe: URL, parent, size, status (visible / hidden / inaccessible) and a handle such as 12:ab34cd56. snapshot, click, type, key, query, read_text, eval, wait, upload and editor all take frameId—the N from “iframe fN” or a handle. A handle is refused with STALE_FRAME once its frame has loaded another document, so an agent never acts on a page that has gone. |
+| editor | Read or replace the whole document of a code editor (Monaco, CodeMirror and similar), including one nested inside cross-site iframes, using real input. Returns length, sha256, whether the text read back matches what was written byte for byte, the editor’s own error markers and, for JSON, whether it parses. Your system clipboard is never touched. |
+| upload | Put a local file into a page’s upload control. inputSelector (hidden inputs included) plus frameId targets an input directly; trigger is a button that opens the system picker—the picker is intercepted, so no OS dialog appears. Drag-and-drop happens only onto an explicit dropSelector, and a drop the page does not accept is reported as an error. |
 | eval | Run JavaScript in the page’s own world, so it is subject to the page’s CSP. Large sites may block it. |
 
 **Batching**
@@ -207,7 +209,7 @@ The 24 tools are not a flat list; they form layers. This ordering tells an agent
 
 | Tool | What it does |
 |---|---|
-| screenshot | Use only when the visual layout itself matters. High-fidelity mode can capture a background tab without interrupting you. By default it returns a JPEG scaled to 60% (saving three quarters of the visual tokens); full:true returns a 1:1 PNG. savePath writes to disk without adding the image to context. |
+| screenshot | Use only when the visual layout itself matters. High-fidelity mode can capture a background tab without interrupting you. By default it returns a JPEG scaled to 60% (saving three quarters of the visual tokens); full:true returns a 1:1 PNG. savePath writes to disk without adding the image to context. The viewport is never changed; the reply gives the CSS viewport size, image size, scale, DPR and scroll, so image coordinates map back to CSS pixels. |
 
 The MCP server sends this ordering to the agent as instructions during the handshake, so you do not have to teach it.
 
@@ -279,6 +281,8 @@ Two boundaries apply:
 - **Native <code>&lt;select&gt;</code> elements are forced off this path.** In tests, their dropdown is rendered by the browser process, so debugger input events cannot reach it and can leave it stuck.
 
 This requires debugger permission, granted once when the extension is installed. Chrome does not allow debugger as an optional permission, so it cannot be deferred until first use. You can turn the feature off in the sidebar. When enabled, it attaches only for the few seconds needed and disconnects automatically; the yellow debugger bar does not stay open.
+
+Real input also works inside iframes. Coordinates are translated through every ancestor frame; in a cross-site (out-of-process) frame the click is sent to that frame’s own debugger target, which also works in a background tab. If focus does not land in the target, type and key stop with FOCUS_LOST instead of sending ctrl+a to the host page.
 
 In a live test, all nine mouse events reached a background tab with isTrusted === true. **The agent can use real events while your browser remains yours**—there is no separate visible browser window to manage.
 
@@ -431,6 +435,7 @@ npx huashu-chrome audit --stats     # Real-agent usage: idle gaps, common calls 
 npm install
 npm test              # Protocol and safety boundaries; no browser required
 npm run test:live     # Interactive regression; requires Chrome and the extension
+npm run test:frames   # Frames, nested Monaco, upload, screenshot geometry; requires Chrome and network
 node src/cli.js bridge --foreground
 ```
 
@@ -452,7 +457,7 @@ To inspect sidebar changes visually, open it as a regular page at <code>chrome-e
 huashu-chrome/
 ├── src/
 │   ├── cli.js              # Entry point: install / mcp / bridge / doctor / audit / extension
-│   ├── mcp-server.js       # 24 browser tools and handshake instructions; learnings are described separately
+│   ├── mcp-server.js       # 26 browser tools and handshake instructions; learnings are described separately
 │   ├── bridge.js           # Persistent singleton on 127.0.0.1: routing · permissions · audit · sessions
 │   ├── install.js          # Detect agents, write MCP config, open extension guide
 │   ├── handoff/            # huashu-chrome run / grants: lend a profile's login to a local script

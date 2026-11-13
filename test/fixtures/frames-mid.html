@@ -1,0 +1,5 @@
+<!doctype html><meta charset="utf-8"><title>frames mid</title>
+<style>body{font:13px system-ui;margin:0;padding:10px} iframe{width:860px;height:540px;border:1px solid #aaa}</style>
+<div>Middle frame <button id="mid-btn">mid button</button> <b id="mid-out">idle</b></div>
+<iframe id="ed" src="frames-monaco.html"></iframe>
+<script>document.getElementById('mid-btn').onclick = () => { document.getElementById('mid-out').textContent = 'clicked'; };</script>

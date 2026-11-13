@@ -17,11 +17,11 @@
 
 **让任何 AI agent 操控你自己的 Chrome——带着你全部的登录态。**
 
-<sub>一个 MCP server + 一个 Chrome 扩展，24 个浏览器工具。Claude Code、Codex CLI、Cursor、Gemini CLI、Cline、Windsurf 通用。</sub>
+<sub>一个 MCP server + 一个 Chrome 扩展，26 个浏览器工具。Claude Code、Codex CLI、Cursor、Gemini CLI、Cline、Windsurf 通用。</sub>
 
 <br>
 
-[看效果](#看效果) · [安装](#安装) · [24 个工具](#工具按网页只有三种信息载体来分) · [经验回流](#越用越快经验回流) · [安全](#安全) · [排错](#排错)
+[看效果](#看效果) · [安装](#安装) · [26 个工具](#工具按网页只有三种信息载体来分) · [经验回流](#越用越快经验回流) · [安全](#安全) · [排错](#排错)
 
 </div>
 
@@ -182,7 +182,7 @@ args = ["-y", "huashu-chrome", "mcp", "--client", "codex"]
 
 ## 工具：按「网页只有三种信息载体」来分
 
-24 个工具不是一堆平铺的功能，是三层。这个分层决定了 agent 面对陌生网站时按什么顺序出牌，
+26 个工具不是一堆平铺的功能，是三层。这个分层决定了 agent 面对陌生网站时按什么顺序出牌，
 完整推演见 [`docs/能力模型.md`](docs/能力模型.md)——里面每条规则都跟着撞出它的那堵墙。
 
 **数据层（要数字、列表、表格，从这里开始）**
@@ -204,7 +204,9 @@ args = ["-y", "huashu-chrome", "mcp", "--client", "codex"]
 | `navigate` `tabs` `wait` `scroll` | 导航、标签页、等待、滚动加载 |
 | `read_text` | 正文提取成 markdown，去掉导航页脚广告和头像图 |
 | `query` | 按 CSS selector 结构化提取，用于没有可用接口的站点；`contains` 按文本找元素——「页面上有没有这句话」「这个状态字现在是什么」不必再写 eval |
-| `upload` | 把本地文件塞进网页的上传框——系统文件对话框是扩展够不着的，这是唯一的路 |
+| `frames` | 列出所有 iframe：URL、父框架、尺寸、状态（visible / hidden / inaccessible）和形如 `12:ab34cd56` 的句柄。`snapshot` `click` `type` `key` `query` `read_text` `eval` `wait` `upload` `editor` 都收 `frameId`——「iframe fN」里的 N 或句柄。框架换了文档，旧句柄直接报 `STALE_FRAME`，不会在已经没了的页面上动手 |
+| `editor` | 整篇读取或替换代码编辑器（Monaco、CodeMirror 等）的内容，嵌在跨站 iframe 里也行，走真实输入。返回长度、sha256、读回来是否和写进去的逐字节一致、编辑器自己的错误标记，JSON 还会说能不能解析。不碰你的系统剪贴板 |
+| `upload` | 把本地文件塞进网页的上传框。`inputSelector`（隐藏的 input 也行）配 `frameId` 直接定位；`trigger` 是「点了才弹系统文件框」的按钮——文件框被拦截，不会弹出来。拖放只往明确给的 `dropSelector` 上放，页面不接收就报错 |
 | `eval` | 跑一段 JS。在页面自己的世界里求值，所以受**页面** CSP 管，大站会拦 |
 
 **批处理**
@@ -229,7 +231,7 @@ args = ["-y", "huashu-chrome", "mcp", "--client", "codex"]
 
 | 工具 | 干什么 |
 |---|---|
-| `screenshot` | 只在版式本身就是问题时用。开了高保真模式可以直接截后台标签页，不打断你。默认 60% 缩放的 JPEG（视觉 token 省四分之三），`full:true` 拿 1:1 PNG；`savePath` 落盘不进上下文 |
+| `screenshot` | 只在版式本身就是问题时用。开了高保真模式可以直接截后台标签页，不打断你。默认 60% 缩放的 JPEG（视觉 token 省四分之三），`full:true` 拿 1:1 PNG；`savePath` 落盘不进上下文。从不改视口；回复里给 CSS 视口尺寸、图片尺寸、缩放比、DPR 和滚动位置，图上坐标能换算回 CSS 像素 |
 
 这套顺序不用你教给 agent——MCP server 在握手时就把它作为 `instructions` 下发了。
 
@@ -328,6 +330,8 @@ content script 派发的事件 `isTrusted` 永远是 false。四类场景因此�
 （本来想做成「用时再授权」，但 Chrome 不允许 `debugger` 作为可选权限。）
 不想要的话，侧栏里有开关可以关掉。开着的时候也只在真正需要的那几秒接入，
 用完自动断开——黄条不常驻。
+
+iframe 里也能用真实事件：坐标逐层换算过每一级父框架；跨站（进程外）框架里的点击直接发给那个框架自己的调试 target，后台标签页同样有效。焦点没进到目标里，`type` / `key` 就以 `FOCUS_LOST` 停下，不会把 ctrl+a 打到宿主页面上。
 
 实测结论：后台标签页里，九个鼠标事件完整送达且 `isTrusted` 全为 true。
 **agent 用真实事件干活的同时，你的浏览器还是你的**——不用像别的方案那样
@@ -526,6 +530,7 @@ npx huashu-chrome audit --stats     # 真实 agent 的用法统计：回合空�
 npm install
 npm test              # 协议与安全边界，不需要浏览器
 npm run test:live     # 交互场景回归，需要 Chrome + 已装扩展
+npm run test:frames   # 多层 iframe、嵌套 Monaco、上传、截图几何，需要 Chrome + 网络
 node src/cli.js bridge --foreground
 ```
 
@@ -558,7 +563,7 @@ node src/cli.js bridge --foreground
 huashu-chrome/
 ├── src/
 │   ├── cli.js              # 入口：install / mcp / bridge / doctor / audit / extension
-│   ├── mcp-server.js       # 24 个工具的定义与握手 instructions
+│   ├── mcp-server.js       # 26 个工具的定义与握手 instructions
 │   ├── bridge.js           # 127.0.0.1 常驻单例：路由 · 授权 · 审计 · 多会话
 │   ├── install.js          # 检测 agent、写 MCP 配置、拉起扩展引导页
 │   ├── handoff/            # huashu-chrome run / grants：把 profile 的登录借给本机脚本

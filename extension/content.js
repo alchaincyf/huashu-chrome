@@ -668,7 +668,9 @@
         `${p.ref} 现在是「${now}」，不再是你看到的那个「${rec.name}」——`
         + '这一片内容被换掉了。重新 snapshot 再操作。');
     }
-    if (!isVisible(el)) throw fail('NOT_INTERACTABLE', `${p.ref} 当前不可见`);
+    // 编辑器的隐藏输入框本身看不见，看得见的是编辑器——以编辑器为准
+    const host = el.closest?.(EDITOR_HOSTS);
+    if (!isVisible(el) && !(host && isVisible(host))) throw fail('NOT_INTERACTABLE', `${p.ref} 当前不可见`);
     if (isDisabled(el)) throw fail('NOT_INTERACTABLE', `${p.ref} 处于 disabled 状态——多半是表单还没填完整或校验没过，看快照里的页面提示`);
     return el;
   }
@@ -892,8 +894,20 @@
     }
     const el = resolve(p);
     lastTarget = el;
-    el.scrollIntoView({ block: 'center', behavior: 'instant' });
-    const r = el.getBoundingClientRect();
+    // 代码编辑器的可聚焦元素（Monaco 的 textarea.inputarea / EditContext 节点）只有
+    // 1px 大，常被正文行盖住——按它定位要么点不中，要么被判成「被遮挡」。
+    // 改用编辑器本体露在视口里那块的中心：点进编辑器任意位置都会把焦点交给它。
+    const host = editorHostOf(el);
+    const box = host || el;
+    box.scrollIntoView({ block: host ? 'nearest' : 'center', behavior: 'instant' });
+    const br = box.getBoundingClientRect();
+    const r = host
+      ? (() => {
+        const l = Math.max(br.left, 0), t = Math.max(br.top, 0);
+        const rr = Math.min(br.right, innerWidth), b = Math.min(br.bottom, innerHeight);
+        return { left: l, top: t, width: Math.max(0, rr - l), height: Math.max(0, b - t) };
+      })()
+      : br;
     const x = r.left + r.width / 2;
     const y = r.top + r.height / 2;
 
@@ -907,7 +921,7 @@
     // 遮挡检测和 doClick 保持同一套判断——L2 打的是坐标，遮挡时点中的是遮挡物，
     // 比 L1 更危险，更不能放过
     const top = document.elementFromPoint(x, y);
-    if (top && top !== el && !el.contains(top) && !top.contains(el)) {
+    if (top && top !== box && !box.contains(top) && !top.contains(box)) {
       throw fail('NOT_INTERACTABLE', `${p.ref || p.selector} 被其它元素遮挡（可能有弹窗/浮层）。先处理遮挡物。`);
     }
     // 视口外的坐标 CDP 打不中。scrollIntoView 之后仍在视口外，说明它在一个
@@ -919,6 +933,7 @@
     const baseline = await baselineOf(el);
     return {
       x, y, outside,
+      editor: editorKind(host),
       tag: el.tagName,
       role: roleOf(el),
       prefer: preferOf(el),
@@ -1209,7 +1224,7 @@
     realClick(el);
     const retry = await retryCombobox(el);
     invalidate();
-    return { data: { note: `已点击 [${p.ref || p.selector}] ${describeHit(el)}${retry}` } };
+    return { data: { note: `已点击 [${p.ref || p.selector || (p.find ? `${p.find.role || ''} "${p.find.name || ''}"`.trim() : '')}] ${describeHit(el)}${retry}` } };
   }
 
   // 自定义下拉「点了没反应」是最常见的一类卡住，而且完全静默：
@@ -1724,7 +1739,14 @@
   // uploadTarget（大文件不经过桥，只把 selector 交出去）。抽出来是为了两条路
   // 永远挑中同一个 input——两边各写一份的话，小文件和大文件会投到不同的框里。
   function findFileInput(p) {
-    if (p.selector) return document.querySelector(p.selector);
+    if (p.selector) {
+      let el = null;
+      try { el = document.querySelector(p.selector); } catch { throw fail('BAD_PARAMS', `不是合法的 CSS 选择器：${p.selector}`); }
+      // 给了选择器却没找到：报错，绝不退回去猜一个拖放区——那样文件会被拖到
+      // 一个遮罩层上，回执还说「已拖放」（Fabric Import 就这么失败过）
+      if (!el) throw fail('REF_NOT_FOUND', `这个框架里没有匹配 ${p.selector} 的元素（${location.href.slice(0, 100)}）。`);
+      return el;
+    }
     return [...document.querySelectorAll('input[type=file]')].find((el) => {
       const acc = el.getAttribute('accept') || '';
       return !acc || acc.split(',').some((a) => {
@@ -1739,11 +1761,100 @@
   // （公众号那个页面就有两个），不打标记就没法保证 CDP 那侧选中的是同一个。
   function doUploadTarget(p) {
     const input = findFileInput(p);
-    // 没有 input 的编辑器（X Article、Notion）只能拖放，而拖放需要文件字节 —— 让上游回落
-    if (!input || input.tagName !== 'INPUT') return { data: { drop: true } };
+    if (!input) return { data: { none: true } };
+    if (input.tagName !== 'INPUT' || (input.type || '').toLowerCase() !== 'file') {
+      throw fail('NOT_INTERACTABLE', `${p.selector} 不是 <input type=file>，是 <${input.tagName.toLowerCase()}>。拖放区请用 dropSelector。`);
+    }
     const mark = 'hc' + Math.random().toString(36).slice(2, 10);
     input.setAttribute('data-hc-fi', mark);
-    return { data: { selector: `input[data-hc-fi="${mark}"]`, accept: input.getAttribute('accept') || '' } };
+    return { data: { selector: `input[data-hc-fi="${mark}"]`, accept: input.getAttribute('accept') || '', hidden: !isVisible(input) } };
+  }
+
+  // 上传之后的核对：input 里现在是什么文件，页面上冒出了什么错误提示。
+  // 「设进去了」不等于「应用收下了」——无效 JSON 之类的拒绝只会体现在页面的提示里。
+  function fileState(p) {
+    let input = null;
+    try { input = p.selector ? document.querySelector(p.selector) : null; } catch { /* 忽略 */ }
+    const files = input?.files ? [...input.files].map((f) => `${f.name}（${Math.round(f.size / 1024)}KB）`) : null;
+    return { files, connected: !!input?.isConnected, errors: visibleErrors() };
+  }
+
+  // 页面上此刻可见的错误/告警文本（role=alert、aria-invalid 旁的说明、常见的 error 类名）
+  function visibleErrors() {
+    const out = [];
+    const seen = new Set();
+    for (const el of document.querySelectorAll('[role=alert],[role=alertdialog],[aria-live=assertive],.error,.errors,[class*="error-message" i],[class*="errorMessage"],[class*="validation" i],mat-error,.mat-error,.ms-MessageBar--error')) {
+      if (!isVisible(el)) continue;
+      const t = (el.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 300);
+      if (t && !seen.has(t)) { seen.add(t); out.push(t); }
+      if (out.length >= 8) break;
+    }
+    return out;
+  }
+
+  // ---------- 代码编辑器（Monaco / CodeMirror …） ----------
+  //
+  // 这类编辑器的内容在 JS 模型里，不在 DOM 上：DOM 只渲染看得见的那几十行，
+  // 隐藏 textarea 的 value 也只是一小截。读写都借编辑器自己的剪贴板处理：
+  // 先由 background 发一次真实 Ctrl+A 全选，再在这里派发**合成的** copy / paste
+  // 事件，带一个我们自己的 DataTransfer——编辑器把整段选中内容写进去（copy），
+  // 或从里面取出整段文本原样插入（paste，不走逐字输入的自动补括号/缩进）。
+  // 用户的系统剪贴板全程不碰。
+  const deepActive = () => {
+    let a = document.activeElement;
+    while (a?.shadowRoot?.activeElement) a = a.shadowRoot.activeElement;
+    return a;
+  };
+  const editorHostOf = (el) => el?.closest?.(EDITOR_HOSTS) || null;
+  const editorKind = (host) => {
+    if (!host) return null;
+    if (host.matches('.monaco-editor')) return 'monaco';
+    if (host.matches('.cm-editor')) return 'codemirror6';
+    if (host.matches('.CodeMirror')) return 'codemirror5';
+    if (host.matches('.ProseMirror')) return 'prosemirror';
+    if (host.matches('.ql-editor')) return 'quill';
+    if (host.matches('[data-slate-editor]')) return 'slate';
+    return 'editor';
+  };
+
+  // 发 Ctrl+A / Delete 之前确认焦点真在目标里。焦点没过来时那几下真实按键会落到
+  // 别处——宿主页面上的 Ctrl+A + Delete 可能删掉用户正在编辑的东西。
+  function focusCheck(p = {}) {
+    if (p.any) {
+      const a = deepActive();
+      if (!document.hasFocus()) return { ok: false, why: '这个框架没有拿到焦点' };
+      return a && a !== document.body ? { ok: true } : { ok: false, why: '框架里没有获得焦点的元素' };
+    }
+    const t = lastTarget;
+    if (!t || !t.isConnected) return { ok: false, why: '目标已经不在页面上' };
+    const host = editorHostOf(t) || t;
+    const a = deepActive();
+    const inside = !!a && (a === host || host.contains(a) || a === t);
+    if (!document.hasFocus()) return { ok: false, why: '这个框架没有拿到焦点' };
+    if (!inside) return { ok: false, why: `焦点在 <${(a?.tagName || 'body').toLowerCase()}> 上，不在目标里` };
+    return { ok: true };
+  }
+
+  function clipboardEvent(type, text) {
+    const target = deepActive();
+    if (!target || target === document.body) return { handled: false, why: '没有获得焦点的元素' };
+    const dt = new DataTransfer();
+    if (type === 'paste') dt.setData('text/plain', String(text ?? ''));
+    const ev = new ClipboardEvent(type, { clipboardData: dt, bubbles: true, cancelable: true, composed: true });
+    target.dispatchEvent(ev);
+    if (type === 'paste') invalidate();
+    return { handled: ev.defaultPrevented, text: type === 'copy' ? dt.getData('text/plain') : undefined, on: target.tagName };
+  }
+
+  // 编辑器旁边的校验信号：Monaco 的错误/警告波浪线、CodeMirror 的 lint 标记
+  function editorDiagnostics() {
+    const host = editorHostOf(lastTarget);
+    if (!host) return null;
+    return {
+      kind: editorKind(host),
+      errors: host.querySelectorAll('.squiggly-error,.cm-lintRange-error,.CodeMirror-lint-mark-error').length,
+      warnings: host.querySelectorAll('.squiggly-warning,.cm-lintRange-warning,.CodeMirror-lint-mark-warning').length,
+    };
   }
 
   function doUpload(p) {
@@ -1773,11 +1884,17 @@
     if (p.dropSelector) return dropFile(file, p, bytes.length);
 
     const input = findFileInput(p);
-    // 没有 file input 不等于不能上传：越来越多的编辑器（X 的 Article、Notion、语雀）
-    // 只监听拖放，页面上根本不存在 <input type=file>。之前这里直接报错，
-    // 等于把「往文章里插图」这一整类任务判了死刑。
-    if (!input || (input.tagName !== 'INPUT' && !p.selector)) return dropFile(file, p, bytes.length);
-    if (input.tagName !== 'INPUT') return dropFile(file, p, bytes.length, input);
+    // 没有 file input 时不再自己猜一个拖放区：猜中的常是遮罩层（mat-drawer-backdrop），
+    // 文件被拖到那里，回执却说「已拖放」。只拖放的编辑器（X Article、Notion）
+    // 由调用方用 dropSelector 明说拖到哪；入口要点按钮才出现的，用 trigger。
+    if (!input) {
+      throw fail('NO_FILE_INPUT',
+        `这个框架里没有 <input type=file>（${location.href.slice(0, 100)}）。`
+        + '入口要点一下才弹文件选择的，传 trigger（那个按钮的 ref/selector/find）；只收拖放的，传 dropSelector。');
+    }
+    if (input.tagName !== 'INPUT' || (input.type || '').toLowerCase() !== 'file') {
+      throw fail('NOT_INTERACTABLE', `${p.selector} 不是 <input type=file>，是 <${input.tagName.toLowerCase()}>。拖放区请用 dropSelector。`);
+    }
 
     const dt = new DataTransfer();
     dt.items.add(file);
@@ -1790,16 +1907,12 @@
   // 拖放上传。要点是**整套事件都要发**：只发 drop 的话，很多实现在 dragover 里
   // 才调 preventDefault 来「认领」这次拖放，没有它 drop 会被当成浏览器的默认行为
   // （在新标签页打开这个文件）而不是页面的上传。
-  function dropFile(file, p, bytes, hinted) {
-    let target = hinted
-      || (p.dropSelector && document.querySelector(p.dropSelector))
-      || document.querySelector('[class*="drop" i],[class*="upload" i],[contenteditable="true"],[role="textbox"]')
-      || document.activeElement
-      || document.body;
+  // 只拖到调用方明说的 dropSelector 上——不猜。
+  function dropFile(file, p, bytes) {
+    let target = null;
+    try { target = document.querySelector(p.dropSelector); } catch { throw fail('BAD_PARAMS', `不是合法的 CSS 选择器：${p.dropSelector}`); }
     if (!target) {
-      throw fail('REF_NOT_FOUND',
-        '页面上既没有 file input，也找不到可以拖放的目标。先点开上传入口让它出现，'
-        + '或用 selector（指定 input）/ dropSelector（指定拖放区）明确告诉我往哪儿放。');
+      throw fail('REF_NOT_FOUND', `这个框架里没有匹配 dropSelector ${p.dropSelector} 的元素（${location.href.slice(0, 100)}）。`);
     }
 
     // 2026-09-09 Tripo3D Studio 实测踩过的坑：很多站点的上传区是「一个
@@ -1829,16 +1942,19 @@
       target.dispatchEvent(e);
       return e;
     };
+    const where = `${target.tagName.toLowerCase()}${target.className ? '.' + String(target.className).trim().split(/\s+/)[0] : ''}`;
     ev('dragenter');
     const over = ev('dragover');
-    ev('drop');
+    // 页面不认领 dragover 就不 drop：那不是上传，是失败，不能报成功
+    if (!over.defaultPrevented) {
+      ev('dragleave');
+      throw fail('DROP_REJECTED', `${where} 没有接管拖放（dragover 未被 preventDefault），文件没有投进去。dropSelector 要指向真正的拖放区。`);
+    }
+    const drop = ev('drop');
     return {
       data: {
-        text: `已把 ${p.name}（${Math.round(bytes / 1024)}KB）拖放到 ${target.tagName.toLowerCase()}`
-          + `${target.className ? '.' + String(target.className).trim().split(/\s+/)[0] : ''}。`
-          + (over.defaultPrevented
-            ? '页面接管了这次拖放（dragover 被 preventDefault），说明目标选对了。'
-            : '⚠️ 页面没有接管 dragover——多半拖错了地方，用 dropSelector 指定真正的拖放区。'),
+        text: `已把 ${p.name}（${Math.round(bytes / 1024)}KB）拖放到 ${where}，页面接管了拖放`
+          + (drop.defaultPrevented ? '' : '（但 drop 没被 preventDefault，确认一下页面上有没有出现这个文件）') + '。',
       },
     };
   }
@@ -2057,6 +2173,17 @@
           case 'expect': return sendResponse(doExpect(msg));
           case 'upload': return sendResponse(doUpload(msg));
           case 'uploadTarget': return sendResponse(doUploadTarget(msg));
+          case 'fileState': return sendResponse({ data: fileState(msg) });
+          case 'focusCheck': return sendResponse({ data: focusCheck(msg) });
+          case 'pasteText': return sendResponse({ data: clipboardEvent('paste', msg.text) });
+          case 'copyText': return sendResponse({ data: clipboardEvent('copy') });
+          case 'editorDiagnostics': return sendResponse({ data: { diag: editorDiagnostics(), errors: visibleErrors() } });
+          // 给调试器认路：在本框架的 <html> 上打一次性标记（见 cdp.evaluateAt）
+          case 'markDoc': {
+            const mark = 'hc' + Math.random().toString(36).slice(2, 10);
+            document.documentElement.setAttribute('data-hc-doc', mark);
+            return sendResponse({ data: { selector: `html[data-hc-doc="${mark}"]` } });
+          }
           case 'scroll': return sendResponse(await doScroll(msg));
           case 'history':
             if (msg.action === 'back') history.back();

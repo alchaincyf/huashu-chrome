@@ -21,6 +21,8 @@ const REF = { type: 'string', description: 'Element ref from the latest snapshot
 const SNAP = { type: 'string', description: 'snapshotId the ref came from' };
 const TAB = { type: 'number', description: 'Target tab id. Omit to use the active controlled tab.' };
 const SEL = { type: 'string', description: 'CSS fallback for elements the snapshot cannot see. Skips ref safety checks.' };
+// 出现十几次，描述一句话。规则（句柄、STALE_FRAME）写在 frames 工具里，只出现一次
+const FRAME = { type: ['number', 'string'], description: 'iframe N from "iframe fN", or a frames() handle' };
 // 这个对象被 4 处引用，schema 每处都会完整展开一遍 —— 描述写长一个字，
 // agent 的 context 就多付四份。规则写在 STRATEGY 里，那里只出现一次。
 const FIND = {
@@ -53,8 +55,8 @@ const TOOLS = [
       'Capture the current page as a compact list of interactive elements with refs and state ' +
       '(value/checked/selected/expanded/disabled), plus dialogs, alerts and a text excerpt. ' +
       'Call this before any click/type. Cheap — prefer it over screenshots or eval. Refs ending in @fN live in ' +
-      'an iframe: pass them through unchanged, they route themselves.',
-    inputSchema: { type: 'object', properties: { tabId: TAB } },
+      'an iframe: pass them through unchanged, they route themselves. frameId = one frame in full.',
+    inputSchema: { type: 'object', properties: { tabId: TAB, frameId: FRAME } },
   },
   {
     name: 'navigate',
@@ -78,7 +80,7 @@ const TOOLS = [
       // 没有 button 参数：右键弹出的是浏览器原生菜单，扩展够不着，
       // 给了也只是个做不到的承诺；中键开新标签页用 tabs(action:"new") 更直接。
       properties: {
-        ref: REF, find: FIND, snapshotId: SNAP, selector: SEL, tabId: TAB, real: REAL, expect: EXPECT,
+        ref: REF, find: FIND, snapshotId: SNAP, selector: SEL, tabId: TAB, frameId: FRAME, real: REAL, expect: EXPECT,
         x: { type: 'number' }, y: { type: 'number' },
         dragTo: { type: 'object', description: '{x, y}: press at x,y, move here, release.' },
       },
@@ -91,8 +93,9 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        ref: REF, find: FIND, snapshotId: SNAP, selector: SEL, tabId: TAB, real: REAL, expect: EXPECT,
+        ref: REF, find: FIND, snapshotId: SNAP, selector: SEL, tabId: TAB, frameId: FRAME, real: REAL, expect: EXPECT,
         text: { type: 'string' },
+        paste: { type: 'boolean', description: 'Insert as one paste (auto in code editors).' },
         clear: { type: 'boolean', description: 'Clear existing value first. Default true.' },
         submit: { type: 'boolean', description: 'Press Enter after typing.' },
       },
@@ -154,8 +157,8 @@ const TOOLS = [
           anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }],
         },
         ref: { ...REF, description: 'Optional: focus this element first. Omit to send to the focused element.' },
-        snapshotId: SNAP,
-        tabId: TAB, real: REAL,
+        snapshotId: SNAP, selector: SEL,
+        tabId: TAB, frameId: FRAME, real: REAL,
         repeat: { type: 'number', description: 'Press N times (e.g. ArrowDown ×3). Max 50.' },
       },
       required: ['key'],
@@ -169,7 +172,7 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        tabId: TAB,
+        tabId: TAB, frameId: FRAME,
         format: { type: 'string', enum: ['markdown', 'text'] },
         scope: { type: 'string', enum: ['main', 'page'] },
       },
@@ -179,7 +182,7 @@ const TOOLS = [
     name: 'screenshot',
     description:
       'Screenshot the controlled tab, background tabs included. Prefer snapshot / read_text — ' +
-      'they cost far less. Returned at 60% scale as JPEG by default; full:true for 1:1 PNG (e.g. to read small text or measure pixels).',
+      'they cost far less. 60% JPEG by default; full:true for 1:1 PNG. Reply gives the scale: click x,y = image px ÷ scale.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -220,7 +223,7 @@ const TOOLS = [
         for: { type: 'string', enum: ['selector', 'text', 'idle'] },
         value: { type: 'string', description: 'CSS selector or text to wait for. Omit for idle.' },
         timeout: { type: 'number', description: 'Milliseconds, default 10000.' },
-        tabId: TAB,
+        tabId: TAB, frameId: FRAME,
       },
       required: ['for'],
     },
@@ -307,16 +310,16 @@ const TOOLS = [
   {
     name: 'upload',
     description:
-      'Attach a local file to the page (no extension can touch the OS file picker). Open the upload UI first. ' +
-      'Auto-picks a matching file input; for editors that only accept drag-and-drop (X Article, Notion) ' +
-      'pass dropSelector instead. Any size via a file input (browser reads the path); drag-drop caps at 48MB.',
+      'Attach a local file, no OS picker. Finds file inputs (hidden too) in every frame. No input until a button opens ' +
+      'the picker? Pass trigger. Drag-drop needs an explicit dropSelector (≤48MB). Reply shows the file taken and new error text.',
     inputSchema: {
       type: 'object',
       properties: {
         path: { type: 'string', description: 'Absolute path of the local file.' },
-        selector: { type: 'string', description: 'CSS selector of the file input. Omit to auto-detect by accept type.' },
-        dropSelector: { type: 'string', description: 'Drop the file onto this element instead. Use when the page has no file input.' },
-        tabId: TAB,
+        inputSelector: { type: 'string', description: 'input[type=file] selector; default: auto by accept' },
+        trigger: { type: 'object', description: '{ref|selector|find, frameId?} that opens the picker' },
+        dropSelector: { type: 'string' },
+        tabId: TAB, frameId: FRAME,
       },
       required: ['path'],
     },
@@ -337,7 +340,7 @@ const TOOLS = [
         extract: { type: 'object', description: 'field → sub-selector (optionally "sel@attr"). Omit to get plain text per match.' },
         html: { type: ['boolean', 'number'], description: 'Return outerHTML of matches instead, to inspect structure. true = 1200 chars each.' },
         limit: { type: 'number', description: 'Max matches, default 100.' },
-        tabId: TAB,
+        tabId: TAB, frameId: FRAME,
       },
     },
   },
@@ -362,7 +365,7 @@ const TOOLS = [
             type: 'object',
             properties: {
               do: { type: 'string', enum: ['click', 'type', 'select', 'fill', 'key', 'wait', 'scroll', 'navigate', 'read', 'repeat', 'if', 'assert'] },
-              ref: REF, find: FIND, selector: SEL,
+              ref: REF, find: FIND, selector: SEL, frameId: FRAME,
               text: { type: 'string', description: 'for type' },
               contains: { type: 'string', description: 'for read: find visible text' },
               attr: { type: 'string', description: 'for read: also report this attribute (value, checked, href…)' },
@@ -460,8 +463,29 @@ const TOOLS = [
       '(with `await`, `return` it). Prefer `query`/`read_text`.',
     inputSchema: {
       type: 'object',
-      properties: { expr: { type: 'string' }, tabId: TAB },
+      properties: { expr: { type: 'string' }, tabId: TAB, frameId: FRAME },
       required: ['expr'],
+    },
+  },
+  {
+    name: 'frames',
+    description:
+      'All frames: id, handle, parent, visible size, status, URL. A handle as frameId is refused once that frame loads another document.',
+    inputSchema: { type: 'object', properties: { tabId: TAB } },
+  },
+  {
+    name: 'editor',
+    description:
+      'Read or replace the WHOLE text of a code editor (Monaco, CodeMirror), e.g. a JSON view. Replace pastes one block, ' +
+      'then reads back: length, sha256, exact match, error markers. System clipboard untouched. Monaco: selector ".monaco-editor textarea".',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['read', 'replace'] },
+        text: { type: 'string', description: 'replace: the complete new content.' },
+        ref: REF, find: FIND, selector: SEL, snapshotId: SNAP, tabId: TAB, frameId: FRAME,
+        echo: { type: 'boolean', description: 'replace: also return the read-back text' },
+      },
     },
   },
   {
@@ -535,6 +559,14 @@ warning change target or approach, never repeat the same call.
 A STEP NEEDS A HUMAN (captcha, QR login, OTP, payment)? Call \`ask\` — never retry or work
 around. Never let a download put a dialog on their screen: see the \`download\` tool for the
 required order. OS file dialogs are beyond any extension.`;
+
+// 截图的几何：位图像素 ↔ 页面 CSS px。click 的 x,y 要的是后者
+export function shotGeometry(d) {
+  if (!d?.viewport || !d?.image) return `scale ${d?.scale ?? 1}`;
+  const k = d.scale ? Math.round((1 / d.scale) * 10000) / 10000 : 1;
+  return `Viewport ${d.viewport.width}×${d.viewport.height} CSS px (scroll ${d.scroll?.x ?? 0},${d.scroll?.y ?? 0}; devicePixelRatio ${d.dpr ?? '?'}). `
+    + `Image ${d.image.width}×${d.image.height} px, scale ${d.scale}. For click x,y: CSS px = image px × ${k}.`;
+}
 
 // 页面来的文本全部走这里。边界标记 + 降权说明，both 是给模型看的。
 function wrapUntrusted(body, meta = '') {
@@ -616,7 +648,10 @@ export async function startMcpServer({ client = 'unknown', profile = process.env
         const st = fs.statSync(args.path);
         const ext = path.extname(args.path).toLowerCase();
         const mime = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.mp4': 'video/mp4', '.mov': 'video/quicktime', '.pdf': 'application/pdf' }[ext] || 'application/octet-stream';
-        const base = { path: args.path, name: path.basename(args.path), type: mime, bytes: st.size, selector: args.selector, dropSelector: args.dropSelector };
+        const base = {
+          path: args.path, name: path.basename(args.path), type: mime, bytes: st.size,
+          selector: args.inputSelector ?? args.selector, dropSelector: args.dropSelector, frameId: args.frameId, trigger: args.trigger,
+        };
         // 上传本身可能很慢（本机→浏览器只是投喂，但页面自己的上传要时间），给足预算
         const timeoutMs = Math.max(60000, Math.round(st.size / (1024 * 1024)) * 1000);
         let out = args.dropSelector ? null : await bridge.call('upload', base, { tabId: args.tabId, timeoutMs });
@@ -683,10 +718,10 @@ export async function startMcpServer({ client = 'unknown', profile = process.env
         if (args.savePath) {
           fs.mkdirSync(path.dirname(args.savePath), { recursive: true });
           fs.writeFileSync(args.savePath, Buffer.from(b64, 'base64'));
-          return { content: [{ type: 'text', text: `已保存截图 ${Math.round(b64.length * 3 / 4 / 1024)}KB（${mime}${data.scale && data.scale !== 1 ? `，${Math.round(data.scale * 100)}% 缩放` : ''}）→ ${args.savePath}` }] };
+          return { content: [{ type: 'text', text: `已保存截图 ${Math.round(b64.length * 3 / 4 / 1024)}KB（${mime}）→ ${args.savePath}\n${shotGeometry(data)}` }] };
         }
         return {
-          content: [{ type: 'image', data: b64, mimeType: mime }],
+          content: [{ type: 'image', data: b64, mimeType: mime }, { type: 'text', text: shotGeometry(data) }],
         };
       }
       // 二进制只落盘、只报路径——把 base64 倒进 context 是纯粹的浪费
