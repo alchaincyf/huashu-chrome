@@ -15,7 +15,7 @@ let bridge;
 
 before(async () => {
   // 全部压到百毫秒级：静默 300ms 就探，探了 300ms 没回音才杀，每 100ms 查一轮
-  bridge = startBridge({ port: PORT, token: 'c'.repeat(64), writeInfo: false, silenceMs: 300, probeMs: 300, tickMs: 100 });
+  bridge = startBridge({ port: PORT, token: 'c'.repeat(64), writeInfo: false, silenceMs: 300, probeMs: 300, tickMs: 100, extensionIds: '*' });
   await bridge.ready;
 });
 after(() => bridge.close());

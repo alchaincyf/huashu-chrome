@@ -19,7 +19,7 @@ let bridge;
 
 before(async () => {
   // orphanGraceMs：断线在途命令的宽限。生产是 15 秒，测试里等不起，压到 300ms
-  bridge = startBridge({ port: PORT, token: TOKEN, writeInfo: false, orphanGraceMs: 300 });
+  bridge = startBridge({ port: PORT, token: TOKEN, writeInfo: false, orphanGraceMs: 300, extensionIds: '*' });
   await bridge.ready;
 });
 after(() => bridge.close());

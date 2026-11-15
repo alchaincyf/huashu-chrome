@@ -12,7 +12,7 @@ const URL = `ws://127.0.0.1:${PORT}`;
 let bridge;
 
 before(async () => {
-  bridge = startBridge({ port: PORT, token: TOKEN, writeInfo: false });
+  bridge = startBridge({ port: PORT, token: TOKEN, writeInfo: false, extensionIds: '*' });
   await bridge.ready;
 });
 after(() => bridge.close());
@@ -53,6 +53,31 @@ test('伪造成 chrome-extension 的网页 Origin：浏览器不可能发出，�
   const m = await firstMessage(ws);
   assert.equal(m.type, 'welcome');
   ws.close();
+});
+
+// #14：默认配置的桥只认商店版和 manifest key 推出的扩展 id，别的扩展冒充不进来
+test('默认配置只放行自己的扩展 id', async () => {
+  const { STORE_EXTENSION_ID, manifestExtensionId } = await import('../src/lib/paths.js');
+  const port = 8996;
+  const strict = startBridge({ port, token: TOKEN, writeInfo: false });
+  await strict.ready;
+  const hello = (origin) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`, { origin });
+    ws.on('open', () => ws.send(JSON.stringify({ type: 'hello', role: 'extension', extId: origin, v: 1 })));
+    return firstMessage(ws).finally(() => ws.close());
+  };
+  try {
+    assert.equal((await hello(`chrome-extension://${STORE_EXTENSION_ID}`)).type, 'welcome');
+    assert.equal((await hello(`chrome-extension://${manifestExtensionId()}`)).type, 'welcome');
+    await assert.rejects(hello('chrome-extension://abcdefghijklmnopabcdefghijklmnop'), (e) => /403/.test(e.message));
+    await assert.rejects(hello('https://evil.example.com'), (e) => /403/.test(e.message));
+    // 显式放行：环境变量现读，不用重启桥
+    process.env.HUASHU_CHROME_TRUSTED_EXTENSION_IDS = 'abcdefghijklmnopabcdefghijklmnop';
+    assert.equal((await hello('chrome-extension://abcdefghijklmnopabcdefghijklmnop')).type, 'welcome');
+  } finally {
+    delete process.env.HUASHU_CHROME_TRUSTED_EXTENSION_IDS;
+    strict.close();
+  }
 });
 
 test('agent 用错 token 连不上', async () => {
@@ -295,7 +320,7 @@ test('桥给每条命令盖章 sid：每会话稳定、会话间互异，且不�
 // 重新数，于是「换了个桥」和「换了个会话」在扩展眼里长得一模一样——所有会话
 // 的受控标签页同时失效，然后各自去继承同一个全局 tab。实测一晚桥重启 38 次。
 test('桥换了一个进程，同一个 sessionId 盖出来的章不变', async () => {
-  const other = startBridge({ port: PORT + 2, token: TOKEN, writeInfo: false });
+  const other = startBridge({ port: PORT + 2, token: TOKEN, writeInfo: false, extensionIds: '*' });
   await other.ready;
   try {
     const stamp = async (url, origin) => {

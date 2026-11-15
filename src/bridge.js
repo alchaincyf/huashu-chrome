@@ -5,10 +5,11 @@
 //   它不解析页面、不认识 ref、不知道 snapshot 是什么——那些全在扩展侧。
 //
 // 安全边界就在 verifyClient：浏览器发起 WS 时强制带 Origin 且不可伪造，
-// 网页的 Origin 是自己的域名，扩展的是 chrome-extension://<id>。只放后者进来。
+// 网页的 Origin 是自己的域名，扩展的是 chrome-extension://<id>。只放后者进来，
+// 而且 id 得是我们自己的（见 lib/paths.js 的 trustedExtensionIds，#14）。
 import { WebSocketServer } from 'ws';
 import fs from 'node:fs';
-import { DEFAULT_PORT, writeBridgeInfo, newToken, tokenEquals, audit, ensureHome, ALLOWLIST_FILE } from './lib/paths.js';
+import { DEFAULT_PORT, writeBridgeInfo, newToken, tokenEquals, audit, ensureHome, ALLOWLIST_FILE, trustedExtensionIds } from './lib/paths.js';
 import { VERSION } from './lib/version.js';
 // 纯字符串判定、不碰 chrome API，所以桥这边直接复用，不再抄一份
 import { scrubProse } from '../extension/redact.js';
@@ -40,8 +41,9 @@ const ORPHAN_GRACE_MS = 15000;       // 扩展断开时在途命令的宽限：�
 
 // writeInfo=false 供测试用：不写 bridge.json，否则测试桥的 token 会盖掉
 // 真在跑的那个桥，用户所有 agent 会话当场断连。
+// extensionIds 也只给测试用：'*' 放行任意扩展 id，数组则只认这些；不传就按 trustedExtensionIds() 现读。
 export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo = true, orphanGraceMs = ORPHAN_GRACE_MS,
-  silenceMs = EXT_SILENCE_MS, probeMs = EXT_PROBE_MS, tickMs = 20000 } = {}) {
+  silenceMs = EXT_SILENCE_MS, probeMs = EXT_PROBE_MS, tickMs = 20000, extensionIds } = {}) {
   ensureHome();
 
   const agents = new Set();      // role=agent 的连接
@@ -113,13 +115,25 @@ export function startBridge({ port = DEFAULT_PORT, token = newToken(), writeInfo
   }
   const extLabel = (ws) => `Chrome ${ws.chromeVersion || '?'}${ws.headless ? ' · headless' : ''} · 扩展 ${ws.extVersion}`;
 
+  const rejectedExt = new Set();
   const wss = new WebSocketServer({
     host: '127.0.0.1',
     port,
     verifyClient: (info, done) => {
       const origin = info.req.headers.origin;
       if (origin === undefined) return done(true);              // Node 侧，进握手后验 token
-      if (origin.startsWith('chrome-extension://')) return done(true);
+      if (origin.startsWith('chrome-extension://')) {
+        const id = origin.slice('chrome-extension://'.length);
+        const trusted = extensionIds === '*' || (extensionIds ? new Set(extensionIds) : trustedExtensionIds()).has(id);
+        if (trusted) return done(true);
+        // 别的扩展冒充 huashu-chrome。被拒的扩展会按退避一直重连，日志每个 id 只说一次
+        audit({ ev: 'reject_origin', origin });
+        if (!rejectedExt.has(id)) {
+          rejectedExt.add(id);
+          log(`拒绝了未认可的扩展 ${id}。自己的 fork 或本地构建，把 id 加进 ~/.huashu-chrome/trusted-extensions.json 的 ids 数组`);
+        }
+        return done(false, 403, 'untrusted extension');
+      }
       audit({ ev: 'reject_origin', origin });                   // 网页想连桥——这就是攻击面，堵在这里
       done(false, 403, 'forbidden origin');
     },
