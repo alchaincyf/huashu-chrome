@@ -27,6 +27,43 @@ const PRESETS = [
     // A tab here is signed out; its cookies would not log anything in.
     signInPaths: ['/ap/signin', '/signin'],
   },
+  // Social accounts read by a local dashboard (Social Hub): read-only API calls with the profile's own login.
+  {
+    id: 'threads',
+    label: 'Threads',
+    hosts: ['www.threads.com'],
+    cookieUrls: ['https://www.threads.com/'],
+    cookieDomains: ['threads.com', 'www.threads.com'],
+    openUrl: 'https://www.threads.com/',
+    signInPaths: ['/login'],
+  },
+  {
+    id: 'instagram',
+    label: 'Instagram',
+    hosts: ['www.instagram.com'],
+    cookieUrls: ['https://www.instagram.com/'],
+    cookieDomains: ['instagram.com', 'www.instagram.com'],
+    openUrl: 'https://www.instagram.com/',
+    signInPaths: ['/accounts/login', '/challenge'],
+  },
+  {
+    id: 'facebook',
+    label: 'Facebook and Meta Business Suite',
+    hosts: ['www.facebook.com', 'business.facebook.com'],
+    cookieUrls: ['https://www.facebook.com/', 'https://business.facebook.com/'],
+    cookieDomains: ['facebook.com', 'www.facebook.com', 'business.facebook.com'],
+    openUrl: 'https://www.facebook.com/',
+    signInPaths: ['/login', '/login.php', '/checkpoint'],
+  },
+  {
+    id: 'x',
+    label: 'X',
+    hosts: ['x.com'],
+    cookieUrls: ['https://x.com/'],
+    cookieDomains: ['x.com'],
+    openUrl: 'https://x.com/home',
+    signInPaths: ['/login', '/i/flow/login'],
+  },
 ];
 
 const GRANTS = new Map(PRESETS.map((g) => [g.id, Object.freeze({ ...g })]));

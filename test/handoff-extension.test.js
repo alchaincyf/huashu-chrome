@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { webcrypto } from 'node:crypto';
 import { handoffSession, handoffAad } from '../extension/handoff/session.js';
 import { handoffStatus, handoffResolveTab } from '../extension/handoff/control.js';
-import { GRANTS_KEY, HANDOFF_FORMAT, listGrants, getGrant, grantUrl } from '../extension/handoff/grants.js';
+import { GRANTS_KEY, HANDOFF_FORMAT, listGrants, getGrant, grantUrl, onSignInPage } from '../extension/handoff/grants.js';
 
 const TAB = 17;
 const SC = 'https://sellercentral.amazon.com/fba/shippingqueue';
@@ -74,8 +74,8 @@ const code = (c) => (e) => e?.code === c;
 
 // ---------- grants ----------
 
-test('the Amazon preset is the only grant and its URL check is strict', () => {
-  assert.deepEqual(listGrants().map((g) => g.id), ['amazon-sc']);
+test('the fixed presets include Amazon and the social accounts and their URL checks are strict', () => {
+  assert.deepEqual(listGrants().map((g) => g.id), ['amazon-sc', 'threads', 'instagram', 'facebook', 'x']);
   const g = getGrant('amazon-sc');
   assert.ok(grantUrl(g, SC));
   for (const bad of [
@@ -85,6 +85,18 @@ test('the Amazon preset is the only grant and its URL check is strict', () => {
   assert.equal(getGrant('AMAZON-SC'), null);
   assert.equal(getGrant('../x'), null);
   assert.ok(Object.isFrozen(g));
+  const social = {
+    threads: ['https://www.threads.com/@someone', ['https://threads.com.evil.com/', 'http://www.threads.com/', 'https://www.instagram.com/']],
+    instagram: ['https://www.instagram.com/reel/abc/', ['https://instagram.com.evil.com/', 'https://user:pw@www.instagram.com/', 'https://www.threads.com/']],
+    facebook: ['https://business.facebook.com/latest/posts', ['https://facebook.com.evil.com/', 'https://www.facebook.com:8443/', 'https://x.com/']],
+    x: ['https://x.com/home', ['https://x.com.evil.com/', 'http://x.com/', 'https://twitter.com/']],
+  };
+  for (const [id, [good, bads]] of Object.entries(social)) {
+    const g2 = getGrant(id);
+    assert.ok(grantUrl(g2, good), good);
+    for (const bad of bads) assert.equal(grantUrl(g2, bad), null, bad);
+  }
+  assert.ok(onSignInPage(getGrant('instagram'), 'https://www.instagram.com/accounts/login/'));
 });
 
 // ---------- handoff_session ----------
@@ -186,7 +198,10 @@ test('handoff_status reports every grant with tab metadata and never reads cooki
   const s = await handoffStatus({}, IDENTITY, api);
   assert.equal(s.instanceId, 'inst-id');
   assert.equal(s.cookiePermission, true);
-  assert.deepEqual(s.grants.map((g) => [g.id, g.enabled, g.ready, g.tabs.map((t) => t.tabId)]), [['amazon-sc', true, true, [TAB]]]);
+  assert.deepEqual(s.grants.map((g) => [g.id, g.enabled, g.ready, g.tabs.map((t) => t.tabId)]), [
+    ['amazon-sc', true, true, [TAB]],
+    ['threads', false, false, []], ['instagram', false, false, []], ['facebook', false, false, []], ['x', false, false, []],
+  ]);
   assert.deepEqual(s.grants[0].cookieDomains, ['amazon.com', 'sellercentral.amazon.com']);
   assert.equal(calls.cookieQueries.length, 0);
   await assert.rejects(handoffStatus({ extra: 1 }, IDENTITY, api), code('HANDOFF_INVALID_REQUEST'));
